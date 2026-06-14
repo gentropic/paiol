@@ -1,0 +1,13 @@
+# dependencies (paiol is zero-runtime-dep; vendored libs live in vendor/ and ARE committed)
+node_modules/
+
+# build output (single-file app, generated)
+paiol.html
+dist/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
