@@ -21,6 +21,28 @@ const stripAccents = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
 const normName = (s) => stripAccents(String(s || '').toLowerCase()).replace(/\s+/g, ' ').trim();
 const titleish = (s) => String(s || '').trim();
 
+// Curated typo corrections (normalized typo → normalized canonical). EXPLICIT and reviewed —
+// each is a clear misspelling of the SAME ingredient. We deliberately do NOT fuzzy/edit-distance
+// merge (that would fuse genuinely different ingredients: chocolate 50%/70%, mel/sal, milho/ninho,
+// azeite/leite, frango/morango, …). Add a line here when you spot another typo in the report.
+const ALIASES = {
+  '0vos': 'ovos', 'ovo': 'ovos',
+  'fainha de trigo': 'farinha de trigo',
+  'farina amendoas': 'farinha amendoas',
+  'farina integral': 'farinha integral',
+  'farina sem gluten': 'farinha sem gluten',
+  'farinha trigo interal': 'farinha trigo integral',
+  'femento': 'fermento', 'femento quimico': 'fermento quimico',
+  'leite condesado': 'leite condensado',
+  'oleo girasssol': 'oleo girassol',
+  'pstache': 'pistache',
+  'bicabornato': 'bicarbonato',
+  'demeara': 'demerara', 'demererara': 'demerara',
+  'acuca demerara': 'acucar demerara',
+  'tempero': 'temperos',
+};
+const canonKey = (raw) => { const n = normName(raw); return ALIASES[n] || n; };
+
 function normUnit(u) {
   const n = normName(u);
   if (!n) return null;
@@ -68,7 +90,7 @@ async function main() {
   /** @type {Map<string, { names: Map<string,number>, units: Map<string,number>, prices: number[] }>} */
   const ingAcc = new Map();
   const touchIng = (raw) => {
-    const k = normName(raw);
+    const k = canonKey(raw); // collapse curated typos to one canonical key
     if (!ingAcc.has(k)) ingAcc.set(k, { names: new Map(), units: new Map(), prices: [] });
     return ingAcc.get(k);
   };
@@ -167,12 +189,17 @@ async function main() {
   }
 
   // ── Resolve canonical ingredient names + prices ──
-  const canonical = new Map(); // normName -> display name
+  const canonical = new Map();   // canonKey -> display name
+  const stockUnitOf = new Map(); // canonKey -> stock unit
   const insumos = [];
   for (const [k, acc] of ingAcc) {
-    const name = mode(acc.names) || k;
+    // Prefer a non-typo spelling for the display name (exclude raw names that are known typos);
+    // fall back to the most common spelling only if every occurrence was a typo.
+    const good = new Map([...acc.names].filter(([nm]) => !ALIASES[normName(nm)]));
+    const name = mode(good.size ? good : acc.names) || k;
     canonical.set(k, name);
     const unit = mode(acc.units) || 'un';
+    stockUnitOf.set(k, unit);
     const price = acc.prices.length ? modeNumber(acc.prices) : (master.get(k) ?? null);
     if (price == null) W(`insumo "${name}": sem preço derivável (custo 0 em todas as receitas)`);
     // Cross-check against the INGREDIENTES master.
@@ -189,10 +216,9 @@ async function main() {
   // insumo's unit (qty unchanged — she treats them interchangeably) and flag it. Same-dimension
   // units (g for a kg insumo) are kept and converted properly by the engine.
   const DIM = { g: 'm', kg: 'm', ml: 'v', l: 'v', un: 'c' };
-  const stockUnitOf = new Map(insumos.map((i) => [normName(i.nome), i.unidade]));
   for (const r of receitas) {
     r.itens = r.itens.map((it) => {
-      const key = normName(it.insumoRaw);
+      const key = canonKey(it.insumoRaw);
       const su = stockUnitOf.get(key) || 'un';
       let u = it.unidade || su;
       if (DIM[u] !== DIM[su]) {
