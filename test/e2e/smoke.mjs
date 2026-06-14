@@ -23,6 +23,39 @@ async function waitForServer(url, timeoutMs = 10_000) {
   }
 }
 
+// Seed a fresh business (priced insumo → recipe with a component → product) for tests that need
+// downstream data. Leaves the page on the Produtos tab.
+async function seedBusiness(page) {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.evaluate(() => new Promise((r) => {
+    const q = indexedDB.deleteDatabase('paiol');
+    q.onsuccess = q.onerror = q.onblocked = () => r();
+  }));
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.fill('[data-testid="ins-name"]', 'Farinha');
+  await page.selectOption('[data-testid="ins-unit"]', 'kg');
+  await page.fill('[data-testid="ins-price"]', '5');
+  await page.click('[data-testid="ins-add"]');
+  await page.click('button.pa-tab:has-text("Receitas")');
+  await page.fill('[data-testid="rec-name"]', 'Pão');
+  await page.fill('[data-testid="rec-yield"]', '10');
+  await page.selectOption('[data-testid="rec-yunit"]', 'un');
+  await page.fill('[data-testid="rec-active"]', '30');
+  await page.fill('[data-testid="rec-oven"]', '40');
+  await page.click('[data-testid="rec-create"]');
+  await page.waitForSelector('[data-testid="rec-compref"]');
+  await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Farinha' });
+  await page.fill('[data-testid="rec-compqty"]', '500');
+  await page.selectOption('[data-testid="rec-compunit"]', 'g');
+  await page.click('[data-testid="rec-compadd"]');
+  await page.click('button.pa-tab:has-text("Produtos")');
+  await page.fill('[data-testid="prod-name"]', 'Pãozinho');
+  await page.selectOption('[data-testid="prod-recipe"]', { label: 'Pão' });
+  await page.fill('[data-testid="prod-portion"]', '1');
+  await page.click('[data-testid="prod-create"]');
+  await page.waitForSelector('.pa-list-item');
+}
+
 describe('paiol UI smoke', () => {
   before(async () => {
     ({ chromium } = await import('playwright'));
@@ -142,6 +175,43 @@ describe('paiol UI smoke', () => {
     assert.match(priceText, /R\$\s*\d+,\d{2}/, `expected a money price, got "${priceText}"`);
     assert.doesNotMatch(await page.textContent('.pa-card'), /incompleto/, 'pricing reported incomplete');
     assert.deepEqual(errors, [], `errors during flow: ${errors.join(' | ')}`);
+    await page.close();
+  });
+
+  test('log a fornada and a venda (actuals), with running totals', async () => {
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+
+    await seedBusiness(page);
+
+    // Fornada for the recipe.
+    await page.click('button.pa-tab:has-text("Fornadas")');
+    await page.selectOption('[data-testid="forn-recipe"]', { label: 'Pão' });
+    await page.fill('[data-testid="forn-units"]', '9');
+    await page.fill('[data-testid="forn-active"]', '35');
+    await page.click('[data-testid="forn-add"]');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-list'), /Pão/);
+
+    // Venda — price comes pre-filled from the suggested price; just register.
+    await page.click('button.pa-tab:has-text("Vendas")');
+    await page.selectOption('[data-testid="venda-product"]', { label: 'Pãozinho' });
+    await page.fill('[data-testid="venda-qty"]', '3');
+    await page.click('[data-testid="venda-add"]');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-list'), /Pãozinho/);
+    assert.match(await page.textContent('.pa-card'), /lucro/); // running profit total
+
+    // Survives reload (events persisted to IndexedDB).
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.click('button.pa-tab:has-text("Vendas")');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-list'), /Pãozinho/);
+
+    assert.deepEqual(errors, [], `errors during actuals flow: ${errors.join(' | ')}`);
     await page.close();
   });
 

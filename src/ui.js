@@ -6,14 +6,14 @@
 // on submit, so typing is never interrupted by a re-render.
 
 import {
-  estimateLens, costBreakdown, priceFromCost,
+  estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice,
   PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 const TABS = [
   ['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'],
-  ['precos', 'Preços'], ['ajustes', 'Ajustes'],
+  ['precos', 'Preços'], ['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['ajustes', 'Ajustes'],
 ];
 
 // ── DOM + format helpers ───────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ const brl = (n) => 'R$ ' + (Number(n) || 0).toFixed(2).replace('.', ',');
 const pct = (frac) => (Number(frac) || 0) * 100;
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
+const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
 /** Parse a number that may use a comma decimal; '' / invalid → null. */
 function parseNum(s) {
   if (s == null) return null;
@@ -54,7 +55,7 @@ function parseNum(s) {
 export function renderApp(root, ctx) {
   const panels = {
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
-    precos: precosPanel, ajustes: ajustesPanel,
+    precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel, ajustes: ajustesPanel,
   };
   root.replaceChildren(
     el('header', { class: 'pa-header' }, [
@@ -314,6 +315,135 @@ function friendlyError(e) {
   if (e instanceof MarkupError) return 'Margem + taxa somam 100% ou mais — ajuste em Ajustes.';
   if (e instanceof RefError) return 'A receita deste produto não foi encontrada.';
   return String(e && e.message ? e.message : e);
+}
+
+// ── Fornadas (Batch — production runs; actuals) ──────────────────────────────────
+
+function fornadasPanel(ctx) {
+  const { store } = ctx;
+  const recipes = store.state.recipes;
+  const recipeSel = el('select', { class: 'pa-input', 'data-testid': 'forn-recipe' },
+    recipes.map((r) => el('option', { value: r.id, text: r.name })));
+  const units = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-units', type: 'text', inputmode: 'decimal', placeholder: 'un produzidas' });
+  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos (opc.)' });
+
+  function register() {
+    const r = store.get('recipes', recipeSel.value);
+    const y = parseNum(units.value);
+    if (!r || !(y > 0)) return;
+    const a = parseNum(active.value);
+    ctx.actions.mutate((s) => s.addBatch({
+      id: uuid(), at: nowIso(), recipeId: r.id, yieldActual: y, ...(a != null ? { activeMinutes: a } : {}),
+    }));
+  }
+
+  const batches = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  return el('section', { class: 'pa-card' }, [
+    el('h2', { text: 'Fornadas' }),
+    batches.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma fornada registrada.' })
+      : el('ul', { class: 'pa-list' }, batches.map((b) => {
+          const r = store.get('recipes', b.recipeId);
+          return el('li', { class: 'pa-list-item' }, [
+            el('div', { class: 'pa-grow' }, [
+              el('strong', { text: r ? r.name : '(receita removida)' }),
+              el('span', { class: 'pa-muted', text: `  ${fmtDate(b.at)} · ${b.yieldActual} produzidas`
+                + (r ? ` (previsto ${r.yieldNominal})` : '') + (b.activeMinutes != null ? ` · ${b.activeMinutes}min` : '') }),
+            ]),
+          ]);
+        })),
+    recipes.length === 0
+      ? el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' })
+      : el('div', {}, [
+          el('h3', { class: 'pa-h3', text: 'Registrar fornada' }),
+          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Receita' }), recipeSel]),
+          el('div', { class: 'pa-row pa-form' }, [units, active,
+            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'forn-add', onclick: register }, 'Registrar')]),
+          el('p', { class: 'pa-hint', text: 'Quantas unidades saíram e, se quiser, os minutos ativos reais. O resto puxa da receita e ajusta o custo real.' }),
+        ]),
+  ]);
+}
+
+// ── Vendas (Sale — revenue, with snapshotted cost for true margin) ───────────────
+
+function vendasPanel(ctx) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const products = store.state.products;
+  const es = store.toEngineStore();
+  const lens = estimateLens(config);
+  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return null; } };
+
+  const prodSel = el('select', { class: 'pa-input', 'data-testid': 'venda-product' },
+    products.map((p) => el('option', { value: p.id, text: p.name })));
+  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
+  const price = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-price', type: 'text', inputmode: 'decimal', placeholder: 'preço' });
+  const channel = el('input', { class: 'pa-input pa-narrow', type: 'text', placeholder: 'canal (opc.)' });
+
+  const initSug = products[0] ? suggested(products[0].id) : null;
+  if (initSug != null) price.value = initSug.toFixed(2).replace('.', ',');
+  prodSel.addEventListener('change', () => {
+    const s = suggested(prodSel.value);
+    price.value = s != null ? s.toFixed(2).replace('.', ',') : '';
+  });
+
+  function register() {
+    const p = store.get('products', prodSel.value);
+    const q = parseNum(qty.value);
+    const up = parseNum(price.value);
+    if (!p || !(q > 0) || up == null) return;
+    let cost = 0;
+    try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
+    ctx.actions.mutate((s) => s.addSale({
+      id: uuid(), at: nowIso(), productId: p.id, qty: q, unitPrice: up,
+      paymentFeePct: config.paymentFeePct, costSnapshot: cost,
+      ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
+    }));
+  }
+
+  const sales = store.state.sales.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  let revenue = 0; let profit = 0;
+  for (const s of sales) {
+    const rev = s.qty * s.unitPrice;
+    revenue += rev;
+    profit += rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
+  }
+
+  return el('section', { class: 'pa-card' }, [
+    el('h2', { text: 'Vendas' }),
+    sales.length > 0 && el('div', { class: 'pa-row pa-totals' }, [
+      el('span', { class: 'pa-grow' }, [el('strong', { text: 'Receita ' }), brl(revenue)]),
+      el('span', { class: profit >= 0 ? 'pa-badge pa-ok' : 'pa-badge pa-bad', text: `lucro ${brl(profit)}` }),
+    ]),
+    sales.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma venda registrada.' })
+      : el('ul', { class: 'pa-list' }, sales.map((s) => saleRow(store, s))),
+    products.length === 0
+      ? el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' })
+      : el('div', {}, [
+          el('h3', { class: 'pa-h3', text: 'Registrar venda' }),
+          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Produto' }), prodSel]),
+          el('div', { class: 'pa-row pa-form' }, [
+            el('span', { class: 'pa-lab', text: 'Qtd' }), qty,
+            el('span', { class: 'pa-lab', text: 'Preço' }), price, channel,
+            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'venda-add', onclick: register }, 'Registrar'),
+          ]),
+          el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
+        ]),
+  ]);
+}
+
+function saleRow(store, s) {
+  const p = store.get('products', s.productId);
+  const rev = s.qty * s.unitPrice;
+  const prof = rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
+  return el('li', { class: 'pa-list-item' }, [
+    el('div', { class: 'pa-grow' }, [
+      el('strong', { text: p ? p.name : '(produto removido)' }),
+      el('span', { class: 'pa-muted', text: `  ${fmtDate(s.at)} · ${s.qty} × ${brl(s.unitPrice)}${s.channel ? ` · ${s.channel}` : ''}` }),
+    ]),
+    el('span', { class: prof >= 0 ? 'pa-num' : 'pa-num pa-bad', text: brl(prof) }),
+  ]);
 }
 
 // ── Ajustes (config + Dropbox) ───────────────────────────────────────────────────
