@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#9a4a2f" />
+  <title>Quitutes do Paiol</title>
+  <style>
+    /* Phone-first; warm confeitaria palette. Tokens mirror the GCU --au-* roles loosely so we
+       can swap in @gcu/switchboard later without touching markup. */
+    :root {
+      --au-bg: #fbf6f0;
+      --au-surface: #ffffff;
+      --au-fg: #2a211c;
+      --au-fg-soft: #6b5d54;
+      --au-border: #ece0d5;
+      --au-action: #9a4a2f;     /* terracotta */
+      --au-action-fg: #ffffff;
+      --au-ok: #2f7d4f;
+      --au-radius: 12px;
+      --au-shadow: 0 1px 3px rgba(60, 40, 30, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--au-bg); color: var(--au-fg);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #app { max-width: 640px; margin: 0 auto; padding: 16px 16px 48px; }
+
+    .pa-header { padding: 8px 4px 16px; }
+    .pa-header h1 { margin: 0; font-size: 1.5rem; color: var(--au-action); }
+    .pa-sub { margin: 2px 0 0; color: var(--au-fg-soft); font-size: 0.9rem; }
+
+    .pa-card { background: var(--au-surface); border: 1px solid var(--au-border);
+      border-radius: var(--au-radius); box-shadow: var(--au-shadow); padding: 16px; margin: 0 0 16px; }
+    .pa-card h2 { margin: 0 0 12px; font-size: 1.15rem; }
+
+    .pa-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .pa-row + .pa-row { margin-top: 10px; }
+    .pa-form { margin-top: 14px; }
+
+    .pa-badge { font-size: 0.78rem; padding: 2px 8px; border-radius: 999px;
+      background: var(--au-border); color: var(--au-fg-soft); margin-left: auto; }
+    .pa-badge.pa-ok { background: #e3f2e8; color: var(--au-ok); }
+
+    .pa-btn { font: inherit; font-size: 0.95rem; padding: 9px 14px; border-radius: 10px;
+      border: 1px solid var(--au-border); background: var(--au-surface); color: var(--au-fg); cursor: pointer; }
+    .pa-btn:active { transform: translateY(1px); }
+    .pa-btn[disabled] { opacity: 0.55; cursor: default; }
+    .pa-primary { background: var(--au-action); color: var(--au-action-fg); border-color: var(--au-action); }
+    .pa-ghost { background: transparent; border-color: transparent; color: var(--au-fg-soft); }
+    .pa-sm { padding: 4px 8px; font-size: 0.85rem; }
+
+    .pa-input { font: inherit; padding: 9px 11px; border: 1px solid var(--au-border);
+      border-radius: 10px; background: var(--au-surface); color: var(--au-fg); flex: 1 1 auto; min-width: 0; }
+    select.pa-input { flex: 0 0 auto; }
+
+    .pa-list { list-style: none; margin: 0; padding: 0; }
+    .pa-list-item { display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; padding: 10px 4px; border-bottom: 1px solid var(--au-border); }
+    .pa-list-item:last-child { border-bottom: none; }
+    .pa-empty { color: var(--au-fg-soft); font-style: italic; margin: 4px 0; }
+    .pa-status { margin: 10px 0 0; font-size: 0.88rem; color: var(--au-fg-soft); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
