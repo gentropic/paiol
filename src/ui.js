@@ -100,8 +100,11 @@ function insumosPanel(ctx) {
     });
   }
 
+  const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Insumos' }),
+    semPreco > 0 && el('p', { class: 'pa-status pa-bad' },
+      [el('strong', { text: `${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço até você preencher.']),
     store.state.ingredients.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum insumo ainda. Adicione o primeiro abaixo.' })
       : el('ul', { class: 'pa-list' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing))),
@@ -125,7 +128,9 @@ function insumoRow(ctx, ing) {
   return el('li', { class: 'pa-list-item' }, [
     el('div', { class: 'pa-grow' }, [
       el('strong', { text: ing.name }),
-      el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ${price != null ? brl(price) + '/' + ing.stockUnit : 'sem preço'}` }),
+      price != null
+        ? el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}` })
+        : el('span', {}, [el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
     ]),
     priceInput,
     el('button', { class: 'pa-btn pa-sm', onclick: updatePrice }, 'Atualizar'),
@@ -231,6 +236,23 @@ function refName(store, ref) {
   return store.get(coll, ref.id)?.name || '(removido)';
 }
 
+/** Names of ingredients in a recipe's component DAG that have no current price (cycle-guarded). */
+function unpricedInRecipe(store, recipeId, seen = new Set()) {
+  const r = store.get('recipes', recipeId);
+  if (!r || seen.has(recipeId)) return [];
+  seen.add(recipeId);
+  const out = new Set();
+  for (const c of r.components) {
+    if (c.ref.kind === 'ingredient') {
+      const ing = store.get('ingredients', c.ref.id);
+      if (ing && store.currentPrice(ing.id) == null) out.add(ing.name);
+    } else {
+      for (const n of unpricedInRecipe(store, c.ref.id, seen)) out.add(n);
+    }
+  }
+  return [...out];
+}
+
 // ── Produtos ──────────────────────────────────────────────────────────────────
 
 function produtosPanel(ctx) {
@@ -286,6 +308,17 @@ function precosPanel(ctx) {
   const lens = estimateLens(config);
 
   const cards = store.state.products.map((p) => {
+    // Most common "incomplete" cause: a used ingredient has no price. Name them explicitly.
+    const missing = unpricedInRecipe(store, p.recipeId);
+    if (missing.length) {
+      return el('div', { class: 'pa-sub-card' }, [
+        el('div', { class: 'pa-row' }, [
+          el('strong', { class: 'pa-grow', text: p.name }),
+          el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
+        ]),
+        el('p', { class: 'pa-status', text: `Defina o preço de: ${missing.join(', ')}.` }),
+      ]);
+    }
     try {
       const b = costBreakdown(es, p.recipeId, config, lens);
       const parts = [

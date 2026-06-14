@@ -294,6 +294,54 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('imports without prices and flags the missing ones by name', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((r) => {
+      const q = indexedDB.deleteDatabase('paiol');
+      q.onsuccess = q.onerror = q.onblocked = () => r();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+
+    const yaml = [
+      'version: 1',
+      'insumos:',
+      '  - nome: "Manteiga"',     // no preco on purpose
+      '    unidade: "kg"',
+      'receitas:',
+      '  - nome: "Massa"',
+      '    rende: 10',
+      '    unidade: "un"',
+      '    minutosAtivos: 5',
+      '    minutosForno: 0',
+      '    itens:',
+      '      - insumo: "Manteiga"',
+      '        qtd: 100',
+      '        unidade: "g"',
+      'produtos:',
+      '  - nome: "Biscoito"',
+      '    receita: "Massa"',
+      '    porcao: 1',
+      '    embalagem: 0',
+      '',
+    ].join('\n');
+
+    await page.click('button.pa-tab:has-text("Ajustes")');
+    await page.setInputFiles('[data-testid="import-file"]', { name: 'd.yaml', mimeType: 'text/yaml', buffer: Buffer.from(yaml) });
+    await page.waitForFunction(() => /Importado/.test(document.querySelector('.pa-status')?.textContent || ''));
+
+    // Insumos: count banner.
+    await page.click('button.pa-tab:has-text("Insumos")');
+    await page.waitForSelector('.pa-status.pa-bad');
+    assert.match(await page.textContent('.pa-status.pa-bad'), /1 insumo\(s\) sem preço/);
+
+    // Preços: the product is flagged and the missing ingredient is named.
+    await page.click('button.pa-tab:has-text("Preços")');
+    await page.waitForSelector('.pa-sub-card');
+    assert.match(await page.textContent('.pa-card'), /Defina o preço de: Manteiga/);
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });
