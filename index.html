@@ -59,6 +59,37 @@
     .pa-list-item:last-child { border-bottom: none; }
     .pa-empty { color: var(--au-fg-soft); font-style: italic; margin: 4px 0; }
     .pa-status { margin: 10px 0 0; font-size: 0.88rem; color: var(--au-fg-soft); }
+
+    /* Tabs */
+    .pa-nav { display: flex; gap: 4px; margin: 0 0 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .pa-tab { flex: 0 0 auto; font: inherit; font-size: 0.92rem; padding: 8px 13px; border: 1px solid var(--au-border);
+      border-radius: 999px; background: var(--au-surface); color: var(--au-fg-soft); cursor: pointer; }
+    .pa-tab.active { background: var(--au-action); color: var(--au-action-fg); border-color: var(--au-action); font-weight: 600; }
+
+    /* Misc layout */
+    .pa-grow { flex: 1 1 auto; min-width: 0; }
+    .pa-muted { color: var(--au-fg-soft); font-size: 0.86rem; }
+    .pa-narrow { flex: 0 0 auto; width: 7.5em; }
+    .pa-hint { color: var(--au-fg-soft); font-size: 0.8rem; margin: 8px 0 0; }
+    .pa-h3 { font-size: 1rem; margin: 18px 0 8px; color: var(--au-fg-soft); }
+    .pa-lab { color: var(--au-fg-soft); font-size: 0.88rem; }
+    .pa-form { flex-wrap: wrap; }
+
+    .pa-sub-card { border: 1px solid var(--au-border); border-radius: 10px; padding: 12px; margin: 0 0 10px; background: #fffdfb; }
+    .pa-list.pa-tight .pa-list-item { padding: 6px 2px; }
+
+    .pa-field { display: flex; flex-direction: column; gap: 4px; margin: 0 0 12px; }
+    .pa-field label { font-size: 0.88rem; color: var(--au-fg-soft); }
+    .pa-field .pa-input { width: 100%; }
+
+    /* Price breakdown */
+    .pa-price { font-size: 1.2rem; font-weight: 700; color: var(--au-action); }
+    .pa-kv { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.92rem; }
+    .pa-kv td { padding: 4px 0; border-bottom: 1px solid var(--au-border); color: var(--au-fg-soft); }
+    .pa-kv td.pa-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--au-fg); }
+    .pa-kv-total td { font-weight: 600; color: var(--au-fg); }
+    .pa-kv tr:last-child td { border-bottom: none; }
+    .pa-num.pa-strong { color: var(--au-action); font-weight: 700; }
   </style>
 </head>
 <body>

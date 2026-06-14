@@ -65,9 +65,9 @@ describe('paiol UI smoke', () => {
     }));
     await page.reload({ waitUntil: 'networkidle' });
 
-    await page.fill('input.pa-input', 'Farinha de trigo');
-    await page.selectOption('select.pa-input', 'kg');
-    await page.click('button:has-text("Adicionar")');
+    await page.fill('[data-testid="ins-name"]', 'Farinha de trigo');
+    await page.selectOption('[data-testid="ins-unit"]', 'kg');
+    await page.click('[data-testid="ins-add"]');
 
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Farinha de trigo/);
@@ -92,9 +92,63 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('full flow: insumo → receita → produto → a suggested price appears', async () => {
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((r) => {
+      const req = indexedDB.deleteDatabase('paiol');
+      req.onsuccess = req.onerror = req.onblocked = () => r();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+
+    // Insumo with a price.
+    await page.fill('[data-testid="ins-name"]', 'Farinha');
+    await page.selectOption('[data-testid="ins-unit"]', 'kg');
+    await page.fill('[data-testid="ins-price"]', '5');
+    await page.click('[data-testid="ins-add"]');
+    await page.waitForSelector('.pa-list-item');
+
+    // Receita using that insumo.
+    await page.click('button.pa-tab:has-text("Receitas")');
+    await page.fill('[data-testid="rec-name"]', 'Pão');
+    await page.fill('[data-testid="rec-yield"]', '10');
+    await page.selectOption('[data-testid="rec-yunit"]', 'un');
+    await page.fill('[data-testid="rec-active"]', '30');
+    await page.fill('[data-testid="rec-oven"]', '40');
+    await page.click('[data-testid="rec-create"]');
+    await page.waitForSelector('[data-testid="rec-compref"]');
+    await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Farinha' });
+    await page.fill('[data-testid="rec-compqty"]', '500');
+    await page.selectOption('[data-testid="rec-compunit"]', 'g');
+    await page.click('[data-testid="rec-compadd"]');
+    await page.waitForSelector('.pa-sub-card .pa-list-item');
+
+    // Produto from that receita.
+    await page.click('button.pa-tab:has-text("Produtos")');
+    await page.fill('[data-testid="prod-name"]', 'Pãozinho');
+    await page.selectOption('[data-testid="prod-recipe"]', { label: 'Pão' });
+    await page.fill('[data-testid="prod-portion"]', '1');
+    await page.click('[data-testid="prod-create"]');
+    await page.waitForSelector('.pa-list-item');
+
+    // Preços: a real suggested price, no "incompleto".
+    await page.click('button.pa-tab:has-text("Preços")');
+    await page.waitForSelector('.pa-price');
+    const priceText = await page.textContent('.pa-price');
+    assert.match(priceText, /R\$\s*\d+,\d{2}/, `expected a money price, got "${priceText}"`);
+    assert.doesNotMatch(await page.textContent('.pa-card'), /incompleto/, 'pricing reported incomplete');
+    assert.deepEqual(errors, [], `errors during flow: ${errors.join(' | ')}`);
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.click('button.pa-tab:has-text("Ajustes")'); // Dropbox lives under Ajustes now
     assert.match(await page.textContent('.pa-badge'), /Não conectado/);
 
     // Intercept the redirect to Dropbox: capture the URL, never actually navigate.
@@ -137,9 +191,9 @@ describe('paiol UI smoke', () => {
 
     assert.equal((await page.textContent('h1')).trim(), 'Quitutes do Paiol');
     // Prove the inlined modules wired up: a real interaction through the bundle.
-    await page.fill('input.pa-input', 'Açúcar');
-    await page.selectOption('select.pa-input', 'kg');
-    await page.click('button:has-text("Adicionar")');
+    await page.fill('[data-testid="ins-name"]', 'Açúcar');
+    await page.selectOption('[data-testid="ins-unit"]', 'kg');
+    await page.click('[data-testid="ins-add"]');
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Açúcar/);
     assert.deepEqual(errors, [], `console/page errors in built file: ${errors.join(' | ')}`);

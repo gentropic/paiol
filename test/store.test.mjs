@@ -60,6 +60,26 @@ test('toEngineStore feeds the cost engine', () => {
   assert.equal(cost, 0.25);
 });
 
+test('config: defaults present, setConfig patches, survives YAML round-trip', () => {
+  const s = new PaiolStore();
+  assert.equal(s.getConfig().rateioBase, 'active-time');
+  s.setConfig({ valorHora: 35, targetMarginPct: 0.4 });
+  assert.equal(s.getConfig().valorHora, 35);
+  assert.equal(s.getConfig().paymentFeePct, 0.05); // untouched default
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.equal(back.getConfig().valorHora, 35);
+  assert.equal(back.getConfig().targetMarginPct, 0.4);
+});
+
+test('currentPrice returns the latest price or null', () => {
+  const s = new PaiolStore();
+  s.upsertIngredient({ id: 'f', name: 'F', stockUnit: 'kg' });
+  assert.equal(s.currentPrice('f'), null);
+  s.addPriceChange({ id: 'a', at: '2026-01-01', ingredientId: 'f', price: 5 });
+  s.addPriceChange({ id: 'b', at: '2026-05-01', ingredientId: 'f', price: 8 });
+  assert.equal(s.currentPrice('f'), 8);
+});
+
 test('YAML round-trip preserves the whole business', () => {
   const s = seeded();
   s.addBatch({ id: 'b1', at: '2026-06-10', recipeId: 'pao', yieldActual: 9, activeMinutes: 35 });

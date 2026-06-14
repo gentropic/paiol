@@ -10,25 +10,30 @@ import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { linked: false, busy: false, status: null };
+  const view = { tab: 'insumos', linked: false, busy: false, status: null };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
-  if (redirect.error) view.status = `Falha ao conectar: ${redirect.error}`;
+  if (redirect.error) { view.status = `Falha ao conectar: ${redirect.error}`; view.tab = 'ajustes'; }
   view.linked = redirect.linked || (await isLinked());
+  if (redirect.linked) view.tab = 'ajustes';
 
   // 2. Local store over IndexedDB.
   const localVfs = await VFS.create({ type: 'idb', name: LOCAL_DB_NAME });
   const store = await loadStore(localVfs);
   const saver = createDebouncedSaver(localVfs, () => store);
 
-  const ctx = { store, get linked() { return view.linked; }, get busy() { return view.busy; }, get status() { return view.status; }, actions: {} };
+  const ctx = { store, view, actions: {} };
   const rerender = () => renderApp(root, ctx);
 
   // If we linked on this load, pull immediately so the device starts in sync.
   if (redirect.linked) void doSync(true);
 
   ctx.actions = {
+    setTab(tab) { view.tab = tab; view.status = null; rerender(); },
+    // Generic business mutation: run fn(store), persist (debounced), re-render.
+    mutate(fn) { fn(store); saver.schedule(); rerender(); },
+    setConfig(partial) { store.setConfig(partial); saver.schedule(); view.status = 'Ajustes salvos.'; rerender(); },
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
       forgetToken();
@@ -37,16 +42,6 @@ export async function boot(root) {
       rerender();
     },
     sync: () => doSync(false),
-    addIngredient({ name, stockUnit }) {
-      store.upsertIngredient({ id: crypto.randomUUID(), name, stockUnit });
-      saver.schedule();
-      rerender();
-    },
-    removeIngredient(id) {
-      store.removeIngredient(id);
-      saver.schedule();
-      rerender();
-    },
   };
 
   async function doSync(silent) {

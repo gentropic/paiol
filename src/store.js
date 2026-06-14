@@ -17,8 +17,25 @@ const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 
 /**
+ * Engine config defaults (§4). Placeholders Nayara tunes in Ajustes; `rateioBase` stays hidden
+ * (§4.3). `custosFixosMes` is the whole monthly fixed pool, DAS included (R$ 82,05 for 2026).
+ * @type {import('./domain.js').Config}
+ */
+export const DEFAULT_CONFIG = {
+  valorHora: 20,                    // BRL/hour of hands-on time
+  taxaGas: 0.10,                    // BRL/minute of oven
+  custosFixosMes: 500,              // monthly fixed pool (rent, internet, DAS, …)
+  expectedActiveMinutesMonth: 2400, // ~40h/month (pricing-lens rateio denominator; §8.3)
+  targetMarginPct: 0.30,
+  paymentFeePct: 0.05,
+  rateioBase: 'active-time',
+};
+const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
+
+/**
  * @typedef {object} State
  * @property {number} version
+ * @property {import('./domain.js').Config} config
  * @property {import('./domain.js').Ingredient[]}  ingredients
  * @property {import('./domain.js').Recipe[]}      recipes
  * @property {import('./domain.js').Product[]}     products
@@ -31,6 +48,7 @@ const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 export function emptyState() {
   return {
     version: SCHEMA_VERSION,
+    config: { ...DEFAULT_CONFIG },
     ingredients: [], recipes: [], products: [],
     priceChanges: [], batches: [], sales: [],
   };
@@ -44,6 +62,25 @@ export class PaiolStore {
     // Normalize: ensure every collection exists and is an array.
     for (const c of ALL) if (!Array.isArray(this.state[c])) this.state[c] = [];
     this.state.version = this.state.version || SCHEMA_VERSION;
+    // Backfill config defaults for any missing key (forward-compatible loads).
+    this.state.config = { ...DEFAULT_CONFIG, ...(this.state.config || {}) };
+  }
+
+  // ── Config (engine settings; §4) ─────────────────────────────────────────────
+
+  /** @returns {import('./domain.js').Config} */
+  getConfig() { return this.state.config; }
+
+  /** Patch config in place. @param {Partial<import('./domain.js').Config>} partial */
+  setConfig(partial) { Object.assign(this.state.config, partial); return this.state.config; }
+
+  /** Latest price for an ingredient (BRL per stockUnit), or null if none recorded yet. */
+  currentPrice(ingredientId) {
+    let best = null; let bestAt = '';
+    for (const pc of this.state.priceChanges) {
+      if (pc.ingredientId === ingredientId && pc.at >= bestAt) { bestAt = pc.at; best = pc; }
+    }
+    return best ? best.price : null;
   }
 
   // ── Master data (mutable upsert/remove) ──────────────────────────────────────
@@ -105,6 +142,8 @@ export class PaiolStore {
         masterUpserted++;
       }
     }
+    // Config is a singleton: incoming wins (last-writer; v0.1 single-user, no vector clocks).
+    if (o.config) this.setConfig(o.config);
     return { eventsAdded, masterUpserted };
   }
 
@@ -118,7 +157,7 @@ export class PaiolStore {
    * the same data serialize to the same bytes.
    */
   toYaml() {
-    const ordered = { version: this.state.version };
+    const ordered = { version: this.state.version, config: orderedConfig(this.state.config) };
     for (const c of MASTER_COLLECTIONS) ordered[c] = sortBy(this.state[c], byId);
     for (const c of EVENT_COLLECTIONS) ordered[c] = sortBy(this.state[c], byAtThenId);
     return toYaml(ordered);
@@ -133,6 +172,7 @@ export class PaiolStore {
   clone() {
     const copy = emptyState();
     copy.version = this.state.version;
+    copy.config = { ...this.state.config };
     for (const c of ALL) copy[c] = this.state[c].slice();
     return new PaiolStore(copy);
   }
@@ -172,6 +212,11 @@ export class PaiolStore {
 }
 
 // Deterministic ordering for serialization (does not mutate the live arrays).
+function orderedConfig(config) {
+  const out = {};
+  for (const k of CONFIG_KEYS) if (config[k] !== undefined) out[k] = config[k];
+  return out;
+}
 function sortBy(arr, cmp) { return arr.slice().sort(cmp); }
 function byId(a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; }
 function byAtThenId(a, b) {
