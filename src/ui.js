@@ -9,8 +9,17 @@ import {
   estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice,
   PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
+import { ConversionError } from './units.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
+// Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
+// (or sub-recipe's) own dimension, defaulting to that unit — so eggs bought in `un` are used in
+// `un` (no weighing), while flour bought in `kg` can still be used in `g` (same dimension).
+const UNIT_GROUPS = [['g', 'kg'], ['ml', 'l'], ['un']];
+function unitsInDimension(u) {
+  const group = UNIT_GROUPS.find((g) => g.includes(u)) || [u];
+  return [u, ...group.filter((x) => x !== u)]; // natural unit first = the default selection
+}
 const TABS = [
   ['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'],
   ['precos', 'Preços'], ['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['ajustes', 'Ajustes'],
@@ -164,12 +173,19 @@ function receitaCard(ctx, recipe) {
   const { store } = ctx;
   // Component editor.
   const options = [
-    ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}` })),
-    ...store.state.recipes.filter((r) => r.id !== recipe.id).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}` })),
+    ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
+    ...store.state.recipes.filter((r) => r.id !== recipe.id).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-compqty', type: 'text', inputmode: 'decimal', placeholder: 'qtd' });
-  const unit = el('select', { class: 'pa-input', 'data-testid': 'rec-compunit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u })));
+  const unit = el('select', { class: 'pa-input', 'data-testid': 'rec-compunit' });
+  // Offer only units in the selected item's dimension; re-fill when the item changes.
+  function fillUnits() {
+    const o = options[Number(refSel.value)] || options[0];
+    unit.replaceChildren(...unitsInDimension(o ? o.unit : 'un').map((u) => el('option', { value: u, text: u })));
+  }
+  fillUnits();
+  refSel.addEventListener('change', fillUnits);
 
   function addComponent() {
     const q = parseNum(qty.value);
@@ -314,6 +330,7 @@ function friendlyError(e) {
   if (e instanceof YieldError) return 'Rendimento inválido — verifique a receita.';
   if (e instanceof MarkupError) return 'Margem + taxa somam 100% ou mais — ajuste em Ajustes.';
   if (e instanceof RefError) return 'A receita deste produto não foi encontrada.';
+  if (e instanceof ConversionError) return `Unidade incompatível (${e.from}→${e.to}). Use a mesma unidade do insumo.`;
   return String(e && e.message ? e.message : e);
 }
 

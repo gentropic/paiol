@@ -178,6 +178,38 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('recipe component units are constrained to the ingredient dimension', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((r) => {
+      const q = indexedDB.deleteDatabase('paiol');
+      q.onsuccess = q.onerror = q.onblocked = () => r();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+
+    await page.fill('[data-testid="ins-name"]', 'Ovo');
+    await page.selectOption('[data-testid="ins-unit"]', 'un');
+    await page.click('[data-testid="ins-add"]');
+    await page.fill('[data-testid="ins-name"]', 'Farinha');
+    await page.selectOption('[data-testid="ins-unit"]', 'kg');
+    await page.click('[data-testid="ins-add"]');
+
+    await page.click('button.pa-tab:has-text("Receitas")');
+    await page.fill('[data-testid="rec-name"]', 'Bolo');
+    await page.fill('[data-testid="rec-yield"]', '1');
+    await page.selectOption('[data-testid="rec-yunit"]', 'un');
+    await page.click('[data-testid="rec-create"]');
+    await page.waitForSelector('[data-testid="rec-compref"]');
+
+    // Eggs are countable → only "un" offered (no weighing).
+    await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Ovo' });
+    assert.deepEqual(await page.locator('[data-testid="rec-compunit"] option').allTextContents(), ['un']);
+    // Flour bought in kg → same-dimension units only.
+    await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Farinha' });
+    assert.deepEqual((await page.locator('[data-testid="rec-compunit"] option').allTextContents()).sort(), ['g', 'kg']);
+    await page.close();
+  });
+
   test('log a fornada and a venda (actuals), with running totals', async () => {
     const page = await context.newPage();
     const errors = [];
