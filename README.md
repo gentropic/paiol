@@ -16,6 +16,22 @@ npm run build    # inline everything → paiol.html (single-file deploy)
 Open <http://localhost:8080/> — that exact URL is also the registered Dropbox OAuth
 redirect, so "Conectar ao Dropbox" works in local dev.
 
+## Deploy
+
+Live at <https://gentropic.org/paiol/> (GitHub Pages, deploy-from-`main` on the
+`gentropic.github.io` repo — no Actions). To publish an update:
+
+```sh
+node tools/deploy.mjs        # build paiol.html → ../gentropic.github.io/paiol/index.html
+# then, in the Pages repo:
+git -C ../gentropic.github.io add paiol/index.html
+git -C ../gentropic.github.io commit -m "Update paiol" && git -C ../gentropic.github.io push
+```
+
+The single file is self-contained (everything inlined), so it works at any path. The
+production OAuth redirect `https://gentropic.org/paiol/` must stay registered in the
+Dropbox app for "Conectar ao Dropbox" to work in production.
+
 ## Layout
 
 ```
