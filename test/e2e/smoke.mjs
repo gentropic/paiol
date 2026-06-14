@@ -247,6 +247,53 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('import merges an interchange YAML file into the app', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((r) => {
+      const q = indexedDB.deleteDatabase('paiol');
+      q.onsuccess = q.onerror = q.onblocked = () => r();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+
+    const yaml = [
+      'version: 1',
+      'insumos:',
+      '  - nome: "Açúcar"',
+      '    unidade: "kg"',
+      '    preco: 4',
+      'receitas:',
+      '  - nome: "Calda"',
+      '    rende: 10',
+      '    unidade: "un"',
+      '    minutosAtivos: 5',
+      '    minutosForno: 0',
+      '    itens:',
+      '      - insumo: "Açúcar"',
+      '        qtd: 200',
+      '        unidade: "g"',
+      'produtos:',
+      '  - nome: "Calda (pote)"',
+      '    receita: "Calda"',
+      '    porcao: 1',
+      '    embalagem: 0.5',
+      '',
+    ].join('\n');
+
+    await page.click('button.pa-tab:has-text("Ajustes")');
+    await page.setInputFiles('[data-testid="import-file"]', { name: 'dados.yaml', mimeType: 'text/yaml', buffer: Buffer.from(yaml) });
+    await page.waitForFunction(() => /Importado/.test(document.querySelector('.pa-status')?.textContent || ''));
+
+    await page.click('button.pa-tab:has-text("Insumos")');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-list'), /Açúcar/);
+
+    await page.click('button.pa-tab:has-text("Preços")');
+    await page.waitForSelector('.pa-price');
+    assert.match(await page.textContent('.pa-price'), /R\$\s*\d/);
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });

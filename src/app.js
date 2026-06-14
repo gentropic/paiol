@@ -6,6 +6,7 @@ import { loadStore, createDebouncedSaver } from './persist.js';
 import { syncOnce, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp } from './ui.js';
+import { importYaml } from './exchange.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
@@ -34,6 +35,15 @@ export async function boot(root) {
     // Generic business mutation: run fn(store), persist (debounced), re-render.
     mutate(fn) { fn(store); saver.schedule(); rerender(); },
     setConfig(partial) { store.setConfig(partial); saver.schedule(); view.status = 'Ajustes salvos.'; rerender(); },
+    importData(text) {
+      const r = importYaml(store, text);
+      saver.schedule();
+      const avisos = r.warnings.length ? ` · ${r.warnings.length} aviso(s)` : '';
+      view.status = `Importado: ${r.insumos} insumo(s), ${r.receitas} receita(s), ${r.produtos} produto(s)${avisos}.`;
+      rerender();
+      return r;
+    },
+    importFailed(msg) { view.status = `Falha ao importar: ${msg}`; rerender(); },
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
       forgetToken();

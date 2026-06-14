@@ -10,6 +10,7 @@ import {
   PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
+import { exportYaml } from './exchange.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -497,8 +498,40 @@ function ajustesPanel(ctx) {
       field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct)),
       el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar ajustes')]),
     ]),
+    dadosCard(ctx),
     dropboxPanel(ctx),
   ]);
+}
+
+function dadosCard(ctx) {
+  const fileInput = el('input', {
+    type: 'file', accept: '.yaml,.yml,.txt', style: 'display:none', 'data-testid': 'import-file',
+    onchange: async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      try { ctx.actions.importData(await f.text()); }
+      catch (err) { ctx.actions.importFailed(String(err && err.message ? err.message : err)); }
+      e.target.value = '';
+    },
+  });
+  return el('section', { class: 'pa-card' }, [
+    el('h2', { text: 'Dados' }),
+    el('div', { class: 'pa-row' }, [
+      el('button', { class: 'pa-btn', 'data-testid': 'export-btn', onclick: () => downloadFile('paiol-dados.yaml', exportYaml(ctx.store)) }, 'Exportar dados'),
+      el('button', { class: 'pa-btn', 'data-testid': 'import-btn', onclick: () => fileInput.click() }, 'Importar dados'),
+      fileInput,
+    ]),
+    el('p', { class: 'pa-hint', text: 'Exporta/importa insumos, receitas e produtos (formato YAML). A importação mescla pelos nomes, sem apagar o que já existe.' }),
+  ]);
+}
+
+function downloadFile(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/yaml' }));
+  const a = el('a', { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function dropboxPanel(ctx) {

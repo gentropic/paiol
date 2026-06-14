@@ -8,6 +8,7 @@ monorepo, pinned to a known build.
 |---|---|---|
 | `@gcu/yaml` | `auditable/ext/yaml/index.js` | auditable @ `591b719` |
 | `@gcu/vfs`  | `auditable/ext/vfs/index.js`  | auditable @ `591b719` |
+| `@gcu/sheet`| `auditable/ext/sheet/index.js`| auditable @ `591b719` (dev/tools only — XLSX reader for tools/xlsx-to-paiol.mjs; not imported by the app) |
 
 Re-vendor by copying the corresponding `ext/<name>/index.js` from auditable at the pinned
 (or newer) commit and re-running `npm test`.
