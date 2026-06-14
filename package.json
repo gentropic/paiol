@@ -7,7 +7,11 @@
   "author": "Arthur Endlein Correia",
   "scripts": {
     "test": "node --no-warnings --test \"test/**/*.test.mjs\"",
+    "test:e2e": "node --no-warnings --test test/e2e/smoke.mjs",
     "build": "node build.js",
     "dev": "node tools/dev-server.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
   }
 }
