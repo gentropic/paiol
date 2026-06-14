@@ -11,3 +11,6 @@ Thumbs.db
 *.swp
 .vscode/
 .idea/
+
+# personal, untracked scratch space (notes, experiments, local files)
+personal/
