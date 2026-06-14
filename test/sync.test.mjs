@@ -66,3 +66,14 @@ test('overwriting an existing remote writes a snapshot first', async () => {
   await syncOnce(a, v, { snapshotLabel: '2026-06' });
   assert.ok(await v.exists('/paiol/snapshots/paiol-2026-06.yaml'));
 });
+
+test('snapshots land next to the business file (root path → /snapshots)', async () => {
+  const v = await remote();
+  const a = new PaiolStore();
+  a.addSale(sale('s1', 'p'));
+  await syncOnce(a, v, { path: '/business.yaml' });        // the app's real remote layout
+  a.addSale(sale('s2', 'p'));
+  await syncOnce(a, v, { path: '/business.yaml', snapshotLabel: '2026-06' });
+  assert.ok(await v.exists('/snapshots/paiol-2026-06.yaml'), 'snapshot not beside business.yaml');
+  assert.ok(!(await v.exists('/paiol/snapshots/paiol-2026-06.yaml')), 'snapshot wrongly nested under /paiol');
+});

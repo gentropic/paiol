@@ -35,7 +35,10 @@ export async function syncOnce(localStore, vfs, opts = {}) {
     // Snapshot the prior remote before overwriting, so recovery never depends on Dropbox's own
     // version history (§5 safety net).
     if (opts.snapshotLabel && remoteText != null) {
-      await snapshotStore(vfs, remote, opts.snapshotLabel).catch(() => {});
+      // Place snapshots NEXT TO the business file (e.g. /snapshots beside /business.yaml), not
+      // under a hard-coded /paiol — on the Dropbox app folder the app root already is "paiol".
+      const dir = path.slice(0, path.lastIndexOf('/'));
+      await snapshotStore(vfs, remote, opts.snapshotLabel, `${dir}/snapshots`).catch(() => {});
     }
     await saveStore(vfs, localStore, path);
     pushed = true;
