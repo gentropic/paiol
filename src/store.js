@@ -110,11 +110,17 @@ export class PaiolStore {
 
   // ── Serialization (§5 — one YAML document) ───────────────────────────────────
 
-  /** @returns {string} canonical strict-YAML of the whole business. */
+  /**
+   * @returns {string} canonical strict-YAML of the whole business.
+   * Deterministic regardless of insertion/merge order: collection key order is fixed, events
+   * are sorted chronologically by (at, id), master data by id. This is what makes the file
+   * diff-stable (§5) AND makes sync converge byte-identically across devices — two stores with
+   * the same data serialize to the same bytes.
+   */
   toYaml() {
-    // Fixed key order for diff stability.
     const ordered = { version: this.state.version };
-    for (const c of ALL) ordered[c] = this.state[c];
+    for (const c of MASTER_COLLECTIONS) ordered[c] = sortBy(this.state[c], byId);
+    for (const c of EVENT_COLLECTIONS) ordered[c] = sortBy(this.state[c], byAtThenId);
     return toYaml(ordered);
   }
 
@@ -163,6 +169,14 @@ export class PaiolStore {
     this.state[collection].push(ev);
     return ev;
   }
+}
+
+// Deterministic ordering for serialization (does not mutate the live arrays).
+function sortBy(arr, cmp) { return arr.slice().sort(cmp); }
+function byId(a, b) { return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; }
+function byAtThenId(a, b) {
+  if (a.at !== b.at) return a.at < b.at ? -1 : 1;
+  return byId(a, b);
 }
 
 export class StoreError extends Error {

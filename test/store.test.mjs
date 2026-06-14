@@ -80,6 +80,16 @@ test('merge unions events by id and drops duplicates', () => {
   assert.equal(a.state.sales.length, 1);
 });
 
+test('YAML is canonical: insertion order does not affect output', () => {
+  const a = new PaiolStore();
+  const b = new PaiolStore();
+  const s1 = { id: 's1', at: '2026-06-01', productId: 'p', qty: 1, unitPrice: 10, paymentFeePct: 0, costSnapshot: 1 };
+  const s2 = { id: 's2', at: '2026-06-02', productId: 'p', qty: 1, unitPrice: 10, paymentFeePct: 0, costSnapshot: 1 };
+  a.addSale(s1); a.addSale(s2);
+  b.addSale(s2); b.addSale(s1); // reversed
+  assert.equal(a.toYaml(), b.toYaml());
+});
+
 test('merge is idempotent (re-merging adds no events)', () => {
   const a = seeded();
   const b = seeded();
