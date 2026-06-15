@@ -14,11 +14,23 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeSw } from './vendor/@gcu/sw/make.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(HERE, 'src/main.js');
 const TEMPLATE = resolve(HERE, 'index.html');
 const OUT = resolve(HERE, 'paiol.html');
+const SW_OUT = resolve(HERE, 'sw.js');
+
+// PWA shell to precache (served under /paiol/). The app is one inlined HTML file, so the "shell"
+// is just that file plus the PWA sidecars; default stale-while-revalidate catches each new deploy
+// by byte-diff and offers a reload. Relative URLs resolve against the SW's own /paiol/ scope.
+const SW_CONFIG = {
+  app: 'paiol',
+  cache: 'paiol-shell-v1',
+  precache: ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'],
+  navFallback: './index.html',
+};
 
 const IMPORT_RE = /import\s+(?:[^'";]+\s+from\s+)?['"]([^'"]+)['"]\s*;?/g;
 
@@ -89,6 +101,10 @@ async function main() {
   await writeFile(OUT, html);
   const kb = (Buffer.byteLength(html) / 1024).toFixed(0);
   console.log(`paiol.html written — ${modules.length} modules, ${kb} KB`);
+
+  // Emit the service worker (config header + vendored @gcu/sw core) alongside the shell.
+  await writeFile(SW_OUT, makeSw(SW_CONFIG));
+  console.log(`sw.js written — cache "${SW_CONFIG.cache}", ${SW_CONFIG.precache.length} precache URLs`);
 }
 
 main().catch((e) => { console.error('build failed:', e.message); process.exit(1); });

@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#9a4a2f" />
   <title>Quitutes do Paiol</title>
+
+  <!-- PWA: installable, offline-capable (the service worker is registered from app.js). -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon-192.png" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Paiol" />
   <style>
     /* Phone-first; warm confeitaria palette. Tokens mirror the GCU --au-* roles loosely so we
        can swap in @gcu/switchboard later without touching markup. */
@@ -41,6 +50,10 @@
     .pa-help-det[open] > summary::after { transform: rotate(90deg); }
     .pa-help-det .pa-badge { margin-left: 0; }
     .pa-help-p { margin: 4px 2px 8px; color: var(--au-fg-soft); font-size: 0.92rem; }
+    /* "New version available" banner (PWA update) */
+    .pa-update { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; padding: 10px 12px;
+      background: #f6e9e1; border: 1px solid var(--au-action); border-radius: 10px; font-size: 0.92rem; color: var(--au-fg); }
+    .pa-update .pa-btn { background: var(--au-action); color: var(--au-action-fg); border-color: var(--au-action); }
 
     .pa-card { background: var(--au-surface); border: 1px solid var(--au-border);
       border-radius: var(--au-radius); box-shadow: var(--au-shadow); padding: 16px; margin: 0 0 16px; }

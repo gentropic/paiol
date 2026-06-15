@@ -605,6 +605,10 @@ describe('paiol UI smoke', () => {
     await page.reload({ waitUntil: 'networkidle' });
 
     assert.equal((await page.textContent('h1')).trim(), 'Quitutes do Paiol');
+    // PWA wiring is present in the shipped shell (the SW itself is gated off on localhost).
+    assert.equal(await page.locator('link[rel="manifest"]').count(), 1, 'manifest link missing');
+    assert.equal(await page.locator('link[rel="apple-touch-icon"]').count(), 1, 'apple-touch-icon missing');
+    assert.equal(await page.evaluate(() => !!navigator.serviceWorker.controller), false, 'no SW should control localhost');
     // Prove the inlined modules wired up: a real interaction through the bundle.
     await goto(page, 'Insumos');
     await addInsumo(page, 'Açúcar', 'kg');

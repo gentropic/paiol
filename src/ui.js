@@ -222,6 +222,12 @@ export function renderApp(root, ctx) {
   const tab = section.screens.some(([sid]) => sid === ctx.view.tab) ? ctx.view.tab : section.screens[0][0];
 
   const content = [];
+  if (ctx.view.updateReady) {
+    content.push(el('div', { class: 'pa-update', 'data-testid': 'update-banner' }, [
+      el('span', { class: 'pa-grow', text: '✨ Nova versão disponível' }),
+      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'update-apply', onclick: () => ctx.actions.applyUpdate() }, 'Atualizar'),
+    ]));
+  }
   if (section.screens.length > 1) {
     content.push(el('div', { class: 'pa-seg' }, section.screens.map(([sid, label]) =>
       el('button', { class: 'pa-segbtn' + (sid === tab ? ' active' : ''), 'data-screen': sid, onclick: () => ctx.actions.setTab(sid) }, label))));

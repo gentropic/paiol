@@ -6,12 +6,13 @@ import { loadStore, createDebouncedSaver } from './persist.js';
 import { syncOnce, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp, renderModal } from './ui.js';
+import { setupPwa } from './pwa.js';
 import { importYaml } from './exchange.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, modal: null };
+  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, modal: null, updateReady: false };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
@@ -27,6 +28,10 @@ export async function boot(root) {
   const ctx = { store, view, actions: {} };
   const rerender = () => renderApp(root, ctx);
   const rerenderModal = () => renderModal(root, ctx); // overlay-only; leaves the panel DOM in place
+
+  // PWA: install the service worker (no-op in local dev). When a newer shell is cached in the
+  // background, surface a one-tap "atualizar" banner instead of reloading under her.
+  const sw = setupPwa(() => { view.updateReady = true; rerender(); });
 
   // If we linked on this load, pull immediately so the device starts in sync.
   if (redirect.linked) void doSync(true);
@@ -53,6 +58,7 @@ export async function boot(root) {
       return r;
     },
     importFailed(msg) { view.status = `Falha ao importar: ${msg}`; rerender(); },
+    applyUpdate() { if (sw) sw.applyUpdate(); }, // coordinated reload of all tabs onto the new shell
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
       forgetToken();
