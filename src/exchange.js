@@ -11,6 +11,7 @@
 //   produtos:  [{ nome, receita: <nome>, porcao, embalagem }]
 
 import { toYaml, fromYaml } from './yaml-bridge.js';
+import { estimateLens, productUnitCost } from './cost-engine.js';
 
 export const EXCHANGE_VERSION = 1;
 
@@ -194,7 +195,37 @@ export function applyExchange(store, data, opts = {}) {
     nProd++;
   }
 
-  return { insumos: nIns, receitas: nRec, produtos: nProd, warnings };
+  // Pass 5 (optional, for seed/demo files): operational events. costSnapshot is computed now from
+  // current prices/config. Export stays master-only; import accepts these when present.
+  let nVendas = 0; let nFornadas = 0;
+  const config = store.getConfig();
+  const lens = estimateLens(config);
+  const toAt = (d) => (d ? new Date(`${String(d).slice(0, 10)}T12:00:00.000Z`).toISOString() : now());
+
+  for (const f of data.fornadas || []) {
+    const rec = recByName.get(norm(f && f.receita));
+    if (!rec) { warnings.push(`fornada referencia receita "${f && f.receita}" inexistente`); continue; }
+    store.addBatch({
+      id: newId(), at: toAt(f.data), recipeId: rec.id, yieldActual: num(f.unidades, rec.yieldNominal),
+      ...(f.minutosAtivos != null ? { activeMinutes: num(f.minutosAtivos, 0) } : {}),
+      ...(f.minutosForno != null ? { ovenMinutes: num(f.minutosForno, 0) } : {}),
+    });
+    nFornadas++;
+  }
+  for (const v of data.vendas || []) {
+    const prod = prodByName.get(norm(v && v.produto));
+    if (!prod) { warnings.push(`venda referencia produto "${v && v.produto}" inexistente`); continue; }
+    let cost = 0;
+    try { cost = productUnitCost(store.toEngineStore(), prod.id, config, lens); } catch { /* unpriced → 0 */ }
+    store.addSale({
+      id: newId(), at: toAt(v.data), productId: prod.id, qty: num(v.qtd, 1),
+      unitPrice: num(v.preco, 0), paymentFeePct: v.taxa != null ? num(v.taxa, 0) : config.paymentFeePct,
+      costSnapshot: cost, ...(v.canal ? { channel: String(v.canal).trim() } : {}),
+    });
+    nVendas++;
+  }
+
+  return { insumos: nIns, receitas: nRec, produtos: nProd, vendas: nVendas, fornadas: nFornadas, warnings };
 }
 
 /** Parse interchange YAML text and merge it into the store. */

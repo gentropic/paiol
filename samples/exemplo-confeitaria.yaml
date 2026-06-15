@@ -1,0 +1,223 @@
+version: 1
+insumos:
+  - nome: "Farinha de trigo"
+    unidade: "kg"
+    preco: 5.5
+  - nome: "Açúcar"
+    unidade: "kg"
+    preco: 4
+  - nome: "Ovos"
+    unidade: "un"
+    preco: 0.7
+  - nome: "Leite"
+    unidade: "l"
+    preco: 5
+  - nome: "Manteiga"
+    unidade: "kg"
+    preco: 45
+  - nome: "Chocolate meio amargo"
+    unidade: "kg"
+    preco: 38
+  - nome: "Cacau em pó"
+    unidade: "kg"
+    preco: 60
+  - nome: "Fermento químico"
+    unidade: "kg"
+    preco: 30
+  - nome: "Leite condensado"
+    unidade: "un"
+    preco: 7.5
+  - nome: "Creme de leite"
+    unidade: "un"
+    preco: 4
+  - nome: "Polvilho doce"
+    unidade: "kg"
+    preco: 12
+  - nome: "Queijo"
+    unidade: "kg"
+    preco: 40
+  - nome: "Bombom comprado"
+    unidade: "un"
+    preco: 1.8
+receitas:
+  - nome: "Massa de bolo de chocolate"
+    rende: 1
+    unidade: "un"
+    minutosAtivos: 25
+    minutosForno: 40
+    itens:
+      - insumo: "Farinha de trigo"
+        qtd: 0.3
+        unidade: "kg"
+      - insumo: "Açúcar"
+        qtd: 0.25
+        unidade: "kg"
+      - insumo: "Ovos"
+        qtd: 3
+        unidade: "un"
+      - insumo: "Cacau em pó"
+        qtd: 0.08
+        unidade: "kg"
+      - insumo: "Leite"
+        qtd: 0.2
+        unidade: "l"
+      - insumo: "Manteiga"
+        qtd: 0.1
+        unidade: "kg"
+      - insumo: "Fermento químico"
+        qtd: 0.01
+        unidade: "kg"
+  - nome: "Cobertura de chocolate"
+    rende: 0.4
+    unidade: "kg"
+    minutosAtivos: 10
+    minutosForno: 0
+    itens:
+      - insumo: "Chocolate meio amargo"
+        qtd: 0.2
+        unidade: "kg"
+      - insumo: "Creme de leite"
+        qtd: 1
+        unidade: "un"
+      - insumo: "Leite condensado"
+        qtd: 1
+        unidade: "un"
+  - nome: "Brigadeiro"
+    rende: 30
+    unidade: "un"
+    minutosAtivos: 20
+    minutosForno: 0
+    itens:
+      - insumo: "Leite condensado"
+        qtd: 2
+        unidade: "un"
+      - insumo: "Cacau em pó"
+        qtd: 0.03
+        unidade: "kg"
+      - insumo: "Manteiga"
+        qtd: 0.02
+        unidade: "kg"
+  - nome: "Pão de queijo"
+    rende: 20
+    unidade: "un"
+    minutosAtivos: 30
+    minutosForno: 25
+    itens:
+      - insumo: "Polvilho doce"
+        qtd: 0.5
+        unidade: "kg"
+      - insumo: "Ovos"
+        qtd: 2
+        unidade: "un"
+      - insumo: "Leite"
+        qtd: 0.1
+        unidade: "l"
+      - insumo: "Queijo"
+        qtd: 0.3
+        unidade: "kg"
+      - insumo: "Manteiga"
+        qtd: 0.05
+        unidade: "kg"
+produtos:
+  - nome: "Bolo de chocolate"
+    embalagem: 2.5
+    descricaoEmbalagem: "boleira"
+    componentes:
+      - receita: "Massa de bolo de chocolate"
+        qtd: 1
+      - receita: "Cobertura de chocolate"
+        qtd: 0.4
+  - nome: "Saco de pão de queijo"
+    embalagem: 0.8
+    descricaoEmbalagem: "pacote"
+    componentes:
+      - receita: "Pão de queijo"
+        qtd: 10
+  - nome: "Caixa de brigadeiro"
+    embalagem: 1.5
+    descricaoEmbalagem: "caixa"
+    componentes:
+      - receita: "Brigadeiro"
+        qtd: 6
+  - nome: "Brigadeiro avulso"
+    embalagem: 0.2
+    descricaoEmbalagem: "forminha"
+    componentes:
+      - receita: "Brigadeiro"
+        qtd: 1
+  - nome: "Cesta Festa"
+    embalagem: 6
+    descricaoEmbalagem: "caixa decorada"
+    componentes:
+      - produto: "Bolo de chocolate"
+        qtd: 1
+      - produto: "Caixa de brigadeiro"
+        qtd: 1
+      - insumo: "Bombom comprado"
+        qtd: 8
+fornadas:
+  - receita: "Pão de queijo"
+    data: "2026-05-10"
+    unidades: 18
+    minutosAtivos: 35
+  - receita: "Massa de bolo de chocolate"
+    data: "2026-06-03"
+    unidades: 1
+    minutosAtivos: 25
+  - receita: "Pão de queijo"
+    data: "2026-06-07"
+    unidades: 20
+    minutosAtivos: 30
+  - receita: "Brigadeiro"
+    data: "2026-06-10"
+    unidades: 30
+    minutosAtivos: 22
+vendas:
+  - produto: "Bolo de chocolate"
+    data: "2026-04-08"
+    qtd: 1
+    preco: 95
+  - produto: "Saco de pão de queijo"
+    data: "2026-04-12"
+    qtd: 3
+    preco: 34
+  - produto: "Caixa de brigadeiro"
+    data: "2026-04-20"
+    qtd: 2
+    preco: 14
+  - produto: "Bolo de chocolate"
+    data: "2026-05-05"
+    qtd: 2
+    preco: 95
+  - produto: "Saco de pão de queijo"
+    data: "2026-05-10"
+    qtd: 4
+    preco: 34
+  - produto: "Caixa de brigadeiro"
+    data: "2026-05-18"
+    qtd: 3
+    preco: 14
+  - produto: "Cesta Festa"
+    data: "2026-05-25"
+    qtd: 1
+    preco: 145
+  - produto: "Bolo de chocolate"
+    data: "2026-06-03"
+    qtd: 2
+    preco: 98
+  - produto: "Saco de pão de queijo"
+    data: "2026-06-07"
+    qtd: 5
+    preco: 35
+  - produto: "Caixa de brigadeiro"
+    data: "2026-06-10"
+    qtd: 2
+    preco: 15
+  - produto: "Brigadeiro avulso"
+    data: "2026-06-11"
+    qtd: 12
+    preco: 2.5
+  - produto: "Cesta Festa"
+    data: "2026-06-12"
+    qtd: 1
+    preco: 150

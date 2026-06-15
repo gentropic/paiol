@@ -113,6 +113,28 @@ test('imports legacy product shape (receita + porcao) as a recipe component', ()
   assert.equal(prod.components[0].kind, 'recipe');
 });
 
+test('imports optional vendas and fornadas (seed/demo files)', () => {
+  const s = new PaiolStore();
+  const r = applyExchange(s, {
+    insumos: [{ nome: 'Farinha', unidade: 'kg', preco: 5 }],
+    receitas: [{ nome: 'Pão', rende: 10, unidade: 'un', minutosAtivos: 30, itens: [{ insumo: 'Farinha', qtd: 1, unidade: 'kg' }] }],
+    produtos: [{ nome: 'Pãozinho', embalagem: 0, componentes: [{ receita: 'Pão', qtd: 1 }] }],
+    fornadas: [{ receita: 'Pão', data: '2026-06-01', unidades: 9, minutosAtivos: 35 }],
+    vendas: [{ produto: 'Pãozinho', data: '2026-06-02', qtd: 3, preco: 10 }],
+  }, det());
+  assert.equal(r.vendas, 1);
+  assert.equal(r.fornadas, 1);
+  assert.deepEqual(r.warnings, []);
+  assert.equal(s.state.batches.length, 1);
+  assert.equal(s.state.batches[0].yieldActual, 9);
+  assert.equal(s.state.batches[0].activeMinutes, 35);
+  const sale = s.state.sales[0];
+  assert.equal(sale.qty, 3);
+  assert.equal(sale.unitPrice, 10);
+  assert.match(sale.at, /^2026-06-02/);
+  assert.ok(sale.costSnapshot > 0, 'costSnapshot computed at import');
+});
+
 test('toExchange omits preco when an ingredient has no price', () => {
   const s = new PaiolStore();
   s.upsertIngredient({ id: 'i1', name: 'Sal', stockUnit: 'kg' });

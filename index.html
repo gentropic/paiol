@@ -64,11 +64,14 @@
     .pa-bottomnav { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%;
       max-width: 640px; display: flex; background: var(--au-surface); border-top: 1px solid var(--au-border);
       box-shadow: 0 -1px 6px rgba(60, 40, 30, 0.06); padding-bottom: env(safe-area-inset-bottom); z-index: 10; }
-    .pa-navbtn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
-      padding: 7px 2px 5px; border: none; background: none; color: var(--au-fg-soft); cursor: pointer; font: inherit; }
-    .pa-navbtn.active { color: var(--au-action); }
+    .pa-navbtn { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 8px 2px 5px; border: none; background: none; color: var(--au-fg-soft); cursor: pointer; font: inherit; }
+    .pa-navbtn.active { color: var(--au-action); background: #f6e9e1; }
+    .pa-navbtn.active::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+      width: 36px; height: 3px; border-radius: 0 0 3px 3px; background: var(--au-action); }
     .pa-navico { font-size: 1.25rem; line-height: 1; }
     .pa-navlbl { font-size: 0.66rem; letter-spacing: 0.01em; }
+    .pa-navbtn.active .pa-navlbl { font-weight: 700; }
 
     /* Segmented sub-nav (within a section) */
     .pa-seg { display: flex; gap: 6px; margin: 0 0 14px; overflow-x: auto; -webkit-overflow-scrolling: touch; }

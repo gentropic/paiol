@@ -42,8 +42,11 @@ export async function boot(root) {
     importData(text) {
       const r = importYaml(store, text);
       saver.schedule();
+      const parts = [`${r.insumos} insumo(s)`, `${r.receitas} receita(s)`, `${r.produtos} produto(s)`];
+      if (r.vendas) parts.push(`${r.vendas} venda(s)`);
+      if (r.fornadas) parts.push(`${r.fornadas} fornada(s)`);
       const avisos = r.warnings.length ? ` · ${r.warnings.length} aviso(s)` : '';
-      view.status = `Importado: ${r.insumos} insumo(s), ${r.receitas} receita(s), ${r.produtos} produto(s)${avisos}.`;
+      view.status = `Importado: ${parts.join(', ')}${avisos}.`;
       rerender();
       return r;
     },
