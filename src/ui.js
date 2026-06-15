@@ -22,11 +22,17 @@ function unitsInDimension(u) {
   const group = UNIT_GROUPS.find((g) => g.includes(u)) || [u];
   return [u, ...group.filter((x) => x !== u)]; // natural unit first = the default selection
 }
-const TABS = [
-  ['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'],
-  ['precos', 'Preços'], ['fornadas', 'Fornadas'], ['vendas', 'Vendas'],
-  ['relatorios', 'Relatórios'], ['ajustes', 'Ajustes'],
+// Bottom-nav sections (iOS-native tab bar). Each section holds 1+ screens shown as a top
+// segmented control. Grouped by frequency/mental-model so 8 screens fit ~5 thumb-reachable tabs.
+const SECTIONS = [
+  { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
+  { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas']] },
+  { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios']] },
+  { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
+const SECTION_OF = {};
+for (const sec of SECTIONS) for (const [sid] of sec.screens) SECTION_OF[sid] = sec;
 
 // ── DOM + format helpers ───────────────────────────────────────────────────────
 
@@ -51,10 +57,12 @@ const pct = (frac) => (Number(frac) || 0) * 100;
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
-/** Parse a number that may use a comma decimal; '' / invalid → null. */
+/** Parse a number that may use a comma decimal; '' / invalid → null. (Number('') is 0 — guard it.) */
 function parseNum(s) {
   if (s == null) return null;
-  const n = Number(String(s).trim().replace(',', '.'));
+  const str = String(s).trim().replace(',', '.');
+  if (str === '') return null;
+  const n = Number(str);
   return Number.isFinite(n) ? n : null;
 }
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
@@ -102,22 +110,67 @@ function confirmRemove(ctx, label, fn) {
  */
 export function renderApp(root, ctx) {
   const panels = {
+    inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
     relatorios: relatoriosPanel, ajustes: ajustesPanel,
   };
+  const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
+  const tab = section.screens.some(([sid]) => sid === ctx.view.tab) ? ctx.view.tab : section.screens[0][0];
+
+  const content = [];
+  if (section.screens.length > 1) {
+    content.push(el('div', { class: 'pa-seg' }, section.screens.map(([sid, label]) =>
+      el('button', { class: 'pa-segbtn' + (sid === tab ? ' active' : ''), 'data-screen': sid, onclick: () => ctx.actions.setTab(sid) }, label))));
+  }
+  content.push((panels[tab] || inicioPanel)(ctx));
+
   root.replaceChildren(
     el('header', { class: 'pa-header' }, [
       el('h1', { text: 'Quitutes do Paiol' }),
       el('p', { class: 'pa-sub', text: 'Custos, receitas e vendas' }),
     ]),
-    el('nav', { class: 'pa-nav' }, TABS.map(([id, label]) =>
-      el('button', {
-        class: 'pa-tab' + (ctx.view.tab === id ? ' active' : ''),
-        onclick: () => ctx.actions.setTab(id),
-      }, label))),
-    (panels[ctx.view.tab] || insumosPanel)(ctx),
+    el('main', { class: 'pa-main' }, content),
+    el('nav', { class: 'pa-bottomnav' }, SECTIONS.map((sec) =>
+      el('button', { class: 'pa-navbtn' + (sec === section ? ' active' : ''), 'data-section': sec.id, onclick: () => ctx.actions.setTab(sec.screens[0][0]) }, [
+        el('span', { class: 'pa-navico', text: sec.icon }),
+        el('span', { class: 'pa-navlbl', text: sec.label }),
+      ]))),
   );
+}
+
+// ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
+
+function inicioPanel(ctx) {
+  const { store } = ctx;
+  const sum = monthSummary(store, currentMonth());
+  const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
+  const vazio = !store.state.ingredients.length && !store.state.recipes.length && !store.state.products.length;
+
+  return el('section', {}, [
+    el('section', { class: 'pa-card' }, [
+      el('div', { class: 'pa-row' }, [
+        el('h2', { class: 'pa-grow', text: `Este mês — ${monthLabel(currentMonth())}` }),
+      ]),
+      el('table', { class: 'pa-kv' }, [
+        el('tr', {}, [el('td', { text: 'Receita' }), el('td', { class: 'pa-num', text: brl(sum.receita) })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Lucro' }), el('td', { class: 'pa-num' + (sum.lucro >= 0 ? '' : ' pa-bad'), text: brl(sum.lucro) })]),
+      ]),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'home-rel', onclick: () => ctx.actions.setTab('relatorios') }, 'Ver relatório completo →'),
+    ]),
+    semPreco > 0 && el('section', { class: 'pa-card' }, [
+      el('p', { class: 'pa-status pa-bad' }, [el('strong', { text: `⚠ ${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço.']),
+      el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('insumos') }, 'Ir para Insumos'),
+    ]),
+    el('section', { class: 'pa-card' }, [
+      el('h3', { class: 'pa-h3', text: 'Ações rápidas' }),
+      el('div', { class: 'pa-row pa-form' }, [
+        el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-venda', onclick: () => ctx.actions.setTab('vendas') }, 'Registrar venda'),
+        el('button', { class: 'pa-btn', 'data-testid': 'home-fornada', onclick: () => ctx.actions.setTab('fornadas') }, 'Registrar fornada'),
+      ]),
+      vazio && el('p', { class: 'pa-hint', text: 'Comece cadastrando seus insumos e receitas em Cadastro.' }),
+    ]),
+  ]);
 }
 
 // ── Insumos ───────────────────────────────────────────────────────────────────
