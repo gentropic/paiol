@@ -442,6 +442,26 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Lote 2: Relatórios shows the month P&L, per-product, and a chart', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // priceable product "Pãozinho"
+
+    // Log a sale today (default date → current month, which Relatórios defaults to).
+    await page.click('button.pa-tab:has-text("Vendas")');
+    await page.fill('[data-testid="venda-qty"]', '2');
+    await page.click('[data-testid="venda-add"]');
+    await page.waitForSelector('.pa-list-item');
+
+    await page.click('button.pa-tab:has-text("Relatórios")');
+    await page.waitForSelector('.pa-kv');
+    const txt = await page.textContent('.pa-card');
+    assert.match(txt, /Receita/);
+    assert.match(txt, /Lucro/);
+    assert.match(txt, /Pãozinho/);                       // per-product row
+    assert.equal(await page.locator('svg.pa-chart').count(), 1); // trend chart present
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });

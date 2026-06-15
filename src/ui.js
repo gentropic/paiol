@@ -11,6 +11,7 @@ import {
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
+import { monthSummary, productSummary, profitTrend } from './reports.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -23,7 +24,8 @@ function unitsInDimension(u) {
 }
 const TABS = [
   ['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'],
-  ['precos', 'Preços'], ['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['ajustes', 'Ajustes'],
+  ['precos', 'Preços'], ['fornadas', 'Fornadas'], ['vendas', 'Vendas'],
+  ['relatorios', 'Relatórios'], ['ajustes', 'Ajustes'],
 ];
 
 // ── DOM + format helpers ───────────────────────────────────────────────────────
@@ -57,6 +59,16 @@ function parseNum(s) {
 }
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const currentMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+const monthLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${m}/${(y || '').slice(2)}`; };
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) node.setAttribute(k, String(v));
+  for (const c of [].concat(children)) if (c != null) node.append(c.nodeType ? c : document.createTextNode(String(c)));
+  return node;
+}
 
 /**
  * A search box that live-filters a container's direct children by their `data-search` attribute
@@ -91,7 +103,8 @@ function confirmRemove(ctx, label, fn) {
 export function renderApp(root, ctx) {
   const panels = {
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
-    precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel, ajustes: ajustesPanel,
+    precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
+    relatorios: relatoriosPanel, ajustes: ajustesPanel,
   };
   root.replaceChildren(
     el('header', { class: 'pa-header' }, [
@@ -710,6 +723,102 @@ function saleRow(store, s) {
   ]);
 }
 
+// ── Relatórios (period P&L; §4.5 actuals) ────────────────────────────────────────
+
+function relatoriosPanel(ctx) {
+  const { store } = ctx;
+  const month = ctx.view.reportMonth || currentMonth();
+  const sum = monthSummary(store, month);
+  const byProduct = productSummary(store, month);
+  const config = store.getConfig();
+
+  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rel-month', type: 'month', value: month });
+  monthInput.addEventListener('change', () => ctx.actions.setReportMonth(monthInput.value || currentMonth()));
+
+  const kv = (label, value, cls) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: value })]);
+  const resumo = el('table', { class: 'pa-kv' }, [
+    kv('Receita', brl(sum.receita)),
+    kv('Custo dos produtos', brl(sum.custo)),
+    kv('Taxas de pagamento', brl(sum.taxas)),
+    kv('Lucro', brl(sum.lucro), 'pa-kv-total'),
+    kv('Margem', `${(sum.margem * 100).toFixed(0)}%`),
+    kv('Unidades vendidas', String(sum.unidades)),
+    kv('Horas trabalhadas', `${sum.horas.toFixed(1).replace('.', ',')} h`),
+    sum.lucroHora != null && kv('Lucro por hora', brl(sum.lucroHora)),
+  ].filter(Boolean));
+
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-row' }, [
+      el('h2', { class: 'pa-grow', text: 'Relatórios' }),
+      el('span', { class: 'pa-lab', text: 'Mês' }), monthInput,
+    ]),
+    sum.nVendas === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma venda neste mês.' })
+      : el('div', {}, [
+          resumo,
+          el('p', { class: 'pa-hint', text: `O custo já inclui a parte rateada dos custos fixos. Custos fixos do mês (referência): ${brl(config.custosFixosMes)}.` }),
+          el('h3', { class: 'pa-h3', text: 'Lucro nos últimos meses' }),
+          barChart(profitTrend(store, month, 6)),
+          el('h3', { class: 'pa-h3', text: 'Por produto' }),
+          el('table', { class: 'pa-kv pa-report' }, [
+            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Produto' }), el('td', { class: 'pa-num', text: 'Qtd' }), el('td', { class: 'pa-num', text: 'Receita' }), el('td', { class: 'pa-num', text: 'Lucro' })]),
+            ...byProduct.map((r) => el('tr', {}, [
+              el('td', { text: r.name }),
+              el('td', { class: 'pa-num', text: String(r.qty) }),
+              el('td', { class: 'pa-num', text: brl(r.receita) }),
+              el('td', { class: 'pa-num' + (r.lucro >= 0 ? '' : ' pa-bad'), text: brl(r.lucro) }),
+            ])),
+          ]),
+          el('div', { class: 'pa-row pa-form' }, [
+            el('button', { class: 'pa-btn', 'data-testid': 'rel-export', onclick: () => downloadFile(`relatorio-${month}.csv`, reportCsv(month, sum, byProduct), 'text/csv') }, 'Exportar CSV'),
+          ]),
+        ]),
+  ]);
+}
+
+/** Tiny zero-dependency SVG bar chart of monthly profit (green up / red down). */
+function barChart(series) {
+  const W = 320; const H = 132; const top = 10; const bottom = 26; const left = 6;
+  const plotH = H - top - bottom;
+  const vals = series.map((s) => s.lucro);
+  const hasNeg = vals.some((v) => v < 0);
+  const maxAbs = Math.max(1, ...vals.map((v) => Math.abs(v)));
+  const zeroY = hasNeg ? top + plotH / 2 : top + plotH;
+  const scale = (hasNeg ? plotH / 2 : plotH) / maxAbs;
+  const bw = (W - left * 2) / Math.max(1, series.length);
+
+  const kids = [svgEl('line', { x1: left, y1: zeroY, x2: W - left, y2: zeroY, stroke: 'var(--au-border)' })];
+  series.forEach((s, i) => {
+    const x = left + i * bw + bw * 0.16;
+    const w = bw * 0.68;
+    const h = Math.max(1, Math.abs(s.lucro) * scale);
+    const y = s.lucro >= 0 ? zeroY - h : zeroY;
+    kids.push(svgEl('rect', { x, y, width: w, height: h, rx: 2, fill: s.lucro >= 0 ? 'var(--au-ok)' : '#b3261e' }));
+    kids.push(svgEl('text', { x: x + w / 2, y: H - bottom + 14, 'text-anchor': 'middle', 'font-size': 9, fill: 'var(--au-fg-soft)' }, monthLabel(s.month)));
+    kids.push(svgEl('text', { x: x + w / 2, y: s.lucro >= 0 ? y - 2 : y + h + 9, 'text-anchor': 'middle', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(s.lucro)}`));
+  });
+  return svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet' }, kids);
+}
+
+const csvCell = (v) => { const s = String(v ?? ''); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+function reportCsv(month, sum, byProduct) {
+  const n2 = (x) => x.toFixed(2).replace('.', ','); // pt-BR decimals; ';' separator
+  const rows = [
+    ['Relatório', month], [],
+    ['Receita', n2(sum.receita)],
+    ['Custo dos produtos', n2(sum.custo)],
+    ['Taxas', n2(sum.taxas)],
+    ['Lucro', n2(sum.lucro)],
+    ['Margem %', (sum.margem * 100).toFixed(1).replace('.', ',')],
+    ['Unidades vendidas', String(sum.unidades)],
+    ['Horas trabalhadas', n2(sum.horas)],
+    [],
+    ['Produto', 'Qtd', 'Receita', 'Lucro'],
+    ...byProduct.map((r) => [r.name, String(r.qty), n2(r.receita), n2(r.lucro)]),
+  ];
+  return rows.map((r) => r.map(csvCell).join(';')).join('\n');
+}
+
 // ── Ajustes (config + Dropbox) ───────────────────────────────────────────────────
 
 function ajustesPanel(ctx) {
@@ -771,8 +880,8 @@ function dadosCard(ctx) {
   ]);
 }
 
-function downloadFile(name, text) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/yaml' }));
+function downloadFile(name, text, mime = 'text/yaml') {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
   const a = el('a', { href: url, download: name });
   document.body.append(a);
   a.click();
