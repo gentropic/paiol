@@ -43,11 +43,14 @@ export function toExchange(store) {
     })),
   }));
 
+  const compName = (c) => (c.kind === 'recipe' ? recipeName(c.id)
+    : c.kind === 'product' ? store.get('products', c.id)?.name : ingName(c.id));
+  const compKey = (c) => (c.kind === 'recipe' ? 'receita' : c.kind === 'product' ? 'produto' : 'insumo');
   const produtos = store.state.products.map((p) => ({
     nome: p.name,
-    receita: recipeName(p.recipeId),
-    porcao: p.portion,
     embalagem: p.packagingCost,
+    ...(p.packagingDesc ? { descricaoEmbalagem: p.packagingDesc } : {}),
+    componentes: (p.components || []).map((c) => ({ [compKey(c)]: compName(c), qtd: c.qty })),
   }));
 
   return { version: EXCHANGE_VERSION, insumos, receitas, produtos };
@@ -148,22 +151,46 @@ export function applyExchange(store, data, opts = {}) {
     nRec++;
   }
 
-  // Pass 4: produtos.
-  let nProd = 0;
+  // Pass 4a: product shells (so cestas-of-products resolve regardless of order).
   for (const p of data.produtos || []) {
     if (!p || !p.nome) { warnings.push('produto sem nome ignorado'); continue; }
-    const rec = recByName.get(norm(p.receita));
-    if (!rec) { warnings.push(`produto "${p.nome}" referencia receita "${p.receita}" inexistente`); continue; }
-    const existing = prodByName.get(norm(p.nome));
-    const prod = {
-      id: existing ? existing.id : newId(),
-      name: String(p.nome).trim(),
-      recipeId: rec.id,
-      portion: num(p.porcao, 1),
-      packagingCost: num(p.embalagem, 0),
-    };
+    const k = norm(p.nome);
+    if (!prodByName.get(k)) {
+      const shell = { id: newId(), name: String(p.nome).trim(), components: [], packagingCost: 0 };
+      store.upsertProduct(shell);
+      prodByName.set(k, shell);
+    }
+  }
+
+  // Pass 4b: fill product components + packaging. Accepts the new `componentes` list AND the
+  // legacy `receita` + `porcao` shape (→ a single recipe component).
+  let nProd = 0;
+  for (const p of data.produtos || []) {
+    if (!p || !p.nome) continue;
+    const prod = prodByName.get(norm(p.nome));
+    prod.packagingCost = num(p.embalagem, 0);
+    if (p.descricaoEmbalagem) prod.packagingDesc = String(p.descricaoEmbalagem).trim();
+    prod.components = [];
+
+    const raw = Array.isArray(p.componentes) ? p.componentes
+      : (p.receita != null ? [{ receita: p.receita, qtd: p.porcao }] : []);
+    for (const c of raw) {
+      if (c.receita != null) {
+        const rec = recByName.get(norm(c.receita));
+        if (!rec) { warnings.push(`produto "${p.nome}": receita "${c.receita}" não encontrada`); continue; }
+        prod.components.push({ kind: 'recipe', id: rec.id, qty: num(c.qtd, 1) });
+      } else if (c.produto != null) {
+        const sub = prodByName.get(norm(c.produto));
+        if (!sub) { warnings.push(`produto "${p.nome}": sub-produto "${c.produto}" não encontrado`); continue; }
+        prod.components.push({ kind: 'product', id: sub.id, qty: num(c.qtd, 1) });
+      } else if (c.insumo != null) {
+        const ing = ensureIngredient(c.insumo, c.unidade);
+        prod.components.push({ kind: 'ingredient', id: ing.id, qty: num(c.qtd, 1) });
+      } else {
+        warnings.push(`produto "${p.nome}": componente sem receita/produto/insumo`);
+      }
+    }
     store.upsertProduct(prod);
-    prodByName.set(norm(p.nome), prod);
     nProd++;
   }
 

@@ -60,6 +60,14 @@ test('toEngineStore feeds the cost engine', () => {
   assert.equal(cost, 0.25);
 });
 
+test('migrates legacy products (recipeId + portion) to a recipe component on load', () => {
+  const s = new PaiolStore({ products: [{ id: 'p', name: 'P', recipeId: 'r', portion: 0.5, packagingCost: 1 }] });
+  const prod = s.get('products', 'p');
+  assert.deepEqual(prod.components, [{ kind: 'recipe', id: 'r', qty: 0.5 }]);
+  assert.equal('recipeId' in prod, false);
+  assert.equal('portion' in prod, false);
+});
+
 test('config: defaults present, setConfig patches, survives YAML round-trip', () => {
   const s = new PaiolStore();
   assert.equal(s.getConfig().rateioBase, 'active-time');

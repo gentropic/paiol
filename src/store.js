@@ -64,6 +64,14 @@ export class PaiolStore {
     this.state.version = this.state.version || SCHEMA_VERSION;
     // Backfill config defaults for any missing key (forward-compatible loads).
     this.state.config = { ...DEFAULT_CONFIG, ...(this.state.config || {}) };
+    // Migrate legacy products (recipeId + portion) to the component-list shape.
+    for (const p of this.state.products) {
+      if (!Array.isArray(p.components)) {
+        p.components = p.recipeId ? [{ kind: 'recipe', id: p.recipeId, qty: p.portion ?? 1 }] : [];
+      }
+      delete p.recipeId;
+      delete p.portion;
+    }
   }
 
   // ── Config (engine settings; §4) ─────────────────────────────────────────────

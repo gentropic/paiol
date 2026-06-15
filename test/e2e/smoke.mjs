@@ -50,10 +50,12 @@ async function seedBusiness(page) {
   await page.click('[data-testid="rec-compadd"]');
   await page.click('button.pa-tab:has-text("Produtos")');
   await page.fill('[data-testid="prod-name"]', 'Pãozinho');
-  await page.selectOption('[data-testid="prod-recipe"]', { label: 'Pão' });
-  await page.fill('[data-testid="prod-portion"]', '1');
   await page.click('[data-testid="prod-create"]');
-  await page.waitForSelector('.pa-list-item');
+  await page.waitForSelector('[data-testid="prodcomp-ref"]');
+  await page.selectOption('[data-testid="prodcomp-ref"]', { label: 'Receita: Pão' });
+  await page.fill('[data-testid="prodcomp-qty"]', '1');
+  await page.click('[data-testid="prodcomp-add"]');
+  await page.waitForSelector('.pa-sub-card .pa-list-item');
 }
 
 describe('paiol UI smoke', () => {
@@ -161,13 +163,15 @@ describe('paiol UI smoke', () => {
     await page.click('[data-testid="rec-compadd"]');
     await page.waitForSelector('.pa-sub-card .pa-list-item');
 
-    // Produto from that receita.
+    // Produto from that receita (one recipe component).
     await page.click('button.pa-tab:has-text("Produtos")');
     await page.fill('[data-testid="prod-name"]', 'Pãozinho');
-    await page.selectOption('[data-testid="prod-recipe"]', { label: 'Pão' });
-    await page.fill('[data-testid="prod-portion"]', '1');
     await page.click('[data-testid="prod-create"]');
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('[data-testid="prodcomp-ref"]');
+    await page.selectOption('[data-testid="prodcomp-ref"]', { label: 'Receita: Pão' });
+    await page.fill('[data-testid="prodcomp-qty"]', '1');
+    await page.click('[data-testid="prodcomp-add"]');
+    await page.waitForSelector('.pa-sub-card .pa-list-item');
 
     // Preços: a real suggested price, no "incompleto".
     await page.click('button.pa-tab:has-text("Preços")');
@@ -176,6 +180,33 @@ describe('paiol UI smoke', () => {
     assert.match(priceText, /R\$\s*\d+,\d{2}/, `expected a money price, got "${priceText}"`);
     assert.doesNotMatch(await page.textContent('.pa-card'), /incompleto/, 'pricing reported incomplete');
     assert.deepEqual(errors, [], `errors during flow: ${errors.join(' | ')}`);
+    await page.close();
+  });
+
+  test('Lote 1.5: build a cesta (product of products) and it prices', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // → product "Pãozinho" (priced via recipe Pão)
+
+    await page.click('button.pa-tab:has-text("Produtos")');
+    await page.fill('[data-testid="prod-name"]', 'Cesta');
+    await page.fill('[data-testid="prod-pkg"]', '3');
+    await page.click('[data-testid="prod-create"]');
+
+    // Add Pãozinho ×2 as a sub-product of the Cesta. Scope to the Cesta card by its header strong
+    // (exact) — `hasText: 'Cesta'` would also match the other card, whose dropdown lists "Cesta".
+    const cestaCard = page.locator('.pa-sub-card').filter({ has: page.locator('strong', { hasText: /^Cesta$/ }) });
+    await cestaCard.locator('[data-testid="prodcomp-ref"]').selectOption({ label: 'Produto: Pãozinho' });
+    await cestaCard.locator('[data-testid="prodcomp-qty"]').fill('2');
+    await cestaCard.locator('[data-testid="prodcomp-add"]').click();
+    await cestaCard.locator('.pa-list-item', { hasText: 'Pãozinho' }).waitFor();
+
+    // Preços: the cesta has a real price (no "sem preço").
+    await page.click('button.pa-tab:has-text("Preços")');
+    const cestaPreco = page.locator('.pa-sub-card').filter({ has: page.locator('strong', { hasText: /^Cesta$/ }) });
+    await cestaPreco.locator('.pa-price').waitFor();
+    const txt = await cestaPreco.textContent();
+    assert.match(txt, /R\$\s*\d/);
+    assert.doesNotMatch(txt, /sem preço/);
     await page.close();
   });
 

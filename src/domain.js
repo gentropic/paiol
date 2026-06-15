@@ -58,13 +58,26 @@
  */
 
 /**
- * Produto — what is actually sold.
- * @typedef {object} Product
+ * A line in a product's bill of materials — a recipe, a sub-product (cestas/kits), or a bought
+ * ingredient (finished item priced via the insumos registry). `qty` is in the referenced thing's
+ * natural unit: recipe → its yield-unit; product → a count; ingredient → its stockUnit.
+ * @typedef {object} ProductComponent
+ * @property {'recipe' | 'product' | 'ingredient'} kind
  * @property {string} id
- * @property {string} name           // "Bolo de cenoura com cobertura — 500 g"
- * @property {string} recipeId
- * @property {number} portion        // fraction/multiple of one recipe yield
- * @property {number} packagingCost  // BRL per unit (embalagem)
+ * @property {number} qty
+ */
+
+/**
+ * Produto — what is actually sold. A product is a bill of materials (cestas/kits/combos), so it
+ * may roll up recipes, other products, and bought ingredients. A simple one-recipe product is
+ * just a single `recipe` component. Cost = sum of components + packaging.
+ * @typedef {object} Product
+ * @property {string}             id
+ * @property {string}             name          // "Bolo de cenoura — 500 g", "Cesta de Natal"
+ * @property {ProductComponent[]} components
+ * @property {number}             packagingCost // BRL per unit (embalagem)
+ * @property {string}            [packagingDesc] // ex.: boleira, pacote, tubo, lata
+ * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
 
 // ── Events (append-only, immutable; §2.2) ──

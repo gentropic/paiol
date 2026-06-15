@@ -135,6 +135,45 @@ test('productPrice returns cost and price together', () => {
   approx(price, unitCost / 0.65);
 });
 
+// ── Product as a component DAG (Lote 1.5) ─────────────────────────────────────
+
+test('product: recipe + bought-ingredient components + packaging', () => {
+  const s = indexStore({
+    ingredients: [{ id: 'choc', name: 'Choc', stockUnit: 'kg' }],
+    recipes: [{ id: 'r', name: 'R', yieldNominal: 10, yieldUnit: 'un', activeMinutes: 0, ovenMinutes: 0, fermentMinutes: 0,
+      components: [{ ref: { kind: 'ingredient', id: 'choc' }, qty: 1, unit: 'kg' }] }],
+    products: [{ id: 'box', name: 'Box', packagingCost: 2,
+      components: [{ kind: 'recipe', id: 'r', qty: 6 }, { kind: 'ingredient', id: 'choc', qty: 0.1 }] }],
+    priceChanges: [{ id: 'p', at: '2026-01-01', ingredientId: 'choc', price: 50 }],
+  });
+  const cfg = { valorHora: 0, taxaGas: 0, custosFixosMes: 0, expectedActiveMinutesMonth: 1, targetMarginPct: 0, paymentFeePct: 0 };
+  const lens = estimateLens(cfg);
+  // r: 1kg*50=50 over yield 10 = 5/un. box: recipe 6*5=30 + bought 0.1*50=5 + packaging 2 = 37
+  approx(productUnitCost(s, 'box', cfg, lens), 37);
+});
+
+test('cesta: product-of-products rolls up incl. sub-packaging; cycle-guarded', () => {
+  const base = {
+    ingredients: [{ id: 'a', name: 'A', stockUnit: 'un' }], recipes: [],
+    priceChanges: [{ id: 'p', at: '2026-01-01', ingredientId: 'a', price: 10 }],
+  };
+  const cfg = { valorHora: 0, taxaGas: 0, custosFixosMes: 0, expectedActiveMinutesMonth: 1, targetMarginPct: 0, paymentFeePct: 0 };
+  const lens = estimateLens(cfg);
+
+  const s = indexStore({ ...base, products: [
+    { id: 'p1', name: 'P1', packagingCost: 1, components: [{ kind: 'ingredient', id: 'a', qty: 2 }] },
+    { id: 'cesta', name: 'Cesta', packagingCost: 5, components: [{ kind: 'product', id: 'p1', qty: 3 }] },
+  ] });
+  approx(productUnitCost(s, 'p1', cfg, lens), 21);    // 2*10 + 1
+  approx(productUnitCost(s, 'cesta', cfg, lens), 68); // 3*(20+1) + 5  → sub-packaging included
+
+  const cyc = indexStore({ ...base, products: [
+    { id: 'x', name: 'X', packagingCost: 0, components: [{ kind: 'product', id: 'y', qty: 1 }] },
+    { id: 'y', name: 'Y', packagingCost: 0, components: [{ kind: 'product', id: 'x', qty: 1 }] },
+  ] });
+  assert.throws(() => productUnitCost(cyc, 'x', cfg, lens), CycleError);
+});
+
 // ── Estimate vs actual lens (§4.5) ────────────────────────────────────────────
 
 test('actual lens trues up yield and time from a Batch', () => {

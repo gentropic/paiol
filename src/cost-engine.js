@@ -269,7 +269,69 @@ export function recipeUnitCost(store, recipeId, config, lens) {
 }
 
 /**
- * Unit cost of a PRODUCT: its portion of the recipe's per-unit cost, plus packaging.
+ * The components of a product, tolerating the legacy `recipeId` + `portion` shape (migrated to a
+ * single `recipe` component) so the engine is robust even on un-migrated raw data.
+ * @param {import('./domain.js').Product} product
+ * @returns {import('./domain.js').ProductComponent[]}
+ */
+export function productComponents(product) {
+  if (Array.isArray(product.components)) return product.components;
+  if (product.recipeId) return [{ kind: 'recipe', id: product.recipeId, qty: product.portion ?? 1 }];
+  return [];
+}
+
+/**
+ * Per-yield-unit cost breakdown of a PRODUCT (excluding packaging), rolling up its component DAG:
+ * recipes contribute their breakdown, sub-products recurse, bought ingredients are pure ingredient
+ * cost. Cycle-guarded — a product may not, directly or transitively, contain itself.
+ *
+ * @param {Store} store @param {string} productId
+ * @param {import('./domain.js').Config} config @param {Lens} lens
+ * @param {Set<string>} [stack]
+ * @returns {Breakdown}
+ */
+export function productBreakdown(store, productId, config, lens, stack = new Set()) {
+  const product = store.products.get(productId);
+  if (!product) throw new RefError('product', productId);
+  if (stack.has(productId)) throw new CycleError([...stack, productId]);
+  stack.add(productId);
+
+  // 5th dimension `packaging` accumulates SUB-products' packaging (the product's OWN packaging is
+  // added by productUnitCost / shown separately). Recipes contribute 0 packaging.
+  const out = { ingredients: 0, labor: 0, gas: 0, fixed: 0, packaging: 0 };
+  for (const c of productComponents(product)) {
+    const qty = Number(c.qty) || 0;
+    if (c.kind === 'recipe') {
+      addScaled(out, costBreakdown(store, c.id, config, lens), qty);
+    } else if (c.kind === 'product') {
+      const sub = store.products.get(c.id);
+      if (!sub) throw new RefError('product', c.id);
+      addScaled(out, productBreakdown(store, c.id, config, lens, stack), qty); // sub's components (incl. its sub-packaging)
+      out.packaging += (Number(sub.packagingCost) || 0) * qty;                 // + sub's OWN packaging
+    } else if (c.kind === 'ingredient') {
+      const ing = store.ingredients.get(c.id);
+      if (!ing) throw new RefError('ingredient', c.id);
+      out.ingredients += priceOf(store, ing.id, lens.priceAt) * qty; // qty is in the ingredient's stockUnit
+    } else {
+      throw new RefError('component', String(c.kind));
+    }
+  }
+
+  stack.delete(productId);
+  return out;
+}
+
+function addScaled(out, b, q) {
+  out.ingredients += (b.ingredients || 0) * q;
+  out.labor += (b.labor || 0) * q;
+  out.gas += (b.gas || 0) * q;
+  out.fixed += (b.fixed || 0) * q;
+  if ('packaging' in out) out.packaging += (b.packaging || 0) * q;
+}
+
+/**
+ * Unit cost of a PRODUCT: the rolled-up component cost (incl. sub-products' packaging) plus its
+ * own packaging.
  * @param {Store} store @param {string} productId
  * @param {import('./domain.js').Config} config @param {Lens} lens
  * @returns {number}
@@ -277,8 +339,8 @@ export function recipeUnitCost(store, recipeId, config, lens) {
 export function productUnitCost(store, productId, config, lens) {
   const product = store.products.get(productId);
   if (!product) throw new RefError('product', productId);
-  const perYieldUnit = recipeUnitCost(store, product.recipeId, config, lens);
-  return perYieldUnit * product.portion + product.packagingCost;
+  const b = productBreakdown(store, productId, config, lens);
+  return b.ingredients + b.labor + b.gas + b.fixed + b.packaging + (Number(product.packagingCost) || 0);
 }
 
 /**

@@ -80,6 +80,39 @@ test('warns on an unresolved sub-recipe / product reference', () => {
   assert.match(r.warnings.join('|'), /Fantasma/);
 });
 
+test('imports a cesta (product of products + bought insumo) and round-trips it', () => {
+  const s = new PaiolStore();
+  const r = applyExchange(s, {
+    insumos: [{ nome: 'Bombom', unidade: 'un', preco: 1.5 }],
+    produtos: [
+      { nome: 'Caixa 6', embalagem: 2, componentes: [{ insumo: 'Bombom', qtd: 6 }] },
+      { nome: 'Cesta', embalagem: 5, componentes: [{ produto: 'Caixa 6', qtd: 2 }, { insumo: 'Bombom', qtd: 3 }] },
+    ],
+  }, det());
+  assert.deepEqual(r.warnings, []);
+  const cesta = s.state.products.find((p) => p.name === 'Cesta');
+  assert.equal(cesta.components.length, 2);
+  assert.equal(cesta.components[0].kind, 'product');
+  assert.equal(cesta.components[1].kind, 'ingredient');
+
+  const yaml = exportYaml(s);
+  const b = new PaiolStore();
+  importYaml(b, yaml, det());
+  assert.equal(exportYaml(b), yaml); // stable round-trip in the component shape
+});
+
+test('imports legacy product shape (receita + porcao) as a recipe component', () => {
+  const s = new PaiolStore();
+  applyExchange(s, {
+    insumos: [{ nome: 'Farinha', unidade: 'kg', preco: 5 }],
+    receitas: [{ nome: 'Pão', rende: 10, unidade: 'un', itens: [{ insumo: 'Farinha', qtd: 1, unidade: 'kg' }] }],
+    produtos: [{ nome: 'Pãozinho', receita: 'Pão', porcao: 1, embalagem: 0 }],
+  }, det());
+  const prod = s.state.products.find((p) => p.name === 'Pãozinho');
+  assert.deepEqual(prod.components, [{ kind: 'recipe', id: prod.components[0].id, qty: 1 }]);
+  assert.equal(prod.components[0].kind, 'recipe');
+});
+
 test('toExchange omits preco when an ingredient has no price', () => {
   const s = new PaiolStore();
   s.upsertIngredient({ id: 'i1', name: 'Sal', stockUnit: 'kg' });
