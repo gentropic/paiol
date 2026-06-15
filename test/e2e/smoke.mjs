@@ -50,6 +50,43 @@ async function addInsumo(page, name, unit, price) {
   await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 }
 
+// Add a receita via the "+ Novo" bottom sheet, optionally with one component. (Must be on Receitas.)
+async function addReceita(page, { name, yield: y, yunit, active, oven, comp } = {}) {
+  await page.click('[data-testid="rec-new"]');
+  await page.waitForSelector('[data-testid="rec-save"]');
+  await page.fill('[data-testid="rec-name"]', name);
+  if (y != null) await page.fill('[data-testid="rec-yield"]', String(y));
+  if (yunit) await page.selectOption('[data-testid="rec-yunit"]', yunit);
+  if (active != null) await page.fill('[data-testid="rec-active"]', String(active));
+  if (oven != null) await page.fill('[data-testid="rec-oven"]', String(oven));
+  if (comp) {
+    await page.selectOption('[data-testid="rec-compref"]', { label: comp.ref });
+    await page.fill('[data-testid="rec-compqty"]', String(comp.qty));
+    if (comp.unit) await page.selectOption('[data-testid="rec-compunit"]', comp.unit);
+    await page.click('[data-testid="rec-compadd"]');
+    await page.waitForSelector('.pa-sheet .pa-list-item');
+  }
+  await page.click('[data-testid="rec-save"]');
+  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
+// Add a produto via the "+ Novo" bottom sheet, optionally with one component. (Must be on Produtos.)
+async function addProduto(page, { name, pkg, pkgDesc, comp } = {}) {
+  await page.click('[data-testid="prod-new"]');
+  await page.waitForSelector('[data-testid="prod-save"]');
+  await page.fill('[data-testid="prod-name"]', name);
+  if (pkg != null) await page.fill('[data-testid="prod-pkg"]', String(pkg));
+  if (pkgDesc) await page.fill('[data-testid="prod-pkgdesc"]', pkgDesc);
+  if (comp) {
+    await page.selectOption('[data-testid="prodcomp-ref"]', { label: comp.ref });
+    await page.fill('[data-testid="prodcomp-qty"]', String(comp.qty));
+    await page.click('[data-testid="prodcomp-add"]');
+    await page.waitForSelector('.pa-sheet .pa-list-item');
+  }
+  await page.click('[data-testid="prod-save"]');
+  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
 // Seed a fresh business (priced insumo → recipe with a component → product) for tests that need
 // downstream data. Leaves the page on the Produtos tab.
 async function seedBusiness(page) {
@@ -62,25 +99,9 @@ async function seedBusiness(page) {
   await goto(page, 'Insumos');
   await addInsumo(page, 'Farinha', 'kg', '5');
   await goto(page, 'Receitas');
-  await page.fill('[data-testid="rec-name"]', 'Pão');
-  await page.fill('[data-testid="rec-yield"]', '10');
-  await page.selectOption('[data-testid="rec-yunit"]', 'un');
-  await page.fill('[data-testid="rec-active"]', '30');
-  await page.fill('[data-testid="rec-oven"]', '40');
-  await page.click('[data-testid="rec-create"]');
-  await page.waitForSelector('[data-testid="rec-compref"]');
-  await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Farinha' });
-  await page.fill('[data-testid="rec-compqty"]', '500');
-  await page.selectOption('[data-testid="rec-compunit"]', 'g');
-  await page.click('[data-testid="rec-compadd"]');
+  await addReceita(page, { name: 'Pão', yield: 10, yunit: 'un', active: 30, oven: 40, comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
   await goto(page, 'Produtos');
-  await page.fill('[data-testid="prod-name"]', 'Pãozinho');
-  await page.click('[data-testid="prod-create"]');
-  await page.waitForSelector('[data-testid="prodcomp-ref"]');
-  await page.selectOption('[data-testid="prodcomp-ref"]', { label: 'Receita: Pão' });
-  await page.fill('[data-testid="prodcomp-qty"]', '1');
-  await page.click('[data-testid="prodcomp-add"]');
-  await page.waitForSelector('.pa-sub-card .pa-list-item');
+  await addProduto(page, { name: 'Pãozinho', comp: { ref: 'Receita: Pão', qty: 1 } });
 }
 
 describe('paiol UI smoke', () => {
@@ -172,28 +193,11 @@ describe('paiol UI smoke', () => {
 
     // Receita using that insumo.
     await goto(page, 'Receitas');
-    await page.fill('[data-testid="rec-name"]', 'Pão');
-    await page.fill('[data-testid="rec-yield"]', '10');
-    await page.selectOption('[data-testid="rec-yunit"]', 'un');
-    await page.fill('[data-testid="rec-active"]', '30');
-    await page.fill('[data-testid="rec-oven"]', '40');
-    await page.click('[data-testid="rec-create"]');
-    await page.waitForSelector('[data-testid="rec-compref"]');
-    await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Farinha' });
-    await page.fill('[data-testid="rec-compqty"]', '500');
-    await page.selectOption('[data-testid="rec-compunit"]', 'g');
-    await page.click('[data-testid="rec-compadd"]');
-    await page.waitForSelector('.pa-sub-card .pa-list-item');
+    await addReceita(page, { name: 'Pão', yield: 10, yunit: 'un', active: 30, oven: 40, comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
 
     // Produto from that receita (one recipe component).
     await goto(page, 'Produtos');
-    await page.fill('[data-testid="prod-name"]', 'Pãozinho');
-    await page.click('[data-testid="prod-create"]');
-    await page.waitForSelector('[data-testid="prodcomp-ref"]');
-    await page.selectOption('[data-testid="prodcomp-ref"]', { label: 'Receita: Pão' });
-    await page.fill('[data-testid="prodcomp-qty"]', '1');
-    await page.click('[data-testid="prodcomp-add"]');
-    await page.waitForSelector('.pa-sub-card .pa-list-item');
+    await addProduto(page, { name: 'Pãozinho', comp: { ref: 'Receita: Pão', qty: 1 } });
 
     // Preços: a real suggested price, no "incompleto".
     await goto(page, 'Preços');
@@ -209,18 +213,9 @@ describe('paiol UI smoke', () => {
     const page = await context.newPage();
     await seedBusiness(page); // → product "Pãozinho" (priced via recipe Pão)
 
+    // Build a Cesta = Pãozinho ×2 + R$3 packaging, all in one sheet.
     await goto(page, 'Produtos');
-    await page.fill('[data-testid="prod-name"]', 'Cesta');
-    await page.fill('[data-testid="prod-pkg"]', '3');
-    await page.click('[data-testid="prod-create"]');
-
-    // Add Pãozinho ×2 as a sub-product of the Cesta. Scope to the Cesta card by its header strong
-    // (exact) — `hasText: 'Cesta'` would also match the other card, whose dropdown lists "Cesta".
-    const cestaCard = page.locator('.pa-sub-card').filter({ has: page.locator('strong', { hasText: /^Cesta$/ }) });
-    await cestaCard.locator('[data-testid="prodcomp-ref"]').selectOption({ label: 'Produto: Pãozinho' });
-    await cestaCard.locator('[data-testid="prodcomp-qty"]').fill('2');
-    await cestaCard.locator('[data-testid="prodcomp-add"]').click();
-    await cestaCard.locator('.pa-list-item', { hasText: 'Pãozinho' }).waitFor();
+    await addProduto(page, { name: 'Cesta', pkg: 3, comp: { ref: 'Produto: Pãozinho', qty: 2 } });
 
     // Preços: the cesta has a real price (no "sem preço").
     await goto(page, 'Preços');
@@ -245,10 +240,7 @@ describe('paiol UI smoke', () => {
     await addInsumo(page, 'Farinha', 'kg');
 
     await goto(page, 'Receitas');
-    await page.fill('[data-testid="rec-name"]', 'Bolo');
-    await page.fill('[data-testid="rec-yield"]', '1');
-    await page.selectOption('[data-testid="rec-yunit"]', 'un');
-    await page.click('[data-testid="rec-create"]');
+    await page.click('[data-testid="rec-new"]');
     await page.waitForSelector('[data-testid="rec-compref"]');
 
     // Eggs are countable → only "un" offered (no weighing).
@@ -452,11 +444,15 @@ describe('paiol UI smoke', () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Receitas');
-    await page.click('[data-testid="rec-edit"]');
-    await page.fill('[data-testid="rec-edit-notes"]', 'Misturar bem e assar 30min');
-    await page.click('[data-testid="rec-edit-save"]');
-    await page.waitForSelector('.pa-obs');
-    assert.match(await page.textContent('.pa-obs'), /Misturar bem/);
+    await page.click('.pa-row-item'); // open the seeded "Pão" in its edit sheet
+    await page.waitForSelector('[data-testid="rec-notes"]');
+    await page.fill('[data-testid="rec-notes"]', 'Misturar bem e assar 30min');
+    await page.click('[data-testid="rec-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    // Re-open to confirm the note persisted.
+    await page.click('.pa-row-item');
+    await page.waitForSelector('[data-testid="rec-notes"]');
+    assert.match(await page.inputValue('[data-testid="rec-notes"]'), /Misturar bem/);
     await page.close();
   });
 

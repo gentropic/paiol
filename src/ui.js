@@ -105,8 +105,6 @@ function searchInput(placeholder, container, testid) {
   return inp;
 }
 
-const isEditing = (ctx, kind, id) => !!ctx.view.editing && ctx.view.editing.kind === kind && ctx.view.editing.id === id;
-
 // ── Shell ───────────────────────────────────────────────────────────────────────
 
 /**
@@ -130,7 +128,7 @@ export function renderApp(root, ctx) {
   }
   content.push((panels[tab] || inicioPanel)(ctx));
 
-  root.replaceChildren(
+  root.replaceChildren(...[
     el('header', { class: 'pa-header' }, [
       el('h1', { text: 'Quitutes do Paiol' }),
       el('p', { class: 'pa-sub', text: 'Custos, receitas e vendas' }),
@@ -142,7 +140,7 @@ export function renderApp(root, ctx) {
         el('span', { class: 'pa-navlbl', text: sec.label }),
       ]))),
     ctx.view.modal && modalOverlay(ctx),
-  );
+  ].filter(Boolean)); // drop the falsy modal slot — replaceChildren would coerce it to a "null" text node
 }
 
 // ── Modal / bottom sheet ─────────────────────────────────────────────────────────
@@ -308,52 +306,59 @@ function insumoSheet(ctx, ing) {
 
 function receitasPanel(ctx) {
   const { store } = ctx;
-  const name = el('input', { class: 'pa-input', 'data-testid': 'rec-name', type: 'text', placeholder: 'Nome (ex.: Massa base de bolo)' });
-  const yieldQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-yield', type: 'text', inputmode: 'decimal', placeholder: 'Rend.' });
-  const yieldUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-yunit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u })));
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos' });
-  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno' });
-
-  function add() {
-    const nm = name.value.trim();
-    const y = parseNum(yieldQty.value);
-    if (!nm || !(y > 0)) { name.focus(); return; }
-    ctx.actions.mutate((s) => s.upsertRecipe({
-      id: uuid(), name: nm, yieldNominal: y, yieldUnit: yieldUnit.value,
-      activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
-      fermentMinutes: 0, components: [],
-    }));
-  }
-
-  const cards = el('div', {}, store.state.recipes.map((r) => receitaCard(ctx, r)));
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.recipes.map((r) => receitaRow(ctx, r)));
   return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Receitas' }),
-    store.state.recipes.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma receita ainda.' })
-      : el('div', {}, [searchInput('Buscar receita…', cards, 'rec-search'), cards]),
-    el('h3', { class: 'pa-h3', text: 'Nova receita' }),
-    el('div', { class: 'pa-row pa-form' }, [name]),
-    el('div', { class: 'pa-row pa-form' }, [
-      el('span', { class: 'pa-lab', text: 'Rende' }), yieldQty, yieldUnit,
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Receitas' }),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'rec-new', onclick: () => ctx.actions.openModal({ kind: 'receita-add' }) }, '+ Novo'),
     ]),
-    el('div', { class: 'pa-row pa-form' }, [active, oven,
-      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'rec-create', onclick: add }, 'Criar receita')]),
-    el('p', { class: 'pa-hint', text: 'Min ativos = mão na massa; min forno = gás. Fermentação não conta como trabalho.' }),
+    store.state.recipes.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma receita. Toque em “+ Novo” para começar.' })
+      : el('div', {}, [searchInput('Buscar receita…', list, 'rec-search'), list]),
   ]);
 }
 
-function receitaCard(ctx, recipe) {
+// Clean, scannable row — the whole row opens the edit sheet.
+function receitaRow(ctx, recipe) {
   const { store } = ctx;
-  if (isEditing(ctx, 'recipe', recipe.id)) return receitaEditCard(ctx, recipe);
-  // Component editor.
+  const n = recipe.components.length;
+  const semPreco = unpricedInRecipe(store, recipe.id).length > 0;
+  return el('li', { class: 'pa-row-item', 'data-search': recipe.name, onclick: () => ctx.actions.openModal({ kind: 'receita-edit', id: recipe.id }) }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: recipe.name })),
+      el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${n} ${n === 1 ? 'item' : 'itens'}` }),
+      semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
+    ].filter(Boolean)),
+    el('span', { class: 'pa-chev', text: '›' }),
+  ]);
+}
+
+MODALS['receita-add'] = (ctx) => receitaSheet(ctx, null);
+MODALS['receita-edit'] = (ctx, m) => receitaSheet(ctx, ctx.store.get('recipes', m.id) || null);
+
+function receitaSheet(ctx, recipe) {
+  const { store } = ctx;
+  // Local draft of the component list — committed atomically on Salvar (so a new recipe and its
+  // items are created in one mutation, and Cancelar discards everything).
+  const comps = recipe ? recipe.components.map((c) => ({ ref: { ...c.ref }, qty: c.qty, unit: c.unit })) : [];
+
+  const name = el('input', { class: 'pa-input', 'data-testid': 'rec-name', type: 'text', placeholder: 'Nome (ex.: Massa base de bolo)', value: recipe ? recipe.name : '' });
+  const yieldQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-yield', type: 'text', inputmode: 'decimal', placeholder: 'Rend.', value: recipe ? String(recipe.yieldNominal).replace('.', ',') : '' });
+  const yieldUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-yunit' },
+    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.yieldUnit ? { selected: 'selected' } : {}) })));
+  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos', value: recipe ? String(recipe.activeMinutes) : '' });
+  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno', value: recipe ? String(recipe.ovenMinutes) : '' });
+  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-notes', rows: '3', placeholder: 'Observação / modo de preparo (opcional)' });
+  notes.value = recipe ? (recipe.notes || '') : '';
+
+  // Component editor (insumos + other recipes, never itself).
   const options = [
     ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
-    ...store.state.recipes.filter((r) => r.id !== recipe.id).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
+    ...store.state.recipes.filter((r) => !recipe || r.id !== recipe.id).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-compqty', type: 'text', inputmode: 'decimal', placeholder: 'qtd' });
   const unit = el('select', { class: 'pa-input', 'data-testid': 'rec-compunit' });
-  // Offer only units in the selected item's dimension; re-fill when the item changes.
   function fillUnits() {
     const o = options[Number(refSel.value)] || options[0];
     unit.replaceChildren(...unitsInDimension(o ? o.unit : 'un').map((u) => el('option', { value: u, text: u })));
@@ -361,83 +366,60 @@ function receitaCard(ctx, recipe) {
   fillUnits();
   refSel.addEventListener('change', fillUnits);
 
+  const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  function renderItems() {
+    itemsList.replaceChildren(...(comps.length
+      ? comps.map((c, idx) => el('li', { class: 'pa-list-item' }, [
+          el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} — ${refName(store, c.ref)}` }),
+          el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { comps.splice(idx, 1); renderItems(); } }, '✕'),
+        ]))
+      : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda.' })]));
+  }
+  renderItems();
+
   function addComponent() {
     const q = parseNum(qty.value);
     const o = options[Number(refSel.value)];
-    if (!o || !(q > 0)) return;
-    ctx.actions.mutate((s) => {
-      const r = s.get('recipes', recipe.id);
-      r.components.push({ ref: { kind: o.kind, id: o.id }, qty: q, unit: unit.value });
-      s.upsertRecipe(r);
-    });
-  }
-  function removeComponent(idx) {
-    ctx.actions.mutate((s) => {
-      const r = s.get('recipes', recipe.id);
-      r.components.splice(idx, 1);
-      s.upsertRecipe(r);
-    });
+    if (!o || !(q > 0)) { qty.focus(); return; }
+    comps.push({ ref: { kind: o.kind, id: o.id }, qty: q, unit: unit.value });
+    qty.value = '';
+    renderItems();
   }
 
-  return el('div', { class: 'pa-sub-card', 'data-search': recipe.name }, [
-    el('div', { class: 'pa-row' }, [
-      el('strong', { class: 'pa-grow', text: recipe.name }),
-      el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno` }),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Editar receita', 'data-testid': 'rec-edit', onclick: () => ctx.actions.startEdit('recipe', recipe.id) }, '✎'),
-    ]),
-    recipe.notes && el('p', { class: 'pa-obs', text: recipe.notes }),
-    recipe.components.length === 0
-      ? el('p', { class: 'pa-empty pa-sm', text: 'Sem itens. Adicione insumos ou sub-receitas.' })
-      : el('ul', { class: 'pa-list pa-tight' }, recipe.components.map((c, idx) =>
-          el('li', { class: 'pa-list-item' }, [
-            el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} — ${refName(store, c.ref)}` }),
-            el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => removeComponent(idx) }, '✕'),
-          ]))),
+  function save() {
+    const nm = name.value.trim();
+    const y = parseNum(yieldQty.value);
+    if (!nm || !(y > 0)) { name.focus(); return; }
+    const obs = notes.value.trim();
+    ctx.actions.mutate((s) => s.upsertRecipe({
+      ...(recipe || { fermentMinutes: 0 }), id: recipe ? recipe.id : uuid(), name: nm,
+      yieldNominal: y, yieldUnit: yieldUnit.value,
+      activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
+      components: comps, ...(obs ? { notes: obs } : { notes: undefined }),
+    }));
+  }
+
+  const rows = [
+    field('Nome', name),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yieldQty, yieldUnit]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
+    el('p', { class: 'pa-hint', text: 'Min ativos = mão na massa; min forno = gás. Fermentação não conta como trabalho.' }),
+    field('Observação (modo de preparo)', notes),
+    el('h3', { class: 'pa-h3', text: 'Itens' }),
+    itemsList,
     options.length === 0
       ? el('p', { class: 'pa-hint', text: 'Cadastre insumos primeiro para montar a receita.' })
       : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit,
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
-    el('div', { class: 'pa-row pa-cardfoot' }, [
-      el('button', { class: 'pa-btn pa-ghost pa-sm pa-bad', title: 'Remover receita',
-        onclick: () => confirmRemove(ctx, `a receita "${recipe.name}"`, (s) => s.removeRecipe(recipe.id)) }, '🗑 Remover receita'),
-    ]),
-  ]);
-}
+  ];
 
-function receitaEditCard(ctx, recipe) {
-  const name = el('input', { class: 'pa-input', 'data-testid': 'rec-edit-name', type: 'text', value: recipe.name });
-  const yQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-yield', type: 'text', inputmode: 'decimal', value: String(recipe.yieldNominal).replace('.', ',') });
-  const yUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-edit-yunit' },
-    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(u === recipe.yieldUnit ? { selected: 'selected' } : {}) })));
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
-  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
-  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-edit-notes', rows: '3', placeholder: 'Observação / modo de preparo (opcional)' });
-  notes.value = recipe.notes || '';
-
-  function save() {
-    const nm = name.value.trim();
-    const y = parseNum(yQty.value);
-    if (!nm || !(y > 0)) { name.focus(); return; }
-    const obs = notes.value.trim();
-    ctx.actions.mutate((s) => s.upsertRecipe({
-      ...recipe, name: nm, yieldNominal: y, yieldUnit: yUnit.value,
-      activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
-      ...(obs ? { notes: obs } : { notes: undefined }),
-    }));
-  }
-  return el('div', { class: 'pa-sub-card pa-editing' }, [
-    el('div', { class: 'pa-row pa-form' }, [name]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yQty, yUnit]),
-    el('div', { class: 'pa-row pa-form' }, [
-      el('span', { class: 'pa-lab', text: 'min ativos' }), active,
-      el('span', { class: 'pa-lab', text: 'min forno' }), oven,
-    ]),
-    el('div', { class: 'pa-field' }, [el('label', { text: 'Observação (modo de preparo)' }), notes]),
-    el('div', { class: 'pa-row pa-form' }, [
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'rec-edit-save', onclick: save }, 'Salvar'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.cancelEdit() }, 'Cancelar'),
-    ]),
-  ]);
+  return sheet({
+    title: recipe ? 'Editar receita' : 'Nova receita',
+    rows,
+    onSave: save,
+    saveTestid: 'rec-save',
+    danger: recipe ? { label: '🗑 Excluir receita', testid: 'rec-delete', onClick: () => confirmRemove(ctx, `a receita "${recipe.name}"`, (s) => s.removeRecipe(recipe.id)) } : null,
+  });
 }
 
 function refName(store, ref) {
@@ -466,48 +448,51 @@ function unpricedInRecipe(store, recipeId, seen = new Set()) {
 
 function produtosPanel(ctx) {
   const { store } = ctx;
-  const name = el('input', { class: 'pa-input', 'data-testid': 'prod-name', type: 'text', placeholder: 'Nome (ex.: Bolo 500g, Cesta de Natal)' });
-  const pkg = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-pkg', type: 'text', inputmode: 'decimal', placeholder: 'embalagem', value: '0' });
-  const pkgDesc = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-pkgdesc', type: 'text', placeholder: 'descrição (ex.: boleira)' });
-
-  function add() {
-    const nm = name.value.trim();
-    if (!nm) { name.focus(); return; }
-    const desc = pkgDesc.value.trim();
-    ctx.actions.mutate((s) => s.upsertProduct({
-      id: uuid(), name: nm, components: [], packagingCost: parseNum(pkg.value) || 0,
-      ...(desc ? { packagingDesc: desc } : {}),
-    }));
-  }
-
-  const cards = el('div', {}, store.state.products.map((p) => produtoCard(ctx, p)));
   const canBuild = store.state.recipes.length > 0 || store.state.ingredients.length > 0;
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.products.map((p) => produtoRow(ctx, p)));
   return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Produtos' }),
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Produtos' }),
+      canBuild && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'prod-new', onclick: () => ctx.actions.openModal({ kind: 'produto-add' }) }, '+ Novo'),
+    ].filter(Boolean)),
+    !canBuild && el('p', { class: 'pa-hint', text: 'Crie uma receita ou um insumo primeiro.' }),
     store.state.products.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum produto ainda.' })
-      : el('div', {}, [searchInput('Buscar produto…', cards, 'prod-search'), cards]),
-    !canBuild
-      ? el('p', { class: 'pa-hint', text: 'Crie uma receita ou um insumo primeiro.' })
-      : el('div', {}, [
-          el('h3', { class: 'pa-h3', text: 'Novo produto' }),
-          el('div', { class: 'pa-row pa-form' }, [name]),
-          el('div', { class: 'pa-row pa-form' }, [
-            el('span', { class: 'pa-lab', text: 'Embalagem' }), pkg, pkgDesc,
-            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'prod-create', onclick: add }, 'Criar produto'),
-          ]),
-          el('p', { class: 'pa-hint', text: 'Crie o produto, depois adicione os itens (receitas, outros produtos ou insumos comprados). Cesta = vários produtos/itens juntos.' }),
-        ]),
+      : el('div', {}, [searchInput('Buscar produto…', list, 'prod-search'), list]),
+  ].filter(Boolean));
+}
+
+// Clean, scannable row — the whole row opens the edit sheet.
+function produtoRow(ctx, product) {
+  const { store } = ctx;
+  const n = (product.components || []).length;
+  const semPreco = unpricedInProduct(store, product.id).length > 0;
+  return el('li', { class: 'pa-row-item', 'data-search': product.name, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: product.name })),
+      el('span', { class: 'pa-muted', text: `emb. ${brl(product.packagingCost)}${product.packagingDesc ? ` (${product.packagingDesc})` : ''} · ${n} ${n === 1 ? 'item' : 'itens'}` }),
+      semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
+    ].filter(Boolean)),
+    el('span', { class: 'pa-chev', text: '›' }),
   ]);
 }
 
-function produtoCard(ctx, product) {
-  const { store } = ctx;
-  if (isEditing(ctx, 'product', product.id)) return produtoEditCard(ctx, product);
+MODALS['produto-add'] = (ctx) => produtoSheet(ctx, null);
+MODALS['produto-edit'] = (ctx, m) => produtoSheet(ctx, ctx.store.get('products', m.id) || null);
 
+function produtoSheet(ctx, product) {
+  const { store } = ctx;
+  // Local draft of components — committed atomically on Salvar (see receitaSheet).
+  const comps = product ? (product.components || []).map((c) => ({ kind: c.kind, id: c.id, qty: c.qty })) : [];
+
+  const name = el('input', { class: 'pa-input', 'data-testid': 'prod-name', type: 'text', placeholder: 'Nome (ex.: Bolo 500g, Cesta de Natal)', value: product ? product.name : '' });
+  const pkg = moneyField(product ? product.packagingCost : null, 'prod-pkg');
+  const pkgDesc = el('input', { class: 'pa-input', 'data-testid': 'prod-pkgdesc', type: 'text', placeholder: 'descrição (ex.: boleira)', value: product ? (product.packagingDesc || '') : '' });
+
+  // Component editor: recipes, other products (never itself), and bought insumos.
   const options = [
     ...store.state.recipes.map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unitLabel: r.yieldUnit })),
-    ...store.state.products.filter((x) => x.id !== product.id).map((x) => ({ kind: 'product', id: x.id, label: `Produto: ${x.name}`, unitLabel: 'un' })),
+    ...store.state.products.filter((x) => !product || x.id !== product.id).map((x) => ({ kind: 'product', id: x.id, label: `Produto: ${x.name}`, unitLabel: 'un' })),
     ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unitLabel: i.stockUnit })),
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'prodcomp-ref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
@@ -517,59 +502,56 @@ function produtoCard(ctx, product) {
   refreshUnit();
   refSel.addEventListener('change', refreshUnit);
 
+  const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  function renderItems() {
+    itemsList.replaceChildren(...(comps.length
+      ? comps.map((c, idx) => el('li', { class: 'pa-list-item' }, [
+          el('span', { class: 'pa-grow', text: productCompLabel(store, c) }),
+          el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { comps.splice(idx, 1); renderItems(); } }, '✕'),
+        ]))
+      : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda.' })]));
+  }
+  renderItems();
+
   function addComp() {
     const o = options[Number(refSel.value)];
     const q = parseNum(qty.value);
-    if (!o || !(q > 0)) return;
-    ctx.actions.mutate((s) => { const prod = s.get('products', product.id); prod.components.push({ kind: o.kind, id: o.id, qty: q }); s.upsertProduct(prod); });
-  }
-  function removeComp(idx) {
-    ctx.actions.mutate((s) => { const prod = s.get('products', product.id); prod.components.splice(idx, 1); s.upsertProduct(prod); });
+    if (!o || !(q > 0)) { qty.focus(); return; }
+    comps.push({ kind: o.kind, id: o.id, qty: q });
+    qty.value = '1';
+    renderItems();
   }
 
-  const comps = product.components || [];
-  return el('div', { class: 'pa-sub-card', 'data-search': product.name }, [
-    el('div', { class: 'pa-row' }, [
-      el('strong', { class: 'pa-grow', text: product.name }),
-      el('span', { class: 'pa-muted', text: `emb. ${brl(product.packagingCost)}${product.packagingDesc ? ` (${product.packagingDesc})` : ''}` }),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Editar produto', 'data-testid': 'prod-edit', onclick: () => ctx.actions.startEdit('product', product.id) }, '✎'),
-    ]),
-    comps.length === 0
-      ? el('p', { class: 'pa-empty pa-sm', text: 'Sem itens. Adicione receitas, produtos ou insumos.' })
-      : el('ul', { class: 'pa-list pa-tight' }, comps.map((c, idx) =>
-          el('li', { class: 'pa-list-item' }, [
-            el('span', { class: 'pa-grow', text: productCompLabel(store, c) }),
-            el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => removeComp(idx) }, '✕'),
-          ]))),
+  function save() {
+    const nm = name.value.trim();
+    if (!nm) { name.focus(); return; }
+    const d = pkgDesc.value.trim();
+    ctx.actions.mutate((s) => s.upsertProduct({
+      ...(product || {}), id: product ? product.id : uuid(), name: nm, components: comps,
+      packagingCost: parseNum(pkg.input.value) || 0, ...(d ? { packagingDesc: d } : { packagingDesc: undefined }),
+    }));
+  }
+
+  const rows = [
+    field('Nome', name),
+    field('Embalagem', pkg),
+    field('Descrição da embalagem (opcional)', pkgDesc),
+    el('h3', { class: 'pa-h3', text: 'Itens' }),
+    el('p', { class: 'pa-hint', text: 'Receitas, outros produtos ou insumos comprados. Cesta = vários produtos/itens juntos.' }),
+    itemsList,
     options.length === 0
       ? el('p', { class: 'pa-hint', text: 'Cadastre receitas ou insumos para montar o produto.' })
       : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unitLab,
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'prodcomp-add', onclick: addComp }, '+ item')]),
-    el('div', { class: 'pa-row pa-cardfoot' }, [
-      el('button', { class: 'pa-btn pa-ghost pa-sm pa-bad',
-        onclick: () => confirmRemove(ctx, `o produto "${product.name}"`, (s) => s.removeProduct(product.id)) }, '🗑 Remover produto'),
-    ]),
-  ]);
-}
+  ];
 
-function produtoEditCard(ctx, product) {
-  const name = el('input', { class: 'pa-input', 'data-testid': 'prod-edit-name', type: 'text', value: product.name });
-  const pkg = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-edit-pkg', type: 'text', inputmode: 'decimal', value: String(product.packagingCost).replace('.', ',') });
-  const desc = el('input', { class: 'pa-input', 'data-testid': 'prod-edit-desc', type: 'text', placeholder: 'descrição da embalagem (boleira, pacote…)', value: product.packagingDesc || '' });
-  function save() {
-    const nm = name.value.trim();
-    if (!nm) { name.focus(); return; }
-    const d = desc.value.trim();
-    ctx.actions.mutate((s) => s.upsertProduct({ ...product, name: nm, packagingCost: parseNum(pkg.value) || 0, ...(d ? { packagingDesc: d } : { packagingDesc: undefined }) }));
-  }
-  return el('div', { class: 'pa-sub-card pa-editing' }, [
-    el('div', { class: 'pa-row pa-form' }, [name]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Embalagem' }), pkg, desc]),
-    el('div', { class: 'pa-row pa-form' }, [
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'prod-edit-save', onclick: save }, 'Salvar'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.cancelEdit() }, 'Cancelar'),
-    ]),
-  ]);
+  return sheet({
+    title: product ? 'Editar produto' : 'Novo produto',
+    rows,
+    onSave: save,
+    saveTestid: 'prod-save',
+    danger: product ? { label: '🗑 Excluir produto', testid: 'prod-delete', onClick: () => confirmRemove(ctx, `o produto "${product.name}"`, (s) => s.removeProduct(product.id)) } : null,
+  });
 }
 
 function productCompLabel(store, c) {
