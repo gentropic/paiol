@@ -5,7 +5,7 @@ import { VFS } from '../vendor/@gcu/vfs/index.js';
 import { loadStore, createDebouncedSaver } from './persist.js';
 import { syncOnce, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
-import { renderApp } from './ui.js';
+import { renderApp, renderModal } from './ui.js';
 import { importYaml } from './exchange.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
@@ -26,6 +26,7 @@ export async function boot(root) {
 
   const ctx = { store, view, actions: {} };
   const rerender = () => renderApp(root, ctx);
+  const rerenderModal = () => renderModal(root, ctx); // overlay-only; leaves the panel DOM in place
 
   // If we linked on this load, pull immediately so the device starts in sync.
   if (redirect.linked) void doSync(true);
@@ -35,8 +36,8 @@ export async function boot(root) {
     setReportMonth(month) { view.reportMonth = month; rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
     // Modal/bottom-sheet (add/edit forms, confirmations).
-    openModal(modal) { view.modal = modal; rerender(); },
-    closeModal() { view.modal = null; rerender(); },
+    openModal(modal) { view.modal = modal; rerenderModal(); },
+    closeModal() { view.modal = null; rerenderModal(); },
     // Generic business mutation: run fn(store), persist (debounced), re-render. Closes any sheet.
     mutate(fn) { fn(store); view.modal = null; saver.schedule(); rerender(); },
     setConfig(partial) { store.setConfig(partial); saver.schedule(); view.status = 'Ajustes salvos.'; rerender(); },

@@ -72,6 +72,31 @@ export class PaiolStore {
       delete p.recipeId;
       delete p.portion;
     }
+    // Read-model memo (§perf): the UI re-renders the whole panel on every action and looks records
+    // up per-row, so id/price scans must be O(1). `_rev` bumps on every mutation; the lazily-built
+    // indexes (and the engine store) are rebuilt only when stale. Not serialized.
+    this._rev = 0;
+    this._index = null; this._indexRev = -1;
+    this._engineStore = null; this._engineRev = -1;
+  }
+
+  /** Lazily-built lookup maps (by-id per master collection + latest price per ingredient). */
+  _idx() {
+    if (this._index && this._indexRev === this._rev) return this._index;
+    const maps = {};
+    for (const c of MASTER_COLLECTIONS) {
+      const m = new Map();
+      for (const x of this.state[c]) m.set(x.id, x);
+      maps[c] = m;
+    }
+    const price = new Map(); // ingredientId → { price, at } of the latest PriceChange (ties: last wins)
+    for (const pc of this.state.priceChanges) {
+      const cur = price.get(pc.ingredientId);
+      if (!cur || pc.at >= cur.at) price.set(pc.ingredientId, { price: pc.price, at: pc.at });
+    }
+    maps.price = price;
+    this._index = maps; this._indexRev = this._rev;
+    return maps;
   }
 
   // ── Config (engine settings; §4) ─────────────────────────────────────────────
@@ -80,24 +105,18 @@ export class PaiolStore {
   getConfig() { return this.state.config; }
 
   /** Patch config in place. @param {Partial<import('./domain.js').Config>} partial */
-  setConfig(partial) { Object.assign(this.state.config, partial); return this.state.config; }
+  setConfig(partial) { Object.assign(this.state.config, partial); this._rev++; return this.state.config; }
 
   /** Latest price for an ingredient (BRL per stockUnit), or null if none recorded yet. */
   currentPrice(ingredientId) {
-    let best = null; let bestAt = '';
-    for (const pc of this.state.priceChanges) {
-      if (pc.ingredientId === ingredientId && pc.at >= bestAt) { bestAt = pc.at; best = pc; }
-    }
-    return best ? best.price : null;
+    const e = this._idx().price.get(ingredientId);
+    return e ? e.price : null;
   }
 
   /** ISO date of the latest recorded price for an ingredient, or null. */
   lastPriceAt(ingredientId) {
-    let bestAt = null;
-    for (const pc of this.state.priceChanges) {
-      if (pc.ingredientId === ingredientId && (bestAt == null || pc.at > bestAt)) bestAt = pc.at;
-    }
-    return bestAt;
+    const e = this._idx().price.get(ingredientId);
+    return e ? e.at : null;
   }
 
   /** Full price history for an ingredient, newest first: [{ at, price }]. */
@@ -132,11 +151,19 @@ export class PaiolStore {
 
   // ── Read model ───────────────────────────────────────────────────────────────
 
-  /** Index the state for the cost engine. */
-  toEngineStore() { return indexStore(this.state); }
+  /** Index the state for the cost engine (memoized until the next mutation). */
+  toEngineStore() {
+    if (this._engineStore && this._engineRev === this._rev) return this._engineStore;
+    this._engineStore = indexStore(this.state);
+    this._engineRev = this._rev;
+    return this._engineStore;
+  }
 
-  /** Get a master record by id, or undefined. */
-  get(collection, id) { return this.state[collection].find((x) => x.id === id); }
+  /** Get a master record by id, or undefined. O(1) via the memoized index. */
+  get(collection, id) {
+    const m = this._idx()[collection];
+    return m ? m.get(id) : this.state[collection].find((x) => x.id === id);
+  }
 
   // ── Merge (sync — union by id; §2.2) ─────────────────────────────────────────
 
@@ -211,13 +238,14 @@ export class PaiolStore {
     const arr = this.state[collection];
     const i = arr.findIndex((x) => x.id === rec.id);
     if (i >= 0) arr[i] = rec; else arr.push(rec);
+    this._rev++;
     return rec;
   }
 
   _remove(collection, id) {
     const arr = this.state[collection];
     const i = arr.findIndex((x) => x.id === id);
-    if (i >= 0) { arr.splice(i, 1); return true; }
+    if (i >= 0) { arr.splice(i, 1); this._rev++; return true; }
     return false;
   }
 
@@ -232,6 +260,7 @@ export class PaiolStore {
       throw new StoreError(`evento duplicado em ${collection}: ${ev.id}`);
     }
     this.state[collection].push(ev);
+    this._rev++;
     return ev;
   }
 }

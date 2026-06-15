@@ -55,7 +55,8 @@
 
     .pa-list { list-style: none; margin: 0; padding: 0; }
     .pa-list-item { display: flex; align-items: center; justify-content: space-between;
-      gap: 8px; padding: 10px 4px; border-bottom: 1px solid var(--au-border); }
+      gap: 8px; padding: 10px 4px; border-bottom: 1px solid var(--au-border);
+      content-visibility: auto; contain-intrinsic-size: auto 44px; }
     .pa-list-item:last-child { border-bottom: none; }
     .pa-empty { color: var(--au-fg-soft); font-style: italic; margin: 4px 0; }
     /* Date header inside an operação log (Fornadas/Vendas) */
@@ -96,7 +97,8 @@
     .pa-lab { color: var(--au-fg-soft); font-size: 0.88rem; }
     .pa-form { flex-wrap: wrap; }
 
-    .pa-sub-card { border: 1px solid var(--au-border); border-radius: 10px; padding: 12px; margin: 0 0 10px; background: #fffdfb; }
+    .pa-sub-card { border: 1px solid var(--au-border); border-radius: 10px; padding: 12px; margin: 0 0 10px; background: #fffdfb;
+      content-visibility: auto; contain-intrinsic-size: auto 200px; }
     .pa-list.pa-tight .pa-list-item { padding: 6px 2px; }
 
     .pa-field { display: flex; flex-direction: column; gap: 4px; margin: 0 0 12px; }
@@ -131,7 +133,8 @@
     /* Cadastro lists: header with add button, clean tappable rows */
     .pa-cardhead { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; }
     .pa-rows { margin: 0; }
-    .pa-row-item { display: flex; align-items: center; gap: 8px; padding: 12px 4px; border-bottom: 1px solid var(--au-border); cursor: pointer; }
+    .pa-row-item { display: flex; align-items: center; gap: 8px; padding: 12px 4px; border-bottom: 1px solid var(--au-border); cursor: pointer;
+      content-visibility: auto; contain-intrinsic-size: auto 64px; }
     .pa-row-item:last-child { border-bottom: none; }
     .pa-row-item:active { background: #faf3ec; }
     .pa-row-item .pa-muted { font-size: 0.85rem; }

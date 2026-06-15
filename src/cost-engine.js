@@ -30,12 +30,22 @@ import { convert } from './units.js';
 export function indexStore(raw) {
   if (raw && raw.__indexed) return /** @type {Store} */ (raw);
   const byId = (arr) => new Map((arr || []).map((x) => [x.id, x]));
+  const priceChanges = (raw.priceChanges || []).slice();
+  // Per-ingredient price history, ascending by time, so priceOf is O(1) for the latest price and
+  // O(history) for an as-of lookup — instead of scanning every price event on every call.
+  const priceHist = new Map();
+  for (const pc of priceChanges) {
+    const arr = priceHist.get(pc.ingredientId);
+    if (arr) arr.push(pc); else priceHist.set(pc.ingredientId, [pc]);
+  }
+  for (const arr of priceHist.values()) arr.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   return {
     __indexed: true,
     ingredients: byId(raw.ingredients),
     recipes: byId(raw.recipes),
     products: byId(raw.products),
-    priceChanges: (raw.priceChanges || []).slice(),
+    priceChanges,
+    priceHist,
     batches: (raw.batches || []).slice(),
     sales: (raw.sales || []).slice(),
   };
@@ -65,9 +75,19 @@ const ms = (iso) => new Date(iso).getTime();
  * @returns {number}
  */
 export function priceOf(store, ingredientId, atMs = null) {
+  // Fast path: the per-ingredient history (ascending) is on the indexed store.
+  const hist = store.priceHist && store.priceHist.get(ingredientId);
+  if (hist) {
+    if (atMs == null) return hist[hist.length - 1].price; // history is non-empty by construction
+    let best = null;
+    for (const pc of hist) { if (ms(pc.at) > atMs) break; best = pc; }
+    if (!best) throw new PriceError(ingredientId);
+    return best.price;
+  }
+  // Fallback for a raw (un-indexed) store: scan.
   let best = null;
   let bestAt = -Infinity;
-  for (const pc of store.priceChanges) {
+  for (const pc of store.priceChanges || []) {
     if (pc.ingredientId !== ingredientId) continue;
     const t = ms(pc.at);
     if (atMs != null && t > atMs) continue;

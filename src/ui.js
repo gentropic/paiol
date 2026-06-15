@@ -198,6 +198,17 @@ export function renderApp(root, ctx) {
   ].filter(Boolean)); // drop the falsy modal slot — replaceChildren would coerce it to a "null" text node
 }
 
+/**
+ * Sync ONLY the modal overlay — open/close a sheet without rebuilding the panel (and its hundreds
+ * of rows) underneath. Big perf win on the most frequent interaction (tap a row → edit sheet), and
+ * it preserves the list's scroll position. Full re-renders (on data mutations) go through renderApp.
+ */
+export function renderModal(root, ctx) {
+  const existing = root.querySelector('.pa-backdrop');
+  if (existing) existing.remove();
+  if (ctx.view.modal) root.append(modalOverlay(ctx));
+}
+
 // ── Modal / bottom sheet ─────────────────────────────────────────────────────────
 
 const MODALS = {}; // kind → (ctx, modal) → sheet body element. Registered alongside each screen.
