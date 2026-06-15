@@ -87,6 +87,32 @@ async function addProduto(page, { name, pkg, pkgDesc, comp } = {}) {
   await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 }
 
+// Log a fornada via the "+ Registrar" bottom sheet. (Must be on the Fornadas screen.)
+async function addFornada(page, { recipe, units, active, oven, date } = {}) {
+  await page.click('[data-testid="forn-new"]');
+  await page.waitForSelector('[data-testid="forn-add"]');
+  if (recipe) await page.selectOption('[data-testid="forn-recipe"]', { label: recipe });
+  if (date) await page.fill('[data-testid="forn-date"]', date);
+  if (units != null) await page.fill('[data-testid="forn-units"]', String(units));
+  if (active != null) await page.fill('[data-testid="forn-active"]', String(active));
+  if (oven != null) await page.fill('[data-testid="forn-oven"]', String(oven));
+  await page.click('[data-testid="forn-add"]');
+  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
+// Log a venda via the "+ Registrar" bottom sheet. (Must be on the Vendas screen.)
+async function addVenda(page, { product, date, qty, price, canal } = {}) {
+  await page.click('[data-testid="venda-new"]');
+  await page.waitForSelector('[data-testid="venda-add"]');
+  if (product) await page.selectOption('[data-testid="venda-product"]', { label: product });
+  if (date) await page.fill('[data-testid="venda-date"]', date);
+  if (qty != null) await page.fill('[data-testid="venda-qty"]', String(qty));
+  if (price != null) await page.fill('[data-testid="venda-price"]', String(price));
+  if (canal) await page.fill('[data-testid="venda-canal"]', canal);
+  await page.click('[data-testid="venda-add"]');
+  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
 // Seed a fresh business (priced insumo → recipe with a component → product) for tests that need
 // downstream data. Leaves the page on the Produtos tab.
 async function seedBusiness(page) {
@@ -262,18 +288,13 @@ describe('paiol UI smoke', () => {
 
     // Fornada for the recipe.
     await goto(page, 'Fornadas');
-    await page.selectOption('[data-testid="forn-recipe"]', { label: 'Pão' });
-    await page.fill('[data-testid="forn-units"]', '9');
-    await page.fill('[data-testid="forn-active"]', '35');
-    await page.click('[data-testid="forn-add"]');
+    await addFornada(page, { recipe: 'Pão', units: 9, active: 35 });
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Pão/);
 
     // Venda — price comes pre-filled from the suggested price; just register.
     await goto(page, 'Vendas');
-    await page.selectOption('[data-testid="venda-product"]', { label: 'Pãozinho' });
-    await page.fill('[data-testid="venda-qty"]', '3');
-    await page.click('[data-testid="venda-add"]');
+    await addVenda(page, { product: 'Pãozinho', qty: 3 });
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Pãozinho/);
     assert.match(await page.textContent('.pa-card'), /lucro/); // running profit total
@@ -432,10 +453,9 @@ describe('paiol UI smoke', () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
-    await page.fill('[data-testid="venda-date"]', '2026-05-15');
-    await page.fill('[data-testid="venda-qty"]', '1');
-    await page.click('[data-testid="venda-add"]');
+    await addVenda(page, { date: '2026-05-15', qty: 1 });
     await page.waitForSelector('.pa-list-item');
+    // The chosen day surfaces as the log's date header (not "Hoje"/"Ontem").
     assert.match(await page.textContent('.pa-list'), /15\/05\/2026/);
     await page.close();
   });
@@ -462,8 +482,7 @@ describe('paiol UI smoke', () => {
 
     // Log a sale today (default date → current month, which Relatórios defaults to).
     await goto(page, 'Vendas');
-    await page.fill('[data-testid="venda-qty"]', '2');
-    await page.click('[data-testid="venda-add"]');
+    await addVenda(page, { qty: 2 });
     await page.waitForSelector('.pa-list-item');
 
     await goto(page, 'Relatórios');

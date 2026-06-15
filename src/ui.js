@@ -81,6 +81,28 @@ const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${St
 const currentMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
 const monthLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${m}/${(y || '').slice(2)}`; };
 
+// Day bucketing for the operação logs (Fornadas/Vendas) — local-day key + a friendly header.
+const dayKey = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+function dayLabel(iso) {
+  const now = new Date();
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  const k = dayKey(iso);
+  if (k === dayKey(now)) return 'Hoje';
+  if (k === dayKey(yest)) return 'Ontem';
+  return fmtDate(iso);
+}
+/** A read-only event log (newest first), with a subtle date header whenever the day changes. */
+function logList(items, rowFn) {
+  const children = [];
+  let last = null;
+  for (const it of items) {
+    const k = dayKey(it.at);
+    if (k !== last) { children.push(el('li', { class: 'pa-daygroup', text: dayLabel(it.at) })); last = k; }
+    children.push(rowFn(it));
+  }
+  return el('ul', { class: 'pa-list' }, children);
+}
+
 const SVGNS = 'http://www.w3.org/2000/svg';
 function svgEl(tag, attrs = {}, children = []) {
   const node = document.createElementNS(SVGNS, tag);
@@ -657,9 +679,40 @@ function friendlyError(e) {
 function fornadasPanel(ctx) {
   const { store } = ctx;
   const recipes = store.state.recipes;
+  const batches = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Fornadas' }),
+      recipes.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'forn-new', onclick: () => ctx.actions.openModal({ kind: 'fornada-add' }) }, '+ Registrar'),
+    ].filter(Boolean)),
+    recipes.length === 0 && el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' }),
+    batches.length === 0
+      ? recipes.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma fornada registrada. Toque em “+ Registrar”.' })
+      : logList(batches, (b) => batchRow(store, b)),
+  ].filter(Boolean));
+}
+
+// Read-only log entry (append-only — no edit; a correction is a new fornada).
+function batchRow(store, b) {
+  const r = store.get('recipes', b.recipeId);
+  const mins = [b.activeMinutes != null ? `${b.activeMinutes}min ativos` : null, b.ovenMinutes != null ? `${b.ovenMinutes}min forno` : null].filter(Boolean).join(' · ');
+  return el('li', { class: 'pa-list-item' }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: r ? r.name : '(receita removida)' })),
+      el('span', { class: 'pa-muted', text: `${b.yieldActual} produzidas` + (r ? ` (previsto ${r.yieldNominal})` : '') + (mins ? ` · ${mins}` : '') }),
+    ]),
+  ]);
+}
+
+MODALS['fornada-add'] = (ctx) => fornadaSheet(ctx);
+
+function fornadaSheet(ctx) {
+  const { store } = ctx;
+  const recipes = store.state.recipes;
   const recipeSel = el('select', { class: 'pa-input', 'data-testid': 'forn-recipe' },
     recipes.map((r) => el('option', { value: r.id, text: r.name })));
-  const units = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-units', type: 'text', inputmode: 'decimal', placeholder: 'un produzidas' });
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-date', type: 'date', value: todayInput() });
+  const units = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-units', type: 'text', inputmode: 'decimal', placeholder: 'un' });
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos' });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno' });
   // Prefill the times with the recipe's estimate (she adjusts only if reality differed).
@@ -670,88 +723,33 @@ function fornadasPanel(ctx) {
   prefill();
   recipeSel.addEventListener('change', prefill);
 
-  function register() {
+  function save() {
     const r = store.get('recipes', recipeSel.value);
     const y = parseNum(units.value);
-    if (!r || !(y > 0)) return;
+    if (!r || !(y > 0)) { units.focus(); return; }
     const a = parseNum(active.value);
     const o = parseNum(oven.value);
+    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
     ctx.actions.mutate((s) => s.addBatch({
-      id: uuid(), at: nowIso(), recipeId: r.id, yieldActual: y,
+      id: uuid(), at, recipeId: r.id, yieldActual: y,
       ...(a != null ? { activeMinutes: a } : {}), ...(o != null ? { ovenMinutes: o } : {}),
     }));
   }
 
-  const batches = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
-  return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Fornadas' }),
-    batches.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma fornada registrada.' })
-      : el('ul', { class: 'pa-list' }, batches.map((b) => {
-          const r = store.get('recipes', b.recipeId);
-          return el('li', { class: 'pa-list-item' }, [
-            el('div', { class: 'pa-grow' }, [
-              el('strong', { text: r ? r.name : '(receita removida)' }),
-              el('span', { class: 'pa-muted', text: `  ${fmtDate(b.at)} · ${b.yieldActual} produzidas`
-                + (r ? ` (previsto ${r.yieldNominal})` : '') + (b.activeMinutes != null ? ` · ${b.activeMinutes}min` : '') }),
-            ]),
-          ]);
-        })),
-    recipes.length === 0
-      ? el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' })
-      : el('div', {}, [
-          el('h3', { class: 'pa-h3', text: 'Registrar fornada' }),
-          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Receita' }), recipeSel]),
-          el('div', { class: 'pa-row pa-form' }, [
-            el('span', { class: 'pa-lab', text: 'Saíram' }), units,
-            el('span', { class: 'pa-lab', text: 'ativos' }), active,
-            el('span', { class: 'pa-lab', text: 'forno' }), oven,
-            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'forn-add', onclick: register }, 'Registrar'),
-          ]),
-          el('p', { class: 'pa-hint', text: 'Quantas saíram de verdade (ajusta o custo real por unidade). Os minutos já vêm da receita — mude só se foi diferente.' }),
-        ]),
-  ]);
+  const rows = [
+    field('Receita', recipeSel),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Saíram' }), units]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
+    el('p', { class: 'pa-hint', text: 'Quantas saíram de verdade (ajusta o custo real por unidade). Os minutos já vêm da receita — mude só se foi diferente.' }),
+  ];
+  return sheet({ title: 'Registrar fornada', rows, onSave: save, saveTestid: 'forn-add' });
 }
 
 // ── Vendas (Sale — revenue, with snapshotted cost for true margin) ───────────────
 
 function vendasPanel(ctx) {
   const { store } = ctx;
-  const config = store.getConfig();
   const products = store.state.products;
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return null; } };
-
-  const prodSel = el('select', { class: 'pa-input', 'data-testid': 'venda-product' },
-    products.map((p) => el('option', { value: p.id, text: p.name })));
-  const dateInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
-  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
-  const price = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-price', type: 'text', inputmode: 'decimal', placeholder: 'preço' });
-  const channel = el('input', { class: 'pa-input pa-narrow', type: 'text', placeholder: 'canal (opc.)' });
-
-  const initSug = products[0] ? suggested(products[0].id) : null;
-  if (initSug != null) price.value = initSug.toFixed(2).replace('.', ',');
-  prodSel.addEventListener('change', () => {
-    const s = suggested(prodSel.value);
-    price.value = s != null ? s.toFixed(2).replace('.', ',') : '';
-  });
-
-  function register() {
-    const p = store.get('products', prodSel.value);
-    const q = parseNum(qty.value);
-    const up = parseNum(price.value);
-    if (!p || !(q > 0) || up == null) return;
-    let cost = 0;
-    try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
-    const at = dateInput.value ? new Date(`${dateInput.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addSale({
-      id: uuid(), at, productId: p.id, qty: q, unitPrice: up,
-      paymentFeePct: config.paymentFeePct, costSnapshot: cost,
-      ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
-    }));
-  }
-
   const sales = store.state.sales.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
   let revenue = 0; let profit = 0;
   for (const s of sales) {
@@ -761,41 +759,81 @@ function vendasPanel(ctx) {
   }
 
   return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Vendas' }),
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Vendas' }),
+      products.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'venda-new', onclick: () => ctx.actions.openModal({ kind: 'venda-add' }) }, '+ Registrar'),
+    ].filter(Boolean)),
+    products.length === 0 && el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' }),
     sales.length > 0 && el('div', { class: 'pa-row pa-totals' }, [
       el('span', { class: 'pa-grow' }, [el('strong', { text: 'Receita ' }), brl(revenue)]),
       el('span', { class: profit >= 0 ? 'pa-badge pa-ok' : 'pa-badge pa-bad', text: `lucro ${brl(profit)}` }),
     ]),
     sales.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma venda registrada.' })
-      : el('ul', { class: 'pa-list' }, sales.map((s) => saleRow(store, s))),
-    products.length === 0
-      ? el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' })
-      : el('div', {}, [
-          el('h3', { class: 'pa-h3', text: 'Registrar venda' }),
-          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Produto' }), prodSel]),
-          el('div', { class: 'pa-row pa-form' }, [
-            el('span', { class: 'pa-lab', text: 'Data' }), dateInput,
-            el('span', { class: 'pa-lab', text: 'Qtd' }), qty,
-            el('span', { class: 'pa-lab', text: 'Preço' }), price, channel,
-            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'venda-add', onclick: register }, 'Registrar'),
-          ]),
-          el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
-        ]),
-  ]);
+      ? products.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma venda registrada. Toque em “+ Registrar”.' })
+      : logList(sales, (s) => saleRow(store, s)),
+  ].filter(Boolean));
 }
 
+// Read-only log entry (append-only — no edit; an estorno would be a new event). The day is in the
+// group header, so the row shows just quantity × price, channel, and the realized profit.
 function saleRow(store, s) {
   const p = store.get('products', s.productId);
   const rev = s.qty * s.unitPrice;
   const prof = rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
   return el('li', { class: 'pa-list-item' }, [
     el('div', { class: 'pa-grow' }, [
-      el('strong', { text: p ? p.name : '(produto removido)' }),
-      el('span', { class: 'pa-muted', text: `  ${fmtDate(s.at)} · ${s.qty} × ${brl(s.unitPrice)}${s.channel ? ` · ${s.channel}` : ''}` }),
+      el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
+      el('span', { class: 'pa-muted', text: `${s.qty} × ${brl(s.unitPrice)}${s.channel ? ` · ${s.channel}` : ''}` }),
     ]),
     el('span', { class: prof >= 0 ? 'pa-num' : 'pa-num pa-bad', text: brl(prof) }),
   ]);
+}
+
+MODALS['venda-add'] = (ctx) => vendaSheet(ctx);
+
+function vendaSheet(ctx) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const products = store.state.products;
+  const es = store.toEngineStore();
+  const lens = estimateLens(config);
+  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return null; } };
+
+  const prodSel = el('select', { class: 'pa-input', 'data-testid': 'venda-product' },
+    products.map((p) => el('option', { value: p.id, text: p.name })));
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
+  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
+  const price = moneyField(products[0] ? suggested(products[0].id) : null, 'venda-price');
+  const channel = el('input', { class: 'pa-input', 'data-testid': 'venda-canal', type: 'text', placeholder: 'canal (opcional)' });
+
+  prodSel.addEventListener('change', () => {
+    const s = suggested(prodSel.value);
+    price.input.value = s != null ? fmtMoneyInput(s) : '';
+  });
+
+  function save() {
+    const p = store.get('products', prodSel.value);
+    const q = parseNum(qty.value);
+    const up = parseNum(price.input.value);
+    if (!p || !(q > 0) || up == null) { return; }
+    let cost = 0;
+    try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
+    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
+    ctx.actions.mutate((s) => s.addSale({
+      id: uuid(), at, productId: p.id, qty: q, unitPrice: up,
+      paymentFeePct: config.paymentFeePct, costSnapshot: cost,
+      ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
+    }));
+  }
+
+  const rows = [
+    field('Produto', prodSel),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Qtd' }), qty]),
+    field('Preço de venda', price),
+    field('Canal (opcional)', channel),
+    el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
+  ];
+  return sheet({ title: 'Registrar venda', rows, onSave: save, saveTestid: 'venda-add' });
 }
 
 // ── Relatórios (period P&L; §4.5 actuals) ────────────────────────────────────────
