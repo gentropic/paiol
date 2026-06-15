@@ -39,6 +39,17 @@ async function goto(page, screen) {
   if (await seg.count()) await seg.click();
 }
 
+// Add an insumo via the "+ Novo" bottom sheet. (Must be on the Insumos screen.)
+async function addInsumo(page, name, unit, price) {
+  await page.click('[data-testid="ins-new"]');
+  await page.waitForSelector('[data-testid="ins-save"]');
+  await page.fill('[data-testid="ins-name"]', name);
+  if (unit) await page.selectOption('[data-testid="ins-unit"]', unit);
+  if (price != null) await page.fill('[data-testid="ins-price"]', String(price));
+  await page.click('[data-testid="ins-save"]');
+  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
 // Seed a fresh business (priced insumo → recipe with a component → product) for tests that need
 // downstream data. Leaves the page on the Produtos tab.
 async function seedBusiness(page) {
@@ -49,10 +60,7 @@ async function seedBusiness(page) {
   }));
   await page.reload({ waitUntil: 'networkidle' });
   await goto(page, 'Insumos');
-  await page.fill('[data-testid="ins-name"]', 'Farinha');
-  await page.selectOption('[data-testid="ins-unit"]', 'kg');
-  await page.fill('[data-testid="ins-price"]', '5');
-  await page.click('[data-testid="ins-add"]');
+  await addInsumo(page, 'Farinha', 'kg', '5');
   await goto(page, 'Receitas');
   await page.fill('[data-testid="rec-name"]', 'Pão');
   await page.fill('[data-testid="rec-yield"]', '10');
@@ -117,35 +125,32 @@ describe('paiol UI smoke', () => {
     }));
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
+    await addInsumo(page, 'Farinha de trigo', 'kg');
 
-    await page.fill('[data-testid="ins-name"]', 'Farinha de trigo');
-    await page.selectOption('[data-testid="ins-unit"]', 'kg');
-    await page.click('[data-testid="ins-add"]');
-
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Farinha de trigo/);
 
     await page.waitForTimeout(1200); // let the debounced IndexedDB save (800ms) flush
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
 
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Farinha de trigo/, 'insumo did not persist across reload');
     await page.close();
   });
 
-  test('removing an insumo persists too', async () => {
+  test('removing an insumo (via edit sheet + confirm) persists', async () => {
     const page = await context.newPage();
-    page.on('dialog', (d) => d.accept());                  // confirm-on-remove
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
-    await page.waitForSelector('.pa-list-item');           // the farinha from the prior test
-    await page.click('.pa-list-item button[title="Remover"]');
-    await page.waitForFunction(() => !document.querySelector('.pa-list-item'));
+    await page.locator('.pa-row-item', { hasText: 'Farinha de trigo' }).click(); // from the prior test
+    await page.click('[data-testid="ins-delete"]');
+    await page.click('[data-testid="confirm-yes"]');       // in-app confirmation
+    await page.waitForFunction(() => !document.querySelector('.pa-row-item'));
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
-    assert.equal(await page.locator('.pa-list-item').count(), 0, 'removal did not persist');
+    assert.equal(await page.locator('.pa-row-item').count(), 0, 'removal did not persist');
     await page.close();
   });
 
@@ -162,13 +167,8 @@ describe('paiol UI smoke', () => {
     }));
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
-
-    // Insumo with a price.
-    await page.fill('[data-testid="ins-name"]', 'Farinha');
-    await page.selectOption('[data-testid="ins-unit"]', 'kg');
-    await page.fill('[data-testid="ins-price"]', '5');
-    await page.click('[data-testid="ins-add"]');
-    await page.waitForSelector('.pa-list-item');
+    await addInsumo(page, 'Farinha', 'kg', '5');
+    await page.waitForSelector('.pa-row-item');
 
     // Receita using that insumo.
     await goto(page, 'Receitas');
@@ -241,13 +241,8 @@ describe('paiol UI smoke', () => {
     }));
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
-
-    await page.fill('[data-testid="ins-name"]', 'Ovo');
-    await page.selectOption('[data-testid="ins-unit"]', 'un');
-    await page.click('[data-testid="ins-add"]');
-    await page.fill('[data-testid="ins-name"]', 'Farinha');
-    await page.selectOption('[data-testid="ins-unit"]', 'kg');
-    await page.click('[data-testid="ins-add"]');
+    await addInsumo(page, 'Ovo', 'un');
+    await addInsumo(page, 'Farinha', 'kg');
 
     await goto(page, 'Receitas');
     await page.fill('[data-testid="rec-name"]', 'Bolo');
@@ -340,7 +335,7 @@ describe('paiol UI smoke', () => {
     await page.waitForFunction(() => /Importado/.test(document.querySelector('.pa-status')?.textContent || ''));
 
     await goto(page, 'Insumos');
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Açúcar/);
 
     await goto(page, 'Preços');
@@ -404,12 +399,12 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('[data-testid="ins-search"]');
     await page.fill('[data-testid="ins-search"]', 'zzznao');
     await page.waitForFunction(() => {
-      const li = [...document.querySelectorAll('.pa-list-item')].find((x) => /Farinha/.test(x.textContent));
+      const li = [...document.querySelectorAll('.pa-row-item')].find((x) => /Farinha/.test(x.textContent));
       return li && li.style.display === 'none';
     });
     await page.fill('[data-testid="ins-search"]', 'fari'); // accent/case-insensitive
     await page.waitForFunction(() => {
-      const li = [...document.querySelectorAll('.pa-list-item')].find((x) => /Farinha/.test(x.textContent));
+      const li = [...document.querySelectorAll('.pa-row-item')].find((x) => /Farinha/.test(x.textContent));
       return li && li.style.display !== 'none';
     });
     await page.close();
@@ -419,9 +414,9 @@ describe('paiol UI smoke', () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Insumos');
-    await page.click('.pa-list-item button[title="Editar"]');
-    await page.fill('[data-testid="ins-edit-name"]', 'Farinha especial');
-    await page.click('[data-testid="ins-edit-save"]');
+    await page.locator('.pa-row-item', { hasText: 'Farinha' }).click();   // open edit sheet
+    await page.fill('[data-testid="ins-name"]', 'Farinha especial');
+    await page.click('[data-testid="ins-save"]');
     await page.waitForFunction(() => /Farinha especial/.test(document.querySelector('.pa-list')?.textContent || ''));
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
@@ -501,14 +496,12 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('.pa-navbtn[data-section="operacao"].active');
 
     await page.click('.pa-navbtn[data-section="cadastros"]');             // bottom nav → Cadastro
-    await page.waitForSelector('[data-testid="ins-add"]');
+    await page.waitForSelector('[data-testid="ins-new"]');
     assert.equal(await page.locator('.pa-segbtn[data-screen="receitas"]').count(), 1); // segmented sub-nav
 
     // Add an insumo with NO price → "sem preço" (guards the parseNum '' → null fix), then the
     // dashboard surfaces the alert.
-    await page.fill('[data-testid="ins-name"]', 'Baunilha');
-    await page.selectOption('[data-testid="ins-unit"]', 'un');
-    await page.click('[data-testid="ins-add"]');
+    await addInsumo(page, 'Baunilha', 'un');
     await page.waitForSelector('.pa-status.pa-bad');                       // Insumos "sem preço" banner
     await page.click('.pa-navbtn[data-section="inicio"]');
     assert.match(await page.textContent('section'), /sem preço/);          // dashboard alert
@@ -562,10 +555,8 @@ describe('paiol UI smoke', () => {
     assert.equal((await page.textContent('h1')).trim(), 'Quitutes do Paiol');
     // Prove the inlined modules wired up: a real interaction through the bundle.
     await goto(page, 'Insumos');
-    await page.fill('[data-testid="ins-name"]', 'Açúcar');
-    await page.selectOption('[data-testid="ins-unit"]', 'kg');
-    await page.click('[data-testid="ins-add"]');
-    await page.waitForSelector('.pa-list-item');
+    await addInsumo(page, 'Açúcar', 'kg');
+    await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Açúcar/);
     assert.deepEqual(errors, [], `console/page errors in built file: ${errors.join(' | ')}`);
     await page.close();

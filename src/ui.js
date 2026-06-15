@@ -57,13 +57,24 @@ const pct = (frac) => (Number(frac) || 0) * 100;
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
-/** Parse a number that may use a comma decimal; '' / invalid → null. (Number('') is 0 — guard it.) */
+/** Parse a number that may use a comma decimal or currency symbols; '' / invalid → null. */
 function parseNum(s) {
   if (s == null) return null;
-  const str = String(s).trim().replace(',', '.');
+  const str = String(s).replace(/[^\d.,-]/g, '').replace(',', '.'); // strip "R$", spaces, etc.
   if (str === '') return null;
   const n = Number(str);
   return Number.isFinite(n) ? n : null;
+}
+const fmtMoneyInput = (n) => (Number(n) || 0).toFixed(2).replace('.', ',');
+
+/** A currency input (R$ prefix, formats to 2 decimals on blur). Read its value via `.input.value`. */
+function moneyField(value, testid) {
+  const input = el('input', { class: 'pa-money-input', type: 'text', inputmode: 'decimal', ...(testid ? { 'data-testid': testid } : {}) });
+  input.value = value != null ? fmtMoneyInput(value) : '';
+  input.addEventListener('blur', () => { const n = parseNum(input.value); if (n != null) input.value = fmtMoneyInput(n); });
+  const wrap = el('div', { class: 'pa-money' }, [el('span', { class: 'pa-money-pfx', text: 'R$' }), input]);
+  wrap.input = input;
+  return wrap;
 }
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
@@ -95,12 +106,6 @@ function searchInput(placeholder, container, testid) {
 }
 
 const isEditing = (ctx, kind, id) => !!ctx.view.editing && ctx.view.editing.kind === kind && ctx.view.editing.id === id;
-
-/** Confirm before a destructive mutation (avoids misclick deletes). */
-function confirmRemove(ctx, label, fn) {
-  if (typeof confirm === 'function' && !confirm(`Remover ${label}?`)) return;
-  ctx.actions.mutate(fn);
-}
 
 // ── Shell ───────────────────────────────────────────────────────────────────────
 
@@ -136,7 +141,56 @@ export function renderApp(root, ctx) {
         el('span', { class: 'pa-navico', text: sec.icon }),
         el('span', { class: 'pa-navlbl', text: sec.label }),
       ]))),
+    ctx.view.modal && modalOverlay(ctx),
   );
+}
+
+// ── Modal / bottom sheet ─────────────────────────────────────────────────────────
+
+const MODALS = {}; // kind → (ctx, modal) → sheet body element. Registered alongside each screen.
+
+function modalOverlay(ctx) {
+  const m = ctx.view.modal;
+  const build = MODALS[m.kind];
+  const body = build ? build(ctx, m) : el('div');
+  const backdrop = el('div', { class: 'pa-backdrop' });
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) ctx.actions.closeModal(); });
+  backdrop.append(el('div', { class: 'pa-sheet', role: 'dialog' }, body));
+  return backdrop;
+}
+
+/** Standard sheet scaffold: title, body rows, a Salvar/Cancelar footer, optional danger action. */
+function sheet({ title, rows, onSave, saveTestid, danger }) {
+  return [
+    el('div', { class: 'pa-sheet-grab' }),
+    el('h2', { class: 'pa-sheet-title', text: title }),
+    el('div', { class: 'pa-sheet-body' }, rows),
+    el('div', { class: 'pa-sheet-actions' }, [
+      onSave && el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': saveTestid, onclick: onSave }, 'Salvar'),
+    ].filter(Boolean)),
+    danger && el('button', { class: 'pa-btn pa-ghost pa-bad pa-sheet-danger', 'data-testid': danger.testid, onclick: danger.onClick }, danger.label),
+  ].filter(Boolean);
+}
+
+function field(label, control) {
+  return el('div', { class: 'pa-field' }, [el('label', { text: label }), control]);
+}
+
+MODALS.confirm = (ctx, m) => [
+  el('h2', { class: 'pa-sheet-title', text: m.title || 'Confirmar' }),
+  el('p', { class: 'pa-sheet-msg', text: m.message }),
+  el('div', { class: 'pa-sheet-actions' }, [
+    el('button', { class: 'pa-btn pa-ghost pa-grow', onclick: () => ctx.actions.closeModal() }, 'Cancelar'),
+    el('button', { class: 'pa-btn pa-danger-btn pa-grow', 'data-testid': 'confirm-yes', onclick: () => m.onYes() }, m.yesLabel || 'Excluir'),
+  ]),
+];
+
+/** Open a confirmation sheet before a destructive mutation. */
+function confirmRemove(ctx, label, fn) {
+  ctx.actions.openModal({
+    kind: 'confirm', title: 'Remover?', message: `Remover ${label}? Esta ação não pode ser desfeita.`,
+    yesLabel: 'Remover', onYes: () => ctx.actions.mutate(fn),
+  });
 }
 
 // ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
@@ -177,91 +231,77 @@ function inicioPanel(ctx) {
 
 function insumosPanel(ctx) {
   const { store } = ctx;
-  const nameInput = el('input', { class: 'pa-input', 'data-testid': 'ins-name', type: 'text', placeholder: 'Nome (ex.: Farinha de trigo)' });
-  const unitSelect = el('select', { class: 'pa-input', 'data-testid': 'ins-unit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u })));
-  const priceInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-price', type: 'text', inputmode: 'decimal', placeholder: 'Preço' });
-
-  function add() {
-    const name = nameInput.value.trim();
-    if (!name) { nameInput.focus(); return; }
-    const price = parseNum(priceInput.value);
-    const id = uuid();
-    ctx.actions.mutate((s) => {
-      s.upsertIngredient({ id, name, stockUnit: unitSelect.value });
-      if (price != null) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price });
-    });
-  }
-
   const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
-  const list = el('ul', { class: 'pa-list' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing)));
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing)));
   return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Insumos' }),
-    semPreco > 0 && el('p', { class: 'pa-status pa-bad' },
-      [el('strong', { text: `${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço até você preencher.']),
-    store.state.ingredients.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhum insumo ainda. Adicione o primeiro abaixo.' })
-      : el('div', {}, [searchInput('Buscar insumo…', list, 'ins-search'), list]),
-    el('h3', { class: 'pa-h3', text: 'Novo insumo' }),
-    el('div', { class: 'pa-row pa-form' }, [
-      nameInput, unitSelect, priceInput,
-      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'ins-add', onclick: add }, 'Adicionar'),
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Insumos' }),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'ins-new', onclick: () => ctx.actions.openModal({ kind: 'insumo-add' }) }, '+ Novo'),
     ]),
-    el('p', { class: 'pa-hint', text: 'O preço é por unidade de compra (ex.: por kg). Atualize quando o preço mudar — o histórico é preservado.' }),
+    semPreco > 0 && el('p', { class: 'pa-status pa-bad' },
+      [el('strong', { text: `${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço.']),
+    store.state.ingredients.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhum insumo. Toque em “+ Novo” para começar.' })
+      : el('div', {}, [searchInput('Buscar insumo…', list, 'ins-search'), list]),
   ]);
 }
 
+// Clean, scannable row — the whole row opens the edit sheet.
 function insumoRow(ctx, ing) {
   const { store } = ctx;
-  if (isEditing(ctx, 'ingredient', ing.id)) return insumoEditRow(ctx, ing);
-
   const price = store.currentPrice(ing.id);
   const lastAt = store.lastPriceAt(ing.id);
-  const priceInput = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal',
-    placeholder: 'novo preço', value: price != null ? String(price).replace('.', ',') : '' });
-  function updatePrice() {
-    const p = parseNum(priceInput.value);
-    if (p == null) return;
-    ctx.actions.mutate((s) => s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: ing.id, price: p }));
-  }
-
-  const history = store.priceHistory(ing.id);
-  return el('li', { class: 'pa-list-item pa-stack', 'data-search': ing.name }, [
-    el('div', { class: 'pa-row' }, [
-      el('div', { class: 'pa-grow' }, [
-        el('strong', { text: ing.name }),
-        price != null
-          ? el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}` + (lastAt ? ` · atualizado ${fmtDate(lastAt)}` : '') })
-          : el('span', {}, [el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
-        history.length > 1 && el('details', { class: 'pa-history' }, [
-          el('summary', { text: `histórico (${history.length})` }),
-          el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
-            el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} — ${brl(h.price)}` })]))),
-        ]),
-      ]),
-      priceInput,
-      el('button', { class: 'pa-btn pa-sm', onclick: updatePrice }, 'Atualizar'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Editar', onclick: () => ctx.actions.startEdit('ingredient', ing.id) }, '✎'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover', onclick: () => confirmRemove(ctx, `o insumo "${ing.name}"`, (s) => s.removeIngredient(ing.id)) }, '✕'),
+  return el('li', { class: 'pa-row-item', 'data-search': ing.name, onclick: () => ctx.actions.openModal({ kind: 'insumo-edit', id: ing.id }) }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: ing.name })),
+      price != null
+        ? el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}${lastAt ? ` · ${fmtDate(lastAt)}` : ''}` })
+        : el('span', {}, [el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
     ]),
+    el('span', { class: 'pa-chev', text: '›' }),
   ]);
 }
 
-function insumoEditRow(ctx, ing) {
-  const name = el('input', { class: 'pa-input', 'data-testid': 'ins-edit-name', type: 'text', value: ing.name });
-  const unit = el('select', { class: 'pa-input', 'data-testid': 'ins-edit-unit' },
-    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(u === ing.stockUnit ? { selected: 'selected' } : {}) })));
+MODALS['insumo-add'] = (ctx) => insumoSheet(ctx, null);
+MODALS['insumo-edit'] = (ctx, m) => insumoSheet(ctx, ctx.store.get('ingredients', m.id) || null);
+
+function insumoSheet(ctx, ing) {
+  const name = el('input', { class: 'pa-input', 'data-testid': 'ins-name', type: 'text', placeholder: 'Nome (ex.: Farinha de trigo)', value: ing ? ing.name : '' });
+  const unit = el('select', { class: 'pa-input', 'data-testid': 'ins-unit' },
+    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(ing && u === ing.stockUnit ? { selected: 'selected' } : {}) })));
+  const price = moneyField(ing ? ctx.store.currentPrice(ing.id) : null, 'ins-price');
+
   function save() {
     const nm = name.value.trim();
     if (!nm) { name.focus(); return; }
-    ctx.actions.mutate((s) => s.upsertIngredient({ ...ing, name: nm, stockUnit: unit.value }));
+    const p = parseNum(price.input.value);
+    const id = ing ? ing.id : uuid();
+    ctx.actions.mutate((s) => {
+      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value });
+      const cur = ing ? s.currentPrice(id) : null;
+      if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
+    });
   }
-  return el('li', { class: 'pa-list-item pa-editing' }, [
-    el('div', { class: 'pa-row pa-form pa-grow' }, [
-      name, unit,
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'ins-edit-save', onclick: save }, 'Salvar'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.cancelEdit() }, 'Cancelar'),
+
+  const history = ing ? ctx.store.priceHistory(ing.id) : [];
+  const rows = [
+    field('Nome', name),
+    field('Unidade de compra', unit),
+    field('Preço (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
+    history.length > 1 && el('details', { class: 'pa-history' }, [
+      el('summary', { text: `histórico de preços (${history.length})` }),
+      el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
+        el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} — ${brl(h.price)}` })]))),
     ]),
-  ]);
+  ].filter(Boolean);
+
+  return sheet({
+    title: ing ? 'Editar insumo' : 'Novo insumo',
+    rows,
+    onSave: save,
+    saveTestid: 'ins-save',
+    danger: ing ? { label: '🗑 Excluir insumo', testid: 'ins-delete', onClick: () => confirmRemove(ctx, `o insumo "${ing.name}"`, (s) => s.removeIngredient(ing.id)) } : null,
+  });
 }
 
 // ── Receitas ──────────────────────────────────────────────────────────────────
