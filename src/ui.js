@@ -55,6 +55,32 @@ function parseNum(s) {
   const n = Number(String(s).trim().replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 }
+const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+/**
+ * A search box that live-filters a container's direct children by their `data-search` attribute
+ * (pure DOM toggle — no re-render, so typing never loses focus). Set `data-search` on each row.
+ */
+function searchInput(placeholder, container, testid) {
+  const inp = el('input', { class: 'pa-input pa-search', type: 'search', placeholder, ...(testid ? { 'data-testid': testid } : {}) });
+  inp.addEventListener('input', () => {
+    const q = norm(inp.value);
+    for (const child of container.children) {
+      const hay = child.getAttribute('data-search') ?? child.textContent;
+      child.style.display = (!q || norm(hay).includes(q)) ? '' : 'none';
+    }
+  });
+  return inp;
+}
+
+const isEditing = (ctx, kind, id) => !!ctx.view.editing && ctx.view.editing.kind === kind && ctx.view.editing.id === id;
+
+/** Confirm before a destructive mutation (avoids misclick deletes). */
+function confirmRemove(ctx, label, fn) {
+  if (typeof confirm === 'function' && !confirm(`Remover ${label}?`)) return;
+  ctx.actions.mutate(fn);
+}
 
 // ── Shell ───────────────────────────────────────────────────────────────────────
 
@@ -101,13 +127,15 @@ function insumosPanel(ctx) {
   }
 
   const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
+  const list = el('ul', { class: 'pa-list' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing)));
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Insumos' }),
     semPreco > 0 && el('p', { class: 'pa-status pa-bad' },
       [el('strong', { text: `${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço até você preencher.']),
     store.state.ingredients.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum insumo ainda. Adicione o primeiro abaixo.' })
-      : el('ul', { class: 'pa-list' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing))),
+      : el('div', {}, [searchInput('Buscar insumo…', list, 'ins-search'), list]),
+    el('h3', { class: 'pa-h3', text: 'Novo insumo' }),
     el('div', { class: 'pa-row pa-form' }, [
       nameInput, unitSelect, priceInput,
       el('button', { class: 'pa-btn pa-primary', 'data-testid': 'ins-add', onclick: add }, 'Adicionar'),
@@ -117,7 +145,11 @@ function insumosPanel(ctx) {
 }
 
 function insumoRow(ctx, ing) {
-  const price = ctx.store.currentPrice(ing.id);
+  const { store } = ctx;
+  if (isEditing(ctx, 'ingredient', ing.id)) return insumoEditRow(ctx, ing);
+
+  const price = store.currentPrice(ing.id);
+  const lastAt = store.lastPriceAt(ing.id);
   const priceInput = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal',
     placeholder: 'novo preço', value: price != null ? String(price).replace('.', ',') : '' });
   function updatePrice() {
@@ -125,16 +157,44 @@ function insumoRow(ctx, ing) {
     if (p == null) return;
     ctx.actions.mutate((s) => s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: ing.id, price: p }));
   }
-  return el('li', { class: 'pa-list-item' }, [
-    el('div', { class: 'pa-grow' }, [
-      el('strong', { text: ing.name }),
-      price != null
-        ? el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}` })
-        : el('span', {}, [el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
+
+  const history = store.priceHistory(ing.id);
+  return el('li', { class: 'pa-list-item pa-stack', 'data-search': ing.name }, [
+    el('div', { class: 'pa-row' }, [
+      el('div', { class: 'pa-grow' }, [
+        el('strong', { text: ing.name }),
+        price != null
+          ? el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}` + (lastAt ? ` · atualizado ${fmtDate(lastAt)}` : '') })
+          : el('span', {}, [el('span', { class: 'pa-muted', text: `  ${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
+        history.length > 1 && el('details', { class: 'pa-history' }, [
+          el('summary', { text: `histórico (${history.length})` }),
+          el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
+            el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} — ${brl(h.price)}` })]))),
+        ]),
+      ]),
+      priceInput,
+      el('button', { class: 'pa-btn pa-sm', onclick: updatePrice }, 'Atualizar'),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Editar', onclick: () => ctx.actions.startEdit('ingredient', ing.id) }, '✎'),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover', onclick: () => confirmRemove(ctx, `o insumo "${ing.name}"`, (s) => s.removeIngredient(ing.id)) }, '✕'),
     ]),
-    priceInput,
-    el('button', { class: 'pa-btn pa-sm', onclick: updatePrice }, 'Atualizar'),
-    el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover', onclick: () => ctx.actions.mutate((s) => s.removeIngredient(ing.id)) }, '✕'),
+  ]);
+}
+
+function insumoEditRow(ctx, ing) {
+  const name = el('input', { class: 'pa-input', 'data-testid': 'ins-edit-name', type: 'text', value: ing.name });
+  const unit = el('select', { class: 'pa-input', 'data-testid': 'ins-edit-unit' },
+    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(u === ing.stockUnit ? { selected: 'selected' } : {}) })));
+  function save() {
+    const nm = name.value.trim();
+    if (!nm) { name.focus(); return; }
+    ctx.actions.mutate((s) => s.upsertIngredient({ ...ing, name: nm, stockUnit: unit.value }));
+  }
+  return el('li', { class: 'pa-list-item pa-editing' }, [
+    el('div', { class: 'pa-row pa-form pa-grow' }, [
+      name, unit,
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'ins-edit-save', onclick: save }, 'Salvar'),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.cancelEdit() }, 'Cancelar'),
+    ]),
   ]);
 }
 
@@ -159,11 +219,12 @@ function receitasPanel(ctx) {
     }));
   }
 
+  const cards = el('div', {}, store.state.recipes.map((r) => receitaCard(ctx, r)));
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Receitas' }),
     store.state.recipes.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhuma receita ainda.' })
-      : el('div', {}, store.state.recipes.map((r) => receitaCard(ctx, r))),
+      : el('div', {}, [searchInput('Buscar receita…', cards, 'rec-search'), cards]),
     el('h3', { class: 'pa-h3', text: 'Nova receita' }),
     el('div', { class: 'pa-row pa-form' }, [name]),
     el('div', { class: 'pa-row pa-form' }, [
@@ -177,6 +238,7 @@ function receitasPanel(ctx) {
 
 function receitaCard(ctx, recipe) {
   const { store } = ctx;
+  if (isEditing(ctx, 'recipe', recipe.id)) return receitaEditCard(ctx, recipe);
   // Component editor.
   const options = [
     ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
@@ -211,12 +273,13 @@ function receitaCard(ctx, recipe) {
     });
   }
 
-  return el('div', { class: 'pa-sub-card' }, [
+  return el('div', { class: 'pa-sub-card', 'data-search': recipe.name }, [
     el('div', { class: 'pa-row' }, [
       el('strong', { class: 'pa-grow', text: recipe.name }),
       el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno` }),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover receita', onclick: () => ctx.actions.mutate((s) => s.removeRecipe(recipe.id)) }, '✕'),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Editar receita', 'data-testid': 'rec-edit', onclick: () => ctx.actions.startEdit('recipe', recipe.id) }, '✎'),
     ]),
+    recipe.notes && el('p', { class: 'pa-obs', text: recipe.notes }),
     recipe.components.length === 0
       ? el('p', { class: 'pa-empty pa-sm', text: 'Sem itens. Adicione insumos ou sub-receitas.' })
       : el('ul', { class: 'pa-list pa-tight' }, recipe.components.map((c, idx) =>
@@ -228,6 +291,46 @@ function receitaCard(ctx, recipe) {
       ? el('p', { class: 'pa-hint', text: 'Cadastre insumos primeiro para montar a receita.' })
       : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit,
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
+    el('div', { class: 'pa-row pa-cardfoot' }, [
+      el('button', { class: 'pa-btn pa-ghost pa-sm pa-bad', title: 'Remover receita',
+        onclick: () => confirmRemove(ctx, `a receita "${recipe.name}"`, (s) => s.removeRecipe(recipe.id)) }, '🗑 Remover receita'),
+    ]),
+  ]);
+}
+
+function receitaEditCard(ctx, recipe) {
+  const name = el('input', { class: 'pa-input', 'data-testid': 'rec-edit-name', type: 'text', value: recipe.name });
+  const yQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-yield', type: 'text', inputmode: 'decimal', value: String(recipe.yieldNominal).replace('.', ',') });
+  const yUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-edit-yunit' },
+    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(u === recipe.yieldUnit ? { selected: 'selected' } : {}) })));
+  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
+  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-edit-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
+  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-edit-notes', rows: '3', placeholder: 'Observação / modo de preparo (opcional)' });
+  notes.value = recipe.notes || '';
+
+  function save() {
+    const nm = name.value.trim();
+    const y = parseNum(yQty.value);
+    if (!nm || !(y > 0)) { name.focus(); return; }
+    const obs = notes.value.trim();
+    ctx.actions.mutate((s) => s.upsertRecipe({
+      ...recipe, name: nm, yieldNominal: y, yieldUnit: yUnit.value,
+      activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
+      ...(obs ? { notes: obs } : { notes: undefined }),
+    }));
+  }
+  return el('div', { class: 'pa-sub-card pa-editing' }, [
+    el('div', { class: 'pa-row pa-form' }, [name]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yQty, yUnit]),
+    el('div', { class: 'pa-row pa-form' }, [
+      el('span', { class: 'pa-lab', text: 'min ativos' }), active,
+      el('span', { class: 'pa-lab', text: 'min forno' }), oven,
+    ]),
+    el('div', { class: 'pa-field' }, [el('label', { text: 'Observação (modo de preparo)' }), notes]),
+    el('div', { class: 'pa-row pa-form' }, [
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'rec-edit-save', onclick: save }, 'Salvar'),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.cancelEdit() }, 'Cancelar'),
+    ]),
   ]);
 }
 
@@ -271,18 +374,19 @@ function produtosPanel(ctx) {
     }));
   }
 
+  const list = el('ul', { class: 'pa-list' }, store.state.products.map((p) =>
+    el('li', { class: 'pa-list-item', 'data-search': p.name }, [
+      el('div', { class: 'pa-grow' }, [
+        el('strong', { text: p.name }),
+        el('span', { class: 'pa-muted', text: `  ${refName(store, { kind: 'recipe', id: p.recipeId })} · porção ${p.portion} · emb. ${brl(p.packagingCost)}` }),
+      ]),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover', onclick: () => confirmRemove(ctx, `o produto "${p.name}"`, (s) => s.removeProduct(p.id)) }, '✕'),
+    ])));
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Produtos' }),
     store.state.products.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum produto ainda.' })
-      : el('ul', { class: 'pa-list' }, store.state.products.map((p) =>
-          el('li', { class: 'pa-list-item' }, [
-            el('div', { class: 'pa-grow' }, [
-              el('strong', { text: p.name }),
-              el('span', { class: 'pa-muted', text: `  ${refName(store, { kind: 'recipe', id: p.recipeId })} · porção ${p.portion} · emb. ${brl(p.packagingCost)}` }),
-            ]),
-            el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover', onclick: () => ctx.actions.mutate((s) => s.removeProduct(p.id)) }, '✕'),
-          ]))),
+      : el('div', {}, [searchInput('Buscar produto…', list, 'prod-search'), list]),
     store.state.recipes.length === 0
       ? el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' })
       : el('div', {}, [
@@ -311,7 +415,7 @@ function precosPanel(ctx) {
     // Most common "incomplete" cause: a used ingredient has no price. Name them explicitly.
     const missing = unpricedInRecipe(store, p.recipeId);
     if (missing.length) {
-      return el('div', { class: 'pa-sub-card' }, [
+      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
         el('div', { class: 'pa-row' }, [
           el('strong', { class: 'pa-grow', text: p.name }),
           el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
@@ -330,31 +434,40 @@ function precosPanel(ctx) {
       ];
       const unitCost = parts.reduce((s, [, v]) => s + v, 0);
       const price = priceFromCost(unitCost, config);
-      return el('div', { class: 'pa-sub-card' }, [
+      // Per-unit profit and per-hour metrics (her spreadsheet's decision numbers).
+      const lucroUnit = price - unitCost - price * config.paymentFeePct;
+      const activeHoursPerUnit = config.valorHora > 0 ? (b.labor * p.portion) / config.valorHora : 0;
+      const lucroHora = activeHoursPerUnit > 0 ? lucroUnit / activeHoursPerUnit : null;
+      const custoHora = activeHoursPerUnit > 0 ? unitCost / activeHoursPerUnit : null;
+      const kv = (label, v, cls) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (cls === 'pa-kv-total' ? '' : ''), text: brl(v) })]);
+      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
         el('div', { class: 'pa-row' }, [
           el('strong', { class: 'pa-grow', text: p.name }),
           el('span', { class: 'pa-price', text: brl(price) }),
         ]),
-        el('table', { class: 'pa-kv' }, parts.map(([label, v]) =>
-          el('tr', {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: brl(v) })]))
-          .concat([
-            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Custo unitário' }), el('td', { class: 'pa-num', text: brl(unitCost) })]),
-            el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(config.targetMarginPct)}%, taxa ${pct(config.paymentFeePct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
-          ])),
+        el('table', { class: 'pa-kv' }, [
+          ...parts.map(([label, v]) => kv(label, v)),
+          kv('Custo unitário', unitCost, 'pa-kv-total'),
+          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(config.targetMarginPct)}%, taxa ${pct(config.paymentFeePct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
+          el('tr', {}, [el('td', { text: 'Lucro por unidade' }), el('td', { class: 'pa-num' + (lucroUnit >= 0 ? '' : ' pa-bad'), text: brl(lucroUnit) })]),
+          lucroHora != null && el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), el('td', { class: 'pa-num' + (lucroHora >= 0 ? '' : ' pa-bad'), text: brl(lucroHora) })]),
+          custoHora != null && el('tr', {}, [el('td', { text: 'Custo por hora de trabalho' }), el('td', { class: 'pa-num', text: brl(custoHora) })]),
+        ].filter(Boolean)),
       ]);
     } catch (e) {
-      return el('div', { class: 'pa-sub-card' }, [
+      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
         el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-badge', text: 'incompleto' })]),
         el('p', { class: 'pa-status', text: friendlyError(e) }),
       ]);
     }
   });
 
+  const cardsEl = el('div', {}, cards);
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Preços' }),
     store.state.products.length === 0
       ? el('p', { class: 'pa-empty', text: 'Crie produtos para ver custos e preços sugeridos.' })
-      : el('div', {}, cards),
+      : el('div', {}, [searchInput('Buscar produto…', cardsEl, 'preco-search'), cardsEl]),
   ]);
 }
 
@@ -376,15 +489,25 @@ function fornadasPanel(ctx) {
   const recipeSel = el('select', { class: 'pa-input', 'data-testid': 'forn-recipe' },
     recipes.map((r) => el('option', { value: r.id, text: r.name })));
   const units = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-units', type: 'text', inputmode: 'decimal', placeholder: 'un produzidas' });
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos (opc.)' });
+  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos' });
+  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno' });
+  // Prefill the times with the recipe's estimate (she adjusts only if reality differed).
+  function prefill() {
+    const r = store.get('recipes', recipeSel.value);
+    if (r) { active.value = String(r.activeMinutes); oven.value = String(r.ovenMinutes); }
+  }
+  prefill();
+  recipeSel.addEventListener('change', prefill);
 
   function register() {
     const r = store.get('recipes', recipeSel.value);
     const y = parseNum(units.value);
     if (!r || !(y > 0)) return;
     const a = parseNum(active.value);
+    const o = parseNum(oven.value);
     ctx.actions.mutate((s) => s.addBatch({
-      id: uuid(), at: nowIso(), recipeId: r.id, yieldActual: y, ...(a != null ? { activeMinutes: a } : {}),
+      id: uuid(), at: nowIso(), recipeId: r.id, yieldActual: y,
+      ...(a != null ? { activeMinutes: a } : {}), ...(o != null ? { ovenMinutes: o } : {}),
     }));
   }
 
@@ -408,9 +531,13 @@ function fornadasPanel(ctx) {
       : el('div', {}, [
           el('h3', { class: 'pa-h3', text: 'Registrar fornada' }),
           el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Receita' }), recipeSel]),
-          el('div', { class: 'pa-row pa-form' }, [units, active,
-            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'forn-add', onclick: register }, 'Registrar')]),
-          el('p', { class: 'pa-hint', text: 'Quantas unidades saíram e, se quiser, os minutos ativos reais. O resto puxa da receita e ajusta o custo real.' }),
+          el('div', { class: 'pa-row pa-form' }, [
+            el('span', { class: 'pa-lab', text: 'Saíram' }), units,
+            el('span', { class: 'pa-lab', text: 'ativos' }), active,
+            el('span', { class: 'pa-lab', text: 'forno' }), oven,
+            el('button', { class: 'pa-btn pa-primary', 'data-testid': 'forn-add', onclick: register }, 'Registrar'),
+          ]),
+          el('p', { class: 'pa-hint', text: 'Quantas saíram de verdade (ajusta o custo real por unidade). Os minutos já vêm da receita — mude só se foi diferente.' }),
         ]),
   ]);
 }
@@ -427,6 +554,7 @@ function vendasPanel(ctx) {
 
   const prodSel = el('select', { class: 'pa-input', 'data-testid': 'venda-product' },
     products.map((p) => el('option', { value: p.id, text: p.name })));
+  const dateInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
   const price = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-price', type: 'text', inputmode: 'decimal', placeholder: 'preço' });
   const channel = el('input', { class: 'pa-input pa-narrow', type: 'text', placeholder: 'canal (opc.)' });
@@ -445,8 +573,9 @@ function vendasPanel(ctx) {
     if (!p || !(q > 0) || up == null) return;
     let cost = 0;
     try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
+    const at = dateInput.value ? new Date(`${dateInput.value}T12:00:00`).toISOString() : nowIso();
     ctx.actions.mutate((s) => s.addSale({
-      id: uuid(), at: nowIso(), productId: p.id, qty: q, unitPrice: up,
+      id: uuid(), at, productId: p.id, qty: q, unitPrice: up,
       paymentFeePct: config.paymentFeePct, costSnapshot: cost,
       ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
     }));
@@ -475,6 +604,7 @@ function vendasPanel(ctx) {
           el('h3', { class: 'pa-h3', text: 'Registrar venda' }),
           el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Produto' }), prodSel]),
           el('div', { class: 'pa-row pa-form' }, [
+            el('span', { class: 'pa-lab', text: 'Data' }), dateInput,
             el('span', { class: 'pa-lab', text: 'Qtd' }), qty,
             el('span', { class: 'pa-lab', text: 'Preço' }), price, channel,
             el('button', { class: 'pa-btn pa-primary', 'data-testid': 'venda-add', onclick: register }, 'Registrar'),

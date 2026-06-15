@@ -83,6 +83,23 @@ export class PaiolStore {
     return best ? best.price : null;
   }
 
+  /** ISO date of the latest recorded price for an ingredient, or null. */
+  lastPriceAt(ingredientId) {
+    let bestAt = null;
+    for (const pc of this.state.priceChanges) {
+      if (pc.ingredientId === ingredientId && (bestAt == null || pc.at > bestAt)) bestAt = pc.at;
+    }
+    return bestAt;
+  }
+
+  /** Full price history for an ingredient, newest first: [{ at, price }]. */
+  priceHistory(ingredientId) {
+    return this.state.priceChanges
+      .filter((pc) => pc.ingredientId === ingredientId)
+      .map((pc) => ({ at: pc.at, price: pc.price }))
+      .sort((a, b) => (a.at < b.at ? 1 : -1));
+  }
+
   // ── Master data (mutable upsert/remove) ──────────────────────────────────────
 
   /** @param {import('./domain.js').Ingredient} x */

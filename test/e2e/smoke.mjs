@@ -115,6 +115,7 @@ describe('paiol UI smoke', () => {
 
   test('removing an insumo persists too', async () => {
     const page = await context.newPage();
+    page.on('dialog', (d) => d.accept());                  // confirm-on-remove
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await page.waitForSelector('.pa-list-item');           // the farinha from the prior test
     await page.click('.pa-list-item button[title="Remover"]');
@@ -339,6 +340,74 @@ describe('paiol UI smoke', () => {
     await page.click('button.pa-tab:has-text("Preços")');
     await page.waitForSelector('.pa-sub-card');
     assert.match(await page.textContent('.pa-card'), /Defina o preço de: Manteiga/);
+    await page.close();
+  });
+
+  test('Lote 1: search filters the insumos list', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // Farinha exists
+    await page.click('button.pa-tab:has-text("Insumos")');
+    await page.waitForSelector('[data-testid="ins-search"]');
+    await page.fill('[data-testid="ins-search"]', 'zzznao');
+    await page.waitForFunction(() => {
+      const li = [...document.querySelectorAll('.pa-list-item')].find((x) => /Farinha/.test(x.textContent));
+      return li && li.style.display === 'none';
+    });
+    await page.fill('[data-testid="ins-search"]', 'fari'); // accent/case-insensitive
+    await page.waitForFunction(() => {
+      const li = [...document.querySelectorAll('.pa-list-item')].find((x) => /Farinha/.test(x.textContent));
+      return li && li.style.display !== 'none';
+    });
+    await page.close();
+  });
+
+  test('Lote 1: edit an insumo name and it persists', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await page.click('button.pa-tab:has-text("Insumos")');
+    await page.click('.pa-list-item button[title="Editar"]');
+    await page.fill('[data-testid="ins-edit-name"]', 'Farinha especial');
+    await page.click('[data-testid="ins-edit-save"]');
+    await page.waitForFunction(() => /Farinha especial/.test(document.querySelector('.pa-list')?.textContent || ''));
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.click('button.pa-tab:has-text("Insumos")');
+    assert.match(await page.textContent('.pa-list'), /Farinha especial/);
+    await page.close();
+  });
+
+  test('Lote 1: Preços shows profit per unit and per hour', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await page.click('button.pa-tab:has-text("Preços")');
+    await page.waitForSelector('.pa-price');
+    const txt = await page.textContent('.pa-card');
+    assert.match(txt, /Lucro por unidade/);
+    assert.match(txt, /Lucro por hora/);
+    await page.close();
+  });
+
+  test('Lote 1: log a venda with a chosen past date', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await page.click('button.pa-tab:has-text("Vendas")');
+    await page.fill('[data-testid="venda-date"]', '2026-05-15');
+    await page.fill('[data-testid="venda-qty"]', '1');
+    await page.click('[data-testid="venda-add"]');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-list'), /15\/05\/2026/);
+    await page.close();
+  });
+
+  test('Lote 1: edit a receita to add an observação', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await page.click('button.pa-tab:has-text("Receitas")');
+    await page.click('[data-testid="rec-edit"]');
+    await page.fill('[data-testid="rec-edit-notes"]', 'Misturar bem e assar 30min');
+    await page.click('[data-testid="rec-edit-save"]');
+    await page.waitForSelector('.pa-obs');
+    assert.match(await page.textContent('.pa-obs'), /Misturar bem/);
     await page.close();
   });
 

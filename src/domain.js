@@ -54,6 +54,7 @@
  * @property {number}      activeMinutes  // hands-on  → labor (mao de obra)
  * @property {number}      ovenMinutes    // oven on   → gas
  * @property {number}      fermentMinutes // passive rest/proof (captured, not a cost driver by default)
+ * @property {string}     [notes]         // observacao / modo de preparo (free text, not costed)
  */
 
 /**
