@@ -460,6 +460,28 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Lote 3: Vendas search + month scope narrow the log (and the total)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await goto(page, 'Vendas');
+    await addVenda(page, { date: '2026-04-10', qty: 1 });
+    await addVenda(page, { date: '2026-05-20', qty: 2 });
+    await page.waitForSelector('.pa-list-item');
+    assert.equal(await page.locator('.pa-list-item').count(), 2, 'both sales listed with no filter');
+
+    // Month scope → only May rows survive, and the total label reflects the scope.
+    await page.fill('[data-testid="venda-month"]', '2026-05');
+    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item').length === 1);
+    assert.match(await page.textContent('.pa-totals'), /05\/26/);
+
+    // Search within the scope: a miss hides every row, a hit brings rows back (pure DOM, no re-render).
+    await page.fill('[data-testid="venda-search"]', 'zzz');
+    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].every((li) => li.style.display === 'none'));
+    await page.fill('[data-testid="venda-search"]', 'Pãozinho');
+    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].some((li) => li.style.display !== 'none'));
+    await page.close();
+  });
+
   test('Lote 1: edit a receita to add an observação', async () => {
     const page = await context.newPage();
     await seedBusiness(page);

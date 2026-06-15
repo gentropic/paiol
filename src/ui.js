@@ -102,6 +102,39 @@ function logList(items, rowFn) {
   }
   return el('ul', { class: 'pa-list' }, children);
 }
+// Local "YYYY-MM" of an event — for the operação month scope (matches the <input type=month> value).
+const monthOf = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+/** Live, focus-preserving text filter over a logList ul — also hides a day header when its rows all hide. */
+function logSearchInput(placeholder, ul, testid) {
+  const inp = el('input', { class: 'pa-input pa-search', type: 'search', placeholder, ...(testid ? { 'data-testid': testid } : {}) });
+  inp.addEventListener('input', () => {
+    const q = norm(inp.value);
+    for (const child of ul.children) {
+      if (!child.classList.contains('pa-list-item')) continue;
+      const hay = child.getAttribute('data-search') ?? child.textContent;
+      child.style.display = (!q || norm(hay).includes(q)) ? '' : 'none';
+    }
+    // Reconcile day headers: a header shows only if a visible row follows it (before the next header).
+    let header = null; let seen = false;
+    const flush = () => { if (header) header.style.display = seen ? '' : 'none'; };
+    for (const child of ul.children) {
+      if (child.classList.contains('pa-daygroup')) { flush(); header = child; seen = false; }
+      else if (child.classList.contains('pa-list-item') && child.style.display !== 'none') seen = true;
+    }
+    flush();
+  });
+  return inp;
+}
+/** The search + month-scope control row shared by the two operação logs. */
+function logFilters(ctx, ul, { searchPlaceholder, searchTestid, monthTestid }) {
+  const month = ctx.view.logMonth || '';
+  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': monthTestid, type: 'month', value: month });
+  monthInput.addEventListener('change', () => ctx.actions.setLogMonth(monthInput.value || null));
+  return el('div', { class: 'pa-row pa-form pa-logfilters' }, [
+    logSearchInput(searchPlaceholder, ul, searchTestid),
+    monthInput,
+  ]);
+}
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 function svgEl(tag, attrs = {}, children = []) {
@@ -679,16 +712,22 @@ function friendlyError(e) {
 function fornadasPanel(ctx) {
   const { store } = ctx;
   const recipes = store.state.recipes;
-  const batches = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const all = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const month = ctx.view.logMonth;
+  const batches = month ? all.filter((b) => monthOf(b.at) === month) : all;
+  const list = logList(batches, (b) => batchRow(store, b));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Fornadas' }),
       recipes.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'forn-new', onclick: () => ctx.actions.openModal({ kind: 'fornada-add' }) }, '+ Registrar'),
     ].filter(Boolean)),
     recipes.length === 0 && el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' }),
-    batches.length === 0
+    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar receita…', searchTestid: 'forn-search', monthTestid: 'forn-month' }),
+    all.length === 0
       ? recipes.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma fornada registrada. Toque em “+ Registrar”.' })
-      : logList(batches, (b) => batchRow(store, b)),
+      : batches.length === 0
+        ? el('p', { class: 'pa-empty', text: 'Nenhuma fornada neste mês.' })
+        : list,
   ].filter(Boolean));
 }
 
@@ -696,7 +735,7 @@ function fornadasPanel(ctx) {
 function batchRow(store, b) {
   const r = store.get('recipes', b.recipeId);
   const mins = [b.activeMinutes != null ? `${b.activeMinutes}min ativos` : null, b.ovenMinutes != null ? `${b.ovenMinutes}min forno` : null].filter(Boolean).join(' · ');
-  return el('li', { class: 'pa-list-item' }, [
+  return el('li', { class: 'pa-list-item', 'data-search': r ? r.name : '' }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: r ? r.name : '(receita removida)' })),
       el('span', { class: 'pa-muted', text: `${b.yieldActual} produzidas` + (r ? ` (previsto ${r.yieldNominal})` : '') + (mins ? ` · ${mins}` : '') }),
@@ -750,13 +789,18 @@ function fornadaSheet(ctx) {
 function vendasPanel(ctx) {
   const { store } = ctx;
   const products = store.state.products;
-  const sales = store.state.sales.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const all = store.state.sales.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const month = ctx.view.logMonth;
+  const sales = month ? all.filter((s) => monthOf(s.at) === month) : all;
+  // Totals follow the month scope (an all-time headline when no month is chosen); search is a
+  // transient find within that scope and does not move the totals.
   let revenue = 0; let profit = 0;
   for (const s of sales) {
     const rev = s.qty * s.unitPrice;
     revenue += rev;
     profit += rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
   }
+  const list = logList(sales, (s) => saleRow(store, s));
 
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
@@ -764,13 +808,16 @@ function vendasPanel(ctx) {
       products.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'venda-new', onclick: () => ctx.actions.openModal({ kind: 'venda-add' }) }, '+ Registrar'),
     ].filter(Boolean)),
     products.length === 0 && el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' }),
+    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar produto ou canal…', searchTestid: 'venda-search', monthTestid: 'venda-month' }),
     sales.length > 0 && el('div', { class: 'pa-row pa-totals' }, [
-      el('span', { class: 'pa-grow' }, [el('strong', { text: 'Receita ' }), brl(revenue)]),
+      el('span', { class: 'pa-grow' }, [el('strong', { text: `Receita${month ? ` (${monthLabel(month)})` : ''} ` }), brl(revenue)]),
       el('span', { class: profit >= 0 ? 'pa-badge pa-ok' : 'pa-badge pa-bad', text: `lucro ${brl(profit)}` }),
     ]),
-    sales.length === 0
+    all.length === 0
       ? products.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma venda registrada. Toque em “+ Registrar”.' })
-      : logList(sales, (s) => saleRow(store, s)),
+      : sales.length === 0
+        ? el('p', { class: 'pa-empty', text: 'Nenhuma venda neste mês.' })
+        : list,
   ].filter(Boolean));
 }
 
@@ -780,7 +827,7 @@ function saleRow(store, s) {
   const p = store.get('products', s.productId);
   const rev = s.qty * s.unitPrice;
   const prof = rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
-  return el('li', { class: 'pa-list-item' }, [
+  return el('li', { class: 'pa-list-item', 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
       el('span', { class: 'pa-muted', text: `${s.qty} × ${brl(s.unitPrice)}${s.channel ? ` · ${s.channel}` : ''}` }),
