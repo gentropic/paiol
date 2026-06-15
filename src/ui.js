@@ -34,6 +34,51 @@ const SECTIONS = [
 const SECTION_OF = {};
 for (const sec of SECTIONS) for (const [sid] of sec.screens) SECTION_OF[sid] = sec;
 
+// Built-in help (PT-BR, Nayara's voice). One friendly entry per screen + a few plain-language
+// concept answers. The ? button opens it with the current screen's topic expanded.
+const HELP_SCREENS = [
+  { id: 'inicio', icon: '🏠', label: 'Início', paras: [
+    'Sua visão geral do mês: quanto você vendeu e lucrou, avisos (como insumos sem preço) e atalhos pra registrar uma venda ou fornada na hora.',
+  ] },
+  { id: 'insumos', icon: '🧺', label: 'Insumos', paras: [
+    'Tudo que você compra pra produzir — farinha, ovos, chocolate — e também embalagens e itens prontos de revenda (bombom, laço, cartãozinho). Cadastre cada um com a unidade de compra e o preço.',
+    'Toque em “+ Novo” pra adicionar, ou em qualquer linha pra mudar o preço (o histórico fica guardado) ou excluir. Sem o preço, os produtos que usam o insumo também ficam sem preço.',
+  ] },
+  { id: 'receitas', icon: '📖', label: 'Receitas', paras: [
+    'O modo de fazer cada coisa: o quanto rende, os minutos de mão na massa e de forno, e os insumos (ou outras receitas) que entram.',
+    'O app soma tudo e calcula o custo real de cada receita — incluindo o seu tempo de trabalho e o gás do forno.',
+  ] },
+  { id: 'produtos', icon: '🎂', label: 'Produtos', paras: [
+    'O que você vende. Um produto pode ser feito de uma receita, de várias (combos), de outros produtos (cestas!) ou de insumos comprados.',
+    'A embalagem entra como custo, com uma descrição (boleira, saco, lata). Toque em “+ Novo” pra criar e montar os itens.',
+  ] },
+  { id: 'precos', icon: '💰', label: 'Preços', paras: [
+    'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
+    'Se aparecer “sem preço”, é porque falta cadastrar o preço de algum insumo usado.',
+  ] },
+  { id: 'fornadas', icon: '🔥', label: 'Fornadas', paras: [
+    'Registre o que você produziu de verdade. Quantas unidades saíram ajusta o custo real por unidade (o custo do lote dividido pelo que rendeu).',
+    'Os minutos já vêm da receita — mude só se foi diferente. É um registro: pra corrigir, lance uma nova fornada.',
+  ] },
+  { id: 'vendas', icon: '🛒', label: 'Vendas', paras: [
+    'Registre suas vendas. O preço sugerido já vem preenchido; edite se vendeu por outro valor. O lucro de cada venda já desconta o custo e a taxa de pagamento.',
+    'Dá pra lançar venda de outro dia pela data, e usar a busca ou o filtro de mês pra encontrar.',
+  ] },
+  { id: 'relatorios', icon: '📊', label: 'Relatórios', paras: [
+    'Seu balanço por mês: faturamento, custos, taxas, lucro e margem, com gráfico e o resultado por produto. Dá pra exportar.',
+  ] },
+  { id: 'ajustes', icon: '⚙️', label: 'Ajustes', paras: [
+    'Suas configurações: o valor da sua hora de trabalho, o custo do gás por minuto, os custos fixos do mês e a margem que você quer ganhar.',
+    'Aqui também ficam o backup no Dropbox e a importação/exportação dos seus dados.',
+  ] },
+];
+const HELP_CONCEPTS = [
+  { q: 'Por que um produto fica “sem preço”?', a: 'Quando algum insumo que ele usa ainda não tem preço cadastrado. Cadastre o preço em Insumos e o preço do produto aparece sozinho.' },
+  { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir preços, e os dados reais (fornadas e vendas) pra mostrar a verdade nos relatórios.' },
+  { q: 'Margem e taxa', a: 'Margem é o lucro que você quer sobre o custo; taxa é o que a maquininha/pagamento cobra. O preço sugerido já considera as duas.' },
+  { q: 'Meus dados estão seguros?', a: 'Ficam salvos no seu aparelho. Conecte o Dropbox em Ajustes pra ter backup e poder usar em mais de um lugar.' },
+];
+
 // ── DOM + format helpers ───────────────────────────────────────────────────────
 
 function el(tag, attrs = {}, children = []) {
@@ -185,8 +230,11 @@ export function renderApp(root, ctx) {
 
   root.replaceChildren(...[
     el('header', { class: 'pa-header' }, [
-      el('h1', { text: 'Quitutes do Paiol' }),
-      el('p', { class: 'pa-sub', text: 'Custos, receitas e vendas' }),
+      el('div', { class: 'pa-grow' }, [
+        el('h1', { text: 'Quitutes do Paiol' }),
+        el('p', { class: 'pa-sub', text: 'Custos, receitas e vendas' }),
+      ]),
+      el('button', { class: 'pa-help-btn', 'data-testid': 'help-open', title: 'Ajuda', 'aria-label': 'Ajuda', onclick: () => ctx.actions.openModal({ kind: 'help' }) }, '?'),
     ]),
     el('main', { class: 'pa-main' }, content),
     el('nav', { class: 'pa-bottomnav' }, SECTIONS.map((sec) =>
@@ -256,6 +304,31 @@ function confirmRemove(ctx, label, fn) {
     yesLabel: 'Remover', onYes: () => ctx.actions.mutate(fn),
   });
 }
+
+// Built-in help — opens with the current screen's topic expanded; everything else is browsable.
+MODALS.help = (ctx) => {
+  const here = ctx.view.tab;
+  const topic = (s) => el('details', { class: 'pa-help-det', ...(s.id === here ? { open: 'open' } : {}) }, [
+    el('summary', {}, [el('span', { text: `${s.icon} ${s.label}` }), s.id === here && el('span', { class: 'pa-badge', text: 'você está aqui' })].filter(Boolean)),
+    ...s.paras.map((t) => el('p', { class: 'pa-help-p', text: t })),
+  ]);
+  const concept = (c) => el('details', { class: 'pa-help-det' }, [
+    el('summary', { text: c.q }),
+    el('p', { class: 'pa-help-p', text: c.a }),
+  ]);
+  return [
+    el('div', { class: 'pa-sheet-grab' }),
+    el('h2', { class: 'pa-sheet-title', text: 'Ajuda' }),
+    el('p', { class: 'pa-sheet-msg', text: 'O paiol responde três perguntas: quanto cada coisa custa pra fazer, quanto cobrar, e se você está lucrando.' }),
+    el('h3', { class: 'pa-h3', text: 'As telas' }),
+    ...HELP_SCREENS.map(topic),
+    el('h3', { class: 'pa-h3', text: 'Dúvidas comuns' }),
+    ...HELP_CONCEPTS.map(concept),
+    el('div', { class: 'pa-sheet-actions' }, [
+      el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'help-close', onclick: () => ctx.actions.closeModal() }, 'Entendi'),
+    ]),
+  ];
+};
 
 // ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
 

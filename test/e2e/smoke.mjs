@@ -545,6 +545,21 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Lote 3: built-in help opens, is context-aware, and closes', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await page.click('[data-testid="help-open"]');
+    await page.waitForSelector('[data-testid="help-close"]');
+    assert.match(await page.textContent('.pa-sheet'), /três perguntas/);   // friendly intro
+    const open = await page.locator('.pa-help-det[open] > summary').textContent();
+    assert.match(open, /Insumos/);                                          // current screen expanded
+    assert.match(open, /você está aqui/);
+    await page.click('[data-testid="help-close"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });

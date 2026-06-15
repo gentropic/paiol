@@ -25,9 +25,22 @@
       font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     #app { max-width: 640px; margin: 0 auto; padding: 16px 16px calc(72px + env(safe-area-inset-bottom)); }
 
-    .pa-header { padding: 8px 4px 16px; }
+    .pa-header { padding: 8px 4px 16px; display: flex; align-items: flex-start; gap: 8px; }
     .pa-header h1 { margin: 0; font-size: 1.5rem; color: var(--au-action); }
     .pa-sub { margin: 2px 0 0; color: var(--au-fg-soft); font-size: 0.9rem; }
+    .pa-help-btn { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 999px; border: 1px solid var(--au-border);
+      background: var(--au-surface); color: var(--au-action); font-size: 1.15rem; font-weight: 700; cursor: pointer;
+      box-shadow: var(--au-shadow); line-height: 1; }
+    .pa-help-btn:active { transform: translateY(1px); }
+    /* Help sheet content */
+    .pa-help-det { border-bottom: 1px solid var(--au-border); padding: 6px 0; }
+    .pa-help-det > summary { cursor: pointer; font-weight: 600; padding: 6px 2px; list-style: none;
+      display: flex; align-items: center; gap: 8px; }
+    .pa-help-det > summary::-webkit-details-marker { display: none; }
+    .pa-help-det > summary::after { content: '›'; margin-left: auto; color: var(--au-fg-soft); font-size: 1.2rem; transition: transform 0.15s; }
+    .pa-help-det[open] > summary::after { transform: rotate(90deg); }
+    .pa-help-det .pa-badge { margin-left: 0; }
+    .pa-help-p { margin: 4px 2px 8px; color: var(--au-fg-soft); font-size: 0.92rem; }
 
     .pa-card { background: var(--au-surface); border: 1px solid var(--au-border);
       border-radius: var(--au-radius); box-shadow: var(--au-shadow); padding: 16px; margin: 0 0 16px; }
