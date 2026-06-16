@@ -45,6 +45,22 @@ test('monthSummary deducts variable costs and perdas from profit (Rev 03)', () =
   assert.ok(Math.abs(m.margem - 20 / 50) < 1e-9);
 });
 
+test('monthSummary excludes reversed (estornado) sales, costs and perdas', () => {
+  const s = storeWithSales();
+  s.addVariableCost({ id: 'v1', at: '2026-05-15T12:00:00.000Z', amount: 5 });
+  s.addPerda({ id: 'pd1', at: '2026-05-16T12:00:00.000Z', amount: 4 });
+  // Baseline May: receita 50, lucro 29-5-4 = 20. Now estorno the R$30 sale, the cost and the perda.
+  s.addReversal({ id: 'rv1', at: '2026-05-21T12:00:00.000Z', kind: 'sale', refId: 's2' });
+  s.addReversal({ id: 'rv2', at: '2026-05-21T12:00:00.000Z', kind: 'variableCost', refId: 'v1' });
+  s.addReversal({ id: 'rv3', at: '2026-05-21T12:00:00.000Z', kind: 'perda', refId: 'pd1' });
+  const m = monthSummary(s, '2026-05');
+  assert.equal(m.receita, 20);              // only the R$20 sale remains
+  assert.equal(m.custoVariavel, 0);
+  assert.equal(m.perdas, 0);
+  assert.equal(m.nVendas, 1);
+  assert.equal(m.lucro, 20 - 8 - 1);        // 20 rev − 8 cost − 1 fee = 11
+});
+
 test('monthSummary excludes other months', () => {
   const s = storeWithSales();
   const jun = monthSummary(s, '2026-06');

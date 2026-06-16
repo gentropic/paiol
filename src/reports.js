@@ -15,7 +15,7 @@ const ym = (iso) => String(iso || '').slice(0, 7); // 'YYYY-MM'
  * @param {string} month
  */
 export function monthSummary(store, month) {
-  const sales = store.state.sales.filter((s) => ym(s.at) === month);
+  const sales = store.state.sales.filter((s) => ym(s.at) === month && !store.isReversed('sale', s.id));
   let receita = 0; let custo = 0; let taxas = 0; let unidades = 0;
   for (const s of sales) {
     const rev = s.qty * s.unitPrice;
@@ -26,13 +26,13 @@ export function monthSummary(store, month) {
   }
   // Ad-hoc deductions logged for the month (Rev 03): variable costs + losses. These are NOT in
   // costSnapshot (which carries CMV/labor/gas/fixed), so they are additive to the deductions.
-  const custoVariavel = (store.state.variableCosts || []).reduce((acc, v) => (ym(v.at) === month ? acc + (v.amount || 0) : acc), 0);
-  const perdas = (store.state.perdas || []).reduce((acc, p) => (ym(p.at) === month ? acc + (p.amount || 0) : acc), 0);
+  const custoVariavel = (store.state.variableCosts || []).reduce((acc, v) => (ym(v.at) === month && !store.isReversed('variableCost', v.id) ? acc + (v.amount || 0) : acc), 0);
+  const perdas = (store.state.perdas || []).reduce((acc, p) => (ym(p.at) === month && !store.isReversed('perda', p.id) ? acc + (p.amount || 0) : acc), 0);
   const lucro = receita - custo - taxas - custoVariavel - perdas;
 
   let minutos = 0;
   for (const b of store.state.batches) {
-    if (ym(b.at) !== month) continue;
+    if (ym(b.at) !== month || store.isReversed('batch', b.id)) continue;
     const r = store.get('recipes', b.recipeId);
     minutos += b.activeMinutes ?? r?.activeMinutes ?? 0;
   }
@@ -52,7 +52,7 @@ export function monthSummary(store, month) {
 export function productSummary(store, month) {
   const map = new Map();
   for (const s of store.state.sales) {
-    if (ym(s.at) !== month) continue;
+    if (ym(s.at) !== month || store.isReversed('sale', s.id)) continue;
     const e = map.get(s.productId) || { qty: 0, receita: 0, lucro: 0 };
     const rev = s.qty * s.unitPrice;
     e.qty += s.qty;

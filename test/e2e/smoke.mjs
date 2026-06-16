@@ -615,6 +615,27 @@ describe('paiol UI smoke', () => {
     const margem = grid.find((r) => /Margem/.test(r[0]));
     assert.ok(money(custo[2]) < money(custo[1]), `simulated cost/un should drop (${custo[1]} → ${custo[2]})`);
     assert.ok(perc(margem[2]) > perc(margem[1]), `margin should rise (${margem[1]} → ${margem[2]})`);
+    // Lucro por hora is shown and improves (more units per hour when labour is held).
+    const hora = grid.find((r) => /Lucro por hora/.test(r[0]));
+    assert.ok(hora && hora[1] && hora[2], 'lucro/hora row present with both values');
+    assert.ok(money(hora[2]) > money(hora[1]), `lucro/hora should rise (${hora[1]} → ${hora[2]})`);
+    await page.close();
+  });
+
+  test('Lote 3: estorno cancels a sale — it greys out and leaves the running total', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await goto(page, 'Vendas');
+    await addVenda(page, { qty: 3 });
+    await page.waitForSelector('.pa-list-item');
+    const totalBefore = await page.textContent('.pa-totals');
+    await page.click('[data-testid="estornar"]');       // ↩ on the row
+    await page.click('[data-testid="confirm-yes"]');     // confirm sheet
+    await page.waitForSelector('.pa-reversed');          // row now struck-through
+    assert.match(await page.textContent('.pa-list'), /estornado/);
+    // Revenue total drops to zero (the only sale was reversed) → totals row gone or zeroed.
+    const totalAfter = await page.locator('.pa-totals').count() ? await page.textContent('.pa-totals') : 'R$ 0,00';
+    assert.notEqual(totalAfter, totalBefore);
     await page.close();
   });
 

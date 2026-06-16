@@ -11,7 +11,7 @@ import { toYaml, fromYaml } from './yaml-bridge.js';
 export const SCHEMA_VERSION = 1;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'reversals'];
 /** Mutable master-data collections (§2.1). */
 const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
@@ -50,7 +50,7 @@ export function emptyState() {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
     ingredients: [], recipes: [], products: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], reversals: [],
   };
 }
 
@@ -95,9 +95,15 @@ export class PaiolStore {
       if (!cur || pc.at >= cur.at) price.set(pc.ingredientId, { price: pc.price, at: pc.at });
     }
     maps.price = price;
+    const reversed = new Set(); // `${kind}:${refId}` for every reversed event (estorno)
+    for (const r of this.state.reversals) reversed.add(`${r.kind}:${r.refId}`);
+    maps.reversed = reversed;
     this._index = maps; this._indexRev = this._rev;
     return maps;
   }
+
+  /** Was this event (a sale/batch/variableCost/perda) reversed by an estorno? */
+  isReversed(kind, id) { return this._idx().reversed.has(`${kind}:${id}`); }
 
   // ── Config (engine settings; §4) ─────────────────────────────────────────────
 
@@ -152,6 +158,8 @@ export class PaiolStore {
   addVariableCost(ev) { return this._append('variableCosts', ev); }
   /** @param {import('./domain.js').Perda} ev */
   addPerda(ev) { return this._append('perdas', ev); }
+  /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
+  addReversal(ev) { return this._append('reversals', ev); }
 
   // ── Read model ───────────────────────────────────────────────────────────────
 

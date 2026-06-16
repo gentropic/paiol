@@ -341,6 +341,20 @@ function confirmRemove(ctx, label, fn) {
   });
 }
 
+// Estorno — append-only events can't be edited/deleted, so a correction is a REVERSAL event that
+// cancels the original (which stays in the history). Used on the operação logs.
+function confirmEstorno(ctx, kind, id) {
+  ctx.actions.openModal({
+    kind: 'confirm', title: 'Estornar?', message: 'A entrada será cancelada — continua no histórico, mas não conta mais nos totais.',
+    yesLabel: 'Estornar', onYes: () => ctx.actions.mutate((s) => s.addReversal({ id: uuid(), at: nowIso(), kind, refId: id })),
+  });
+}
+/** Per-row estorno control: an "estornado" badge if already reversed, else an undo button. */
+function estornoControl(ctx, kind, id) {
+  if (ctx.store.isReversed(kind, id)) return el('span', { class: 'pa-badge', text: 'estornado' });
+  return el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Estornar', 'data-testid': 'estornar', onclick: (e) => { e.stopPropagation(); confirmEstorno(ctx, kind, id); } }, '↩');
+}
+
 // Built-in help — opens with the current screen's topic expanded; everything else is browsable.
 MODALS.help = (ctx) => {
   const here = ctx.view.tab;
@@ -867,7 +881,7 @@ function fornadasPanel(ctx) {
   const all = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
   const month = ctx.view.logMonth;
   const batches = month ? all.filter((b) => monthOf(b.at) === month) : all;
-  const list = logList(batches, (b) => batchRow(store, b));
+  const list = logList(batches, (b) => batchRow(ctx, b));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Fornadas' }),
@@ -884,15 +898,17 @@ function fornadasPanel(ctx) {
   ].filter(Boolean));
 }
 
-// Read-only log entry (append-only — no edit; a correction is a new fornada).
-function batchRow(store, b) {
+// Read-only log entry (append-only — no edit; a correction is an estorno + a new fornada).
+function batchRow(ctx, b) {
+  const { store } = ctx;
   const r = store.get('recipes', b.recipeId);
   const mins = [b.activeMinutes != null ? `${b.activeMinutes}min ativos` : null, b.ovenMinutes != null ? `${b.ovenMinutes}min forno` : null].filter(Boolean).join(' · ');
-  return el('li', { class: 'pa-list-item', 'data-search': r ? r.name : '' }, [
+  return el('li', { class: 'pa-list-item' + (store.isReversed('batch', b.id) ? ' pa-reversed' : ''), 'data-search': r ? r.name : '' }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: r ? r.name : '(receita removida)' })),
       el('span', { class: 'pa-muted', text: `${b.yieldActual} produzidas` + (r ? ` (previsto ${r.yieldNominal})` : '') + (mins ? ` · ${mins}` : '') }),
     ]),
+    estornoControl(ctx, 'batch', b.id),
   ]);
 }
 
@@ -949,11 +965,12 @@ function vendasPanel(ctx) {
   // transient find within that scope and does not move the totals.
   let revenue = 0; let profit = 0;
   for (const s of sales) {
+    if (store.isReversed('sale', s.id)) continue;
     const rev = s.qty * s.unitPrice;
     revenue += rev;
     profit += rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
   }
-  const list = logList(sales, (s) => saleRow(store, s));
+  const list = logList(sales, (s) => saleRow(ctx, s));
 
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
@@ -976,16 +993,19 @@ function vendasPanel(ctx) {
 
 // Read-only log entry (append-only — no edit; an estorno would be a new event). The day is in the
 // group header, so the row shows just quantity × price, channel, and the realized profit.
-function saleRow(store, s) {
+function saleRow(ctx, s) {
+  const { store } = ctx;
+  const reversed = store.isReversed('sale', s.id);
   const p = store.get('products', s.productId);
   const rev = s.qty * s.unitPrice;
   const prof = rev - rev * s.paymentFeePct - s.qty * s.costSnapshot;
-  return el('li', { class: 'pa-list-item', 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
+  return el('li', { class: 'pa-list-item' + (reversed ? ' pa-reversed' : ''), 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
       el('span', { class: 'pa-muted', text: `${s.qty} × ${brl(s.unitPrice)}${s.channel ? ` · ${s.channel}` : ''}` }),
     ]),
     el('span', { class: prof >= 0 ? 'pa-num' : 'pa-num pa-bad', text: brl(prof) }),
+    estornoControl(ctx, 'sale', s.id),
   ]);
 }
 
@@ -1043,10 +1063,11 @@ function custosPanel(ctx) {
   const all = store.state.variableCosts.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
   const month = ctx.view.logMonth;
   const items = month ? all.filter((v) => monthOf(v.at) === month) : all;
-  const total = items.reduce((s, v) => s + (v.amount || 0), 0);
-  const list = logList(items, (v) => el('li', { class: 'pa-list-item', 'data-search': v.description || '' }, [
+  const total = items.reduce((s, v) => (store.isReversed('variableCost', v.id) ? s : s + (v.amount || 0)), 0);
+  const list = logList(items, (v) => el('li', { class: 'pa-list-item' + (store.isReversed('variableCost', v.id) ? ' pa-reversed' : ''), 'data-search': v.description || '' }, [
     el('div', { class: 'pa-grow' }, [el('div', {}, el('strong', { text: v.description || 'Custo' }))]),
     el('span', { class: 'pa-num', text: brl(v.amount) }),
+    estornoControl(ctx, 'variableCost', v.id),
   ]));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
@@ -1090,13 +1111,14 @@ function perdasPanel(ctx) {
   const all = store.state.perdas.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
   const month = ctx.view.logMonth;
   const items = month ? all.filter((p) => monthOf(p.at) === month) : all;
-  const total = items.reduce((s, p) => s + (p.amount || 0), 0);
-  const list = logList(items, (p) => el('li', { class: 'pa-list-item', 'data-search': p.note || '' }, [
+  const total = items.reduce((s, p) => (store.isReversed('perda', p.id) ? s : s + (p.amount || 0)), 0);
+  const list = logList(items, (p) => el('li', { class: 'pa-list-item' + (store.isReversed('perda', p.id) ? ' pa-reversed' : ''), 'data-search': p.note || '' }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: p.note || (PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1]) || 'Perda' })),
       el('span', { class: 'pa-muted', text: PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1] || 'Outro' }),
     ]),
     el('span', { class: 'pa-num pa-bad', text: `− ${brl(p.amount)}` }),
+    estornoControl(ctx, 'perda', p.id),
   ]));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
@@ -1283,8 +1305,8 @@ function reportCsv(month, sum, byProduct) {
 // cost/un is invariant; only labor/gas/fixed per unit move with the new yield + minutes), then
 // compare cost, margin and profit at a fixed price.
 
-/** Unit cost of recipe `recipeId` as if its batch were scaled by `factor`, with new active/oven minutes. */
-function simulateRecipeCost(store, recipeId, factor, active, oven, config) {
+/** Per-unit cost breakdown of recipe `recipeId` as if its batch were scaled by `factor`, with new active/oven minutes. */
+function simulateRecipeBreakdown(store, recipeId, factor, active, oven, config) {
   const real = store.get('recipes', recipeId);
   const sim = {
     ...real,
@@ -1298,8 +1320,9 @@ function simulateRecipeCost(store, recipeId, factor, active, oven, config) {
     products: store.state.products,
     priceChanges: store.state.priceChanges, batches: store.state.batches, sales: store.state.sales,
   };
-  return recipeUnitCost(indexStore(raw), recipeId, config, estimateLens(config));
+  return costBreakdown(indexStore(raw), recipeId, config, estimateLens(config));
 }
+const breakdownTotal = (b) => b.ingredients + b.labor + b.gas + b.fixed;
 
 function simuladorPanel(ctx) {
   const { store } = ctx;
@@ -1323,11 +1346,18 @@ function simuladorPanel(ctx) {
 
 function simuladorBody(ctx, recipe, config) {
   const { store } = ctx;
-  let baseCost;
-  try { baseCost = recipeUnitCost(store.toEngineStore(), recipe.id, config, estimateLens(config)); }
+  let baseBreak;
+  try { baseBreak = costBreakdown(store.toEngineStore(), recipe.id, config, estimateLens(config)); }
   catch (e) { return el('p', { class: 'pa-status', text: friendlyError(e) }); }
+  const baseCost = breakdownTotal(baseBreak);
 
   const fee = config.paymentFeePct;
+  // Lucro/hora: profit per unit ÷ hours of hands-on work per unit (labor cost / valorHora, like Preços).
+  const lucroHora = (b, lucroUnit) => {
+    const hpu = config.valorHora > 0 ? b.labor / config.valorHora : 0;
+    return hpu > 0 ? lucroUnit / hpu : null;
+  };
+  const fmtHora = (v) => (v == null ? '—' : brl(v));
   const factor = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-factor', type: 'text', inputmode: 'decimal', value: '1,5' });
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
@@ -1339,9 +1369,10 @@ function simuladorBody(ctx, recipe, config) {
     const a = parseNum(active.value) || 0;
     const o = parseNum(oven.value) || 0;
     const p = parseNum(price.input.value) || 0;
-    let simCost;
-    try { simCost = simulateRecipeCost(store, recipe.id, f, a, o, config); }
+    let simBreak;
+    try { simBreak = simulateRecipeBreakdown(store, recipe.id, f, a, o, config); }
     catch (e) { results.replaceChildren(el('p', { class: 'pa-status', text: friendlyError(e) })); return; }
+    const simCost = breakdownTotal(simBreak);
     const margin = (cost) => (p > 0 ? 1 - fee - cost / p : 0);
     const lucro = (cost) => p - cost - p * fee;
     const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
@@ -1352,6 +1383,7 @@ function simuladorBody(ctx, recipe, config) {
       el('tr', {}, [el('td', { text: 'Custo por unidade' }), ...col(baseCost, simCost, brl)]),
       el('tr', {}, [el('td', { text: `Margem a ${brl(p)}` }), el('td', { class: 'pa-num', text: pctStr(margin(baseCost)) }), el('td', { class: 'pa-num pa-strong' + (better ? '' : ' pa-bad'), text: pctStr(margin(simCost)) })]),
       el('tr', {}, [el('td', { text: 'Lucro por unidade' }), ...col(lucro(baseCost), lucro(simCost), brl)]),
+      el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), ...col(lucroHora(baseBreak, lucro(baseCost)), lucroHora(simBreak, lucro(simCost)), fmtHora)]),
     ]));
   }
   [factor, active, oven, price.input].forEach((i) => i.addEventListener('input', recompute));

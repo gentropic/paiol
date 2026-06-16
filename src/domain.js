@@ -149,6 +149,17 @@
  */
 
 /**
+ * Estorno — a reversal of a prior append-only event (Rev 03). Append-only itself, so the original
+ * stays in the history (audit trail) but no longer counts. `kind` + `refId` point at the reversed
+ * event.
+ * @typedef {object} Reversal
+ * @property {string} id
+ * @property {string} at
+ * @property {'sale'|'batch'|'variableCost'|'perda'} kind
+ * @property {string} refId
+ */
+
+/**
  * The engine config — a SINGLE internal object, never exposed to Nayara (§4.3).
  * MEI-specific: `das` is a fixed monthly amount living in the fixed pool, never in
  * the markup divisor.
