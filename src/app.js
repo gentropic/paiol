@@ -3,7 +3,7 @@
 
 import { VFS } from '../vendor/@gcu/vfs/index.js';
 import { loadStore, createDebouncedSaver } from './persist.js';
-import { syncOnce, openDropboxVfs } from './sync.js';
+import { createSyncController, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp, renderModal } from './ui.js';
 import { setupPwa } from './pwa.js';
@@ -12,7 +12,7 @@ import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, modal: null, updateReady: false };
+  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
@@ -33,8 +33,37 @@ export async function boot(root) {
   // background, surface a one-tap "atualizar" banner instead of reloading under her.
   const sw = setupPwa(() => { view.updateReady = true; rerender(); });
 
-  // If we linked on this load, pull immediately so the device starts in sync.
-  if (redirect.linked) void doSync(true);
+  // Automatic, safe Dropbox sync (data-loss avoidance): pull on boot, debounce-push after changes,
+  // flush on hide, retry when back online. Every run reconciles through syncOnce (merge, snapshot).
+  const sync = createSyncController({
+    getStore: () => store,
+    flushLocal: () => saver.flushNow(),
+    openRemote: () => openDropboxVfs(() => dropboxTokenManager().getToken()),
+    snapshotLabel: snapshotMonthLabel,
+    opts: { path: REMOTE_BUSINESS_PATH },
+    onResult(res, meta) {
+      if (res.ok) {
+        view.lastSyncAt = new Date().toISOString();
+        view.syncError = null;
+        if (meta.manual) view.status = (res.pushed || res.pulledEvents) ? `Sincronizado — ${res.pulledEvents} novo(s) do Dropbox${res.pushed ? ', enviado' : ''}.` : 'Já estava sincronizado.';
+        if (meta.manual || res.pulledEvents || res.pulledMaster) rerender(); // refresh if data came in
+      } else {
+        view.syncError = res.error;                  // surfaced quietly in Ajustes; not a nag
+        if (meta.manual) { view.status = `Erro ao sincronizar: ${res.error}`; rerender(); }
+      }
+    },
+  });
+  // Pull on every boot when already linked — keeps a device fresh and shrinks the conflict window.
+  const autoSync = () => { if (view.linked) void sync.runNow(); };
+  const scheduleSync = () => { if (view.linked) sync.schedule(); };
+  autoSync();
+
+  // Page-hide is the last reliable moment on mobile: flush local FIRST (so a change made seconds
+  // before backgrounding survives even if the tab is killed), then attempt a remote push.
+  const onHide = () => { void saver.flushNow(); sync.cancel(); autoSync(); };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') onHide(); });
+  window.addEventListener('pagehide', onHide);
+  window.addEventListener('online', autoSync);
 
   ctx.actions = {
     setTab(tab) { view.tab = tab; view.status = null; view.modal = null; view.logMonth = null; rerender(); },
@@ -43,12 +72,13 @@ export async function boot(root) {
     // Modal/bottom-sheet (add/edit forms, confirmations).
     openModal(modal) { view.modal = modal; rerenderModal(); },
     closeModal() { view.modal = null; rerenderModal(); },
-    // Generic business mutation: run fn(store), persist (debounced), re-render. Closes any sheet.
-    mutate(fn) { fn(store); view.modal = null; saver.schedule(); rerender(); },
-    setConfig(partial) { store.setConfig(partial); saver.schedule(); view.status = 'Ajustes salvos.'; rerender(); },
+    // Generic business mutation: run fn(store), persist locally (debounced) + sync (debounced), re-render.
+    mutate(fn) { fn(store); view.modal = null; saver.schedule(); scheduleSync(); rerender(); },
+    setConfig(partial) { store.setConfig(partial); saver.schedule(); scheduleSync(); view.status = 'Ajustes salvos.'; rerender(); },
     importData(text) {
       const r = importYaml(store, text);
       saver.schedule();
+      scheduleSync();
       const parts = [`${r.insumos} insumo(s)`, `${r.receitas} receita(s)`, `${r.produtos} produto(s)`];
       if (r.vendas) parts.push(`${r.vendas} venda(s)`);
       if (r.fornadas) parts.push(`${r.fornadas} fornada(s)`);
@@ -61,34 +91,22 @@ export async function boot(root) {
     applyUpdate() { if (sw) sw.applyUpdate(); }, // coordinated reload of all tabs onto the new shell
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
+      sync.cancel();
       forgetToken();
       view.linked = false;
+      view.lastSyncAt = null;
+      view.syncError = null;
       view.status = 'Dropbox desconectado deste aparelho.';
       rerender();
     },
-    sync: () => doSync(false),
+    // Manual "Sincronizar agora": show the spinner, then let onResult fill the status.
+    async sync() {
+      if (sync.busy) return;
+      view.busy = true; view.status = null; rerender();
+      await sync.runNow({ manual: true });
+      view.busy = false; rerender();
+    },
   };
-
-  async function doSync(silent) {
-    if (view.busy) return;
-    view.busy = true;
-    if (!silent) view.status = null;
-    rerender();
-    try {
-      const mgr = dropboxTokenManager();
-      const remoteVfs = await openDropboxVfs(() => mgr.getToken());
-      const r = await syncOnce(store, remoteVfs, { path: REMOTE_BUSINESS_PATH, snapshotLabel: snapshotMonthLabel() });
-      await saver.flushNow(); // persist the merged result locally
-      view.status = r.pushed || r.pulledEvents
-        ? `Sincronizado — ${r.pulledEvents} novo(s) do Dropbox${r.pushed ? ', enviado' : ''}.`
-        : 'Já estava sincronizado.';
-    } catch (e) {
-      view.status = `Erro ao sincronizar: ${String(e.message || e)}`;
-    } finally {
-      view.busy = false;
-      rerender();
-    }
-  }
 
   rerender();
 }

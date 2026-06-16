@@ -116,6 +116,7 @@ const pctStr = (frac) => `${Math.round((Number(frac) || 0) * 100)}%`;
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
+const fmtDateTime = (iso) => { try { return new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }); } catch { return iso; } };
 /** Parse a number that may use a comma decimal or currency symbols; '' / invalid → null. */
 function parseNum(s) {
   if (s == null) return null;
@@ -1471,7 +1472,7 @@ function downloadFile(name, text, mime = 'text/yaml') {
 }
 
 function dropboxPanel(ctx) {
-  const { linked, busy, status } = ctx.view;
+  const { linked, busy, status, lastSyncAt, syncError } = ctx.view;
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-row' }, [
       el('strong', { text: 'Dropbox' }),
@@ -1484,6 +1485,11 @@ function dropboxPanel(ctx) {
       linked && el('button', { class: 'pa-btn pa-ghost', onclick: () => ctx.actions.disconnect() }, 'Desconectar'),
     ]),
     status && el('p', { class: 'pa-status', text: status }),
-    el('p', { class: 'pa-hint', text: 'Seus dados ficam no aparelho. O Dropbox é backup e sincronização entre aparelhos.' }),
+    // Sync runs automatically (on abrir, ao mudar algo, ao sair do app). Show the last result so a
+    // silent failure can't hide a stale backup.
+    linked && syncError
+      ? el('p', { class: 'pa-status pa-bad' }, [el('strong', { text: '⚠ Backup pode estar desatualizado. ' }), 'Seus dados estão salvos no aparelho; tentaremos sincronizar de novo automaticamente.'])
+      : linked && lastSyncAt && el('p', { class: 'pa-hint', text: `Sincronizado automaticamente · última vez ${fmtDateTime(lastSyncAt)}.` }),
+    el('p', { class: 'pa-hint', text: 'Seus dados ficam no aparelho. O Dropbox é backup e sincroniza entre aparelhos — sozinho, sem precisar apertar nada.' }),
   ]);
 }

@@ -203,6 +203,22 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('a change is flushed to IndexedDB on page-hide (survives reload before the 800ms debounce)', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE);
+    await page.evaluate(() => new Promise((r) => { const q = indexedDB.deleteDatabase('paiol'); q.onsuccess = q.onerror = q.onblocked = () => r(); }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await addInsumo(page, 'Bicarbonato', 'kg');           // schedules the debounced (800ms) save
+    await page.evaluate(() => window.dispatchEvent(new Event('pagehide'))); // → saver.flushNow()
+    await page.waitForTimeout(450);                       // well under 800ms — only the hide-flush could have saved it
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await page.waitForSelector('.pa-row-item');
+    assert.match(await page.textContent('.pa-list'), /Bicarbonato/, 'change not flushed on page-hide → data-loss risk');
+    await page.close();
+  });
+
   test('full flow: insumo → receita → produto → a suggested price appears', async () => {
     const page = await context.newPage();
     const errors = [];
