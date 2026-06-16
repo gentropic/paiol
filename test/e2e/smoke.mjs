@@ -26,12 +26,12 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros',
-  Fornadas: 'operacao', Vendas: 'operacao', Preços: 'analise', Relatórios: 'analise',
+  Fornadas: 'operacao', Vendas: 'operacao', Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Fornadas: 'fornadas',
-  Vendas: 'vendas', Preços: 'precos', Relatórios: 'relatorios', Ajustes: 'ajustes', Início: 'inicio',
+  Vendas: 'vendas', Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
   await page.locator(`.pa-navbtn[data-section="${SCREEN_SECTION[screen]}"]`).click();
@@ -591,6 +591,28 @@ describe('paiol UI smoke', () => {
     assert.match(await page.textContent('.pa-list'), /seco/);
     await page.fill('[data-testid="ins-search"]', 'seco');
     await page.waitForFunction(() => [...document.querySelectorAll('.pa-row-item')].some((li) => li.style.display !== 'none'));
+    await page.close();
+  });
+
+  test('Lote 3: simulador — a bigger batch lowers cost/un and raises margin at a fixed price', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // recipe "Pão": yield 10, 30min active, priced via Farinha
+    await goto(page, 'Simulador');
+    await page.waitForSelector('[data-testid="sim-results"]');
+    // Scale 2× but hold the labour minutes (her insight: "a mão de obra sobe pouco").
+    await page.fill('[data-testid="sim-factor"]', '2');
+    await page.fill('[data-testid="sim-active"]', '30');
+    await page.dispatchEvent('[data-testid="sim-active"]', 'input');
+    await page.waitForTimeout(100);
+
+    const grid = await page.$$eval('[data-testid="sim-results"] tr', (rows) =>
+      rows.map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim())));
+    const money = (s) => Number(s.replace(/[^\d,]/g, '').replace(',', '.'));
+    const perc = (s) => Number(s.replace('%', ''));
+    const custo = grid.find((r) => /Custo por unidade/.test(r[0]));
+    const margem = grid.find((r) => /Margem/.test(r[0]));
+    assert.ok(money(custo[2]) < money(custo[1]), `simulated cost/un should drop (${custo[1]} → ${custo[2]})`);
+    assert.ok(perc(margem[2]) > perc(margem[1]), `margin should rise (${margem[1]} → ${margem[2]})`);
     await page.close();
   });
 

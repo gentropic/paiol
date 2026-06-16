@@ -6,7 +6,7 @@
 // on submit, so typing is never interrupted by a re-render.
 
 import {
-  estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice, productBreakdown,
+  indexStore, estimateLens, costBreakdown, recipeUnitCost, priceFromCost, productUnitCost, productPrice, productBreakdown,
   effectiveMargin, PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
@@ -28,7 +28,7 @@ const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos']] },
   { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas']] },
-  { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios']] },
+  { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
 const SECTION_OF = {};
@@ -67,6 +67,10 @@ const HELP_SCREENS = [
   { id: 'relatorios', icon: '📊', label: 'Relatórios', paras: [
     'Seu balanço por mês: faturamento, custos, taxas, lucro e margem, com gráfico e o resultado por produto. Dá pra exportar.',
   ] },
+  { id: 'simulador', icon: '⚖️', label: 'Simulador', paras: [
+    'Faça contas de “e se…”. Escolha uma receita e veja o que acontece com o custo e a margem se você fizer um lote maior — os ingredientes crescem junto, mas a mão de obra costuma subir pouco, então o custo por unidade cai.',
+    'Compare a margem e o lucro a um preço fixo. Ajuda a decidir se mantém, adapta ou tira um produto do cardápio.',
+  ] },
   { id: 'ajustes', icon: '⚙️', label: 'Ajustes', paras: [
     'Suas configurações: o valor da sua hora de trabalho, o custo do gás por minuto, os custos fixos do mês e a margem que você quer ganhar.',
     'Aqui também ficam o backup no Dropbox e a importação/exportação dos seus dados.',
@@ -99,6 +103,8 @@ function el(tag, attrs = {}, children = []) {
 
 const brl = (n) => 'R$ ' + (Number(n) || 0).toFixed(2).replace('.', ',');
 const pct = (frac) => (Number(frac) || 0) * 100;
+const fmtNum = (n) => String(Math.round((Number(n) || 0) * 100) / 100).replace('.', ','); // up to 2 dp, comma decimal
+const pctStr = (frac) => `${Math.round((Number(frac) || 0) * 100)}%`;
 const nowIso = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
@@ -216,7 +222,7 @@ export function renderApp(root, ctx) {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
-    relatorios: relatoriosPanel, ajustes: ajustesPanel,
+    relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
   const tab = section.screens.some(([sid]) => sid === ctx.view.tab) ? ctx.view.tab : section.screens[0][0];
@@ -1115,6 +1121,99 @@ function reportCsv(month, sum, byProduct) {
     ...byProduct.map((r) => [r.name, String(r.qty), n2(r.receita), n2(r.lucro)]),
   ];
   return rows.map((r) => r.map(csvCell).join(';')).join('\n');
+}
+
+// ── Simulador (what-if: escalar a receita) ───────────────────────────────────────
+//
+// Natalia's menu-decision tool: "se eu aumentar a receita em 50% o rendimento sobe e a mão de obra
+// sobe pouco → margem maior. Preciso disso pra decidir se mantenho, adapto ou tiro o produto."
+// We run the REAL engine on a scaled throwaway recipe (ingredients + yield × factor → ingredient
+// cost/un is invariant; only labor/gas/fixed per unit move with the new yield + minutes), then
+// compare cost, margin and profit at a fixed price.
+
+/** Unit cost of recipe `recipeId` as if its batch were scaled by `factor`, with new active/oven minutes. */
+function simulateRecipeCost(store, recipeId, factor, active, oven, config) {
+  const real = store.get('recipes', recipeId);
+  const sim = {
+    ...real,
+    yieldNominal: real.yieldNominal * factor,
+    activeMinutes: active, ovenMinutes: oven,
+    components: real.components.map((c) => ({ ...c, qty: c.qty * factor })), // ingredients scale with the batch
+  };
+  const raw = {
+    ingredients: store.state.ingredients,
+    recipes: store.state.recipes.map((r) => (r.id === recipeId ? sim : r)),
+    products: store.state.products,
+    priceChanges: store.state.priceChanges, batches: store.state.batches, sales: store.state.sales,
+  };
+  return recipeUnitCost(indexStore(raw), recipeId, config, estimateLens(config));
+}
+
+function simuladorPanel(ctx) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const recipes = store.state.recipes;
+  if (recipes.length === 0) {
+    return el('section', { class: 'pa-card' }, [el('h2', { text: 'Simulador' }), el('p', { class: 'pa-empty', text: 'Crie uma receita primeiro.' })]);
+  }
+  const sel = el('select', { class: 'pa-input', 'data-testid': 'sim-recipe' }, recipes.map((r) => el('option', { value: r.id, text: r.name })));
+  const body = el('div', {});
+  const rebuild = () => body.replaceChildren(simuladorBody(ctx, store.get('recipes', sel.value), config));
+  sel.addEventListener('change', rebuild);
+  rebuild();
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Simulador' })]),
+    el('p', { class: 'pa-hint', text: 'Veja o que acontece com o custo e a margem se você fizer um lote maior — pra decidir se mantém, adapta ou tira um produto do cardápio.' }),
+    field('Receita', sel),
+    body,
+  ]);
+}
+
+function simuladorBody(ctx, recipe, config) {
+  const { store } = ctx;
+  let baseCost;
+  try { baseCost = recipeUnitCost(store.toEngineStore(), recipe.id, config, estimateLens(config)); }
+  catch (e) { return el('p', { class: 'pa-status', text: friendlyError(e) }); }
+
+  const fee = config.paymentFeePct;
+  const factor = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-factor', type: 'text', inputmode: 'decimal', value: '1,5' });
+  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
+  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
+  const price = moneyField(priceFromCost(baseCost, config), 'sim-price');
+  const results = el('div', { 'data-testid': 'sim-results' });
+
+  function recompute() {
+    let f = parseNum(factor.value); if (!(f > 0)) f = 1;
+    const a = parseNum(active.value) || 0;
+    const o = parseNum(oven.value) || 0;
+    const p = parseNum(price.input.value) || 0;
+    let simCost;
+    try { simCost = simulateRecipeCost(store, recipe.id, f, a, o, config); }
+    catch (e) { results.replaceChildren(el('p', { class: 'pa-status', text: friendlyError(e) })); return; }
+    const margin = (cost) => (p > 0 ? 1 - fee - cost / p : 0);
+    const lucro = (cost) => p - cost - p * fee;
+    const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
+    const better = margin(simCost) >= margin(baseCost);
+    results.replaceChildren(el('table', { class: 'pa-kv pa-sim' }, [
+      el('tr', { class: 'pa-sim-head' }, [el('td', {}), el('td', { class: 'pa-num', text: 'Atual' }), el('td', { class: 'pa-num', text: `${fmtNum(f)}×` })]),
+      el('tr', {}, [el('td', { text: 'Rendimento' }), ...col(recipe.yieldNominal, recipe.yieldNominal * f, (v) => `${fmtNum(v)} ${recipe.yieldUnit}`)]),
+      el('tr', {}, [el('td', { text: 'Custo por unidade' }), ...col(baseCost, simCost, brl)]),
+      el('tr', {}, [el('td', { text: `Margem a ${brl(p)}` }), el('td', { class: 'pa-num', text: pctStr(margin(baseCost)) }), el('td', { class: 'pa-num pa-strong' + (better ? '' : ' pa-bad'), text: pctStr(margin(simCost)) })]),
+      el('tr', {}, [el('td', { text: 'Lucro por unidade' }), ...col(lucro(baseCost), lucro(simCost), brl)]),
+    ]));
+  }
+  [factor, active, oven, price.input].forEach((i) => i.addEventListener('input', recompute));
+  recompute();
+
+  return el('div', {}, [
+    el('p', { class: 'pa-muted', text: `Atual: rende ${fmtNum(recipe.yieldNominal)} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno` }),
+    el('h3', { class: 'pa-h3', text: 'E se eu fizer um lote maior?' }),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Escala' }), factor, el('span', { class: 'pa-lab', text: '× a receita' })]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
+    el('p', { class: 'pa-hint', text: 'Ingredientes e rendimento crescem com a escala. Ajuste os minutos para o lote maior — a mão de obra costuma subir pouco.' }),
+    field('Preço de venda (para comparar a margem)', price),
+    results,
+  ]);
 }
 
 // ── Ajustes (config + Dropbox) ───────────────────────────────────────────────────
