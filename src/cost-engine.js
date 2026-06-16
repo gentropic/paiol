@@ -387,7 +387,17 @@ export function priceFromCost(unitCost, config) {
  */
 export function productPrice(store, productId, config, lens) {
   const unitCost = productUnitCost(store, productId, config, lens);
-  return { unitCost, price: priceFromCost(unitCost, config) };
+  // A product may override the target margin (Natalia: "uso margem diferente para cada produto").
+  // The payment fee stays global. Falls back to the config margin when unset.
+  const product = store.products.get(productId);
+  const margin = product && product.targetMarginPct != null ? product.targetMarginPct : config.targetMarginPct;
+  return { unitCost, price: priceFromCost(unitCost, { ...config, targetMarginPct: margin }) };
+}
+
+/** The effective target margin for a product (its override, or the global config default). */
+export function effectiveMargin(store, productId, config) {
+  const product = store.products.get(productId);
+  return product && product.targetMarginPct != null ? product.targetMarginPct : config.targetMarginPct;
 }
 
 // ── Helpers & errors ──────────────────────────────────────────────────────────

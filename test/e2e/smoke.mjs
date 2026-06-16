@@ -560,6 +560,40 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Rev 03: per-product margin override + insumo supplier & tags', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // product "Pãozinho" (priced via recipe Pão), insumo "Farinha"
+
+    // Give Pãozinho its own 50% margin + tags.
+    await goto(page, 'Produtos');
+    await page.locator('.pa-row-item', { hasText: 'Pãozinho' }).click();
+    await page.waitForSelector('[data-testid="prod-save"]');
+    await page.fill('[data-testid="prod-margin"]', '50');
+    await page.fill('[data-testid="prod-tags"]', 'festa, top');
+    await page.click('[data-testid="prod-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /festa/); // tag chip on the row
+
+    // Preços reflects the per-product margin.
+    await goto(page, 'Preços');
+    await page.waitForSelector('.pa-sub-card');
+    assert.match(await page.textContent('.pa-card'), /margem 50% própria/);
+
+    // Insumo: supplier + tags, and the tag is searchable.
+    await goto(page, 'Insumos');
+    await page.locator('.pa-row-item', { hasText: 'Farinha' }).click();
+    await page.waitForSelector('[data-testid="ins-save"]');
+    await page.fill('[data-testid="ins-supplier"]', 'Atacadão');
+    await page.fill('[data-testid="ins-tags"]', 'seco');
+    await page.click('[data-testid="ins-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Atacadão/);
+    assert.match(await page.textContent('.pa-list'), /seco/);
+    await page.fill('[data-testid="ins-search"]', 'seco');
+    await page.waitForFunction(() => [...document.querySelectorAll('.pa-row-item')].some((li) => li.style.display !== 'none'));
+    await page.close();
+  });
+
   test('Dropbox panel starts disconnected and builds a correct PKCE authorize URL', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });

@@ -7,7 +7,7 @@
 
 import {
   estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice, productBreakdown,
-  PriceError, CycleError, YieldError, MarkupError, RefError,
+  effectiveMargin, PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
@@ -294,6 +294,21 @@ function field(label, control) {
   return el('div', { class: 'pa-field' }, [el('label', { text: label }), control]);
 }
 
+/** A comma-separated tags input. `.value()` → a clean, de-duplicated string[]. */
+function tagsInput(tags, testid) {
+  const inp = el('input', { class: 'pa-input', 'data-testid': testid, type: 'text', placeholder: 'etiquetas separadas por vírgula (ex.: festa, vegano)', value: (tags || []).join(', ') });
+  return {
+    el: inp,
+    value: () => [...new Set(inp.value.split(',').map((t) => t.trim()).filter(Boolean))],
+  };
+}
+
+/** Small chips rendering a record's tags (or nothing). */
+function tagChips(tags) {
+  if (!tags || !tags.length) return null;
+  return el('span', { class: 'pa-tags' }, tags.map((t) => el('span', { class: 'pa-tag', text: t })));
+}
+
 MODALS.confirm = (ctx, m) => [
   el('h2', { class: 'pa-sheet-title', text: m.title || 'Confirmar' }),
   el('p', { class: 'pa-sheet-msg', text: m.message }),
@@ -385,7 +400,7 @@ function insumosPanel(ctx) {
       [el('strong', { text: `${semPreco} insumo(s) sem preço` }), ' — produtos que os usam ficam sem preço.']),
     store.state.ingredients.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum insumo. Toque em “+ Novo” para começar.' })
-      : el('div', {}, [searchInput('Buscar insumo…', list, 'ins-search'), list]),
+      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um item para editar.' }), searchInput('Buscar insumo…', list, 'ins-search'), list]),
   ]);
 }
 
@@ -394,13 +409,14 @@ function insumoRow(ctx, ing) {
   const { store } = ctx;
   const price = store.currentPrice(ing.id);
   const lastAt = store.lastPriceAt(ing.id);
-  return el('li', { class: 'pa-row-item', 'data-search': ing.name, onclick: () => ctx.actions.openModal({ kind: 'insumo-edit', id: ing.id }) }, [
+  return el('li', { class: 'pa-row-item', 'data-search': `${ing.name} ${ing.lastSupplier || ''} ${(ing.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'insumo-edit', id: ing.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: ing.name })),
       price != null
-        ? el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}${lastAt ? ` · ${fmtDate(lastAt)}` : ''}` })
+        ? el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}${lastAt ? ` · ${fmtDate(lastAt)}` : ''}${ing.lastSupplier ? ` · ${ing.lastSupplier}` : ''}` })
         : el('span', {}, [el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
-    ]),
+      tagChips(ing.tags),
+    ].filter(Boolean)),
     el('span', { class: 'pa-chev', text: '›' }),
   ]);
 }
@@ -413,14 +429,18 @@ function insumoSheet(ctx, ing) {
   const unit = el('select', { class: 'pa-input', 'data-testid': 'ins-unit' },
     STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(ing && u === ing.stockUnit ? { selected: 'selected' } : {}) })));
   const price = moneyField(ing ? ctx.store.currentPrice(ing.id) : null, 'ins-price');
+  const supplier = el('input', { class: 'pa-input', 'data-testid': 'ins-supplier', type: 'text', placeholder: 'fornecedor da última compra', value: ing ? (ing.lastSupplier || '') : '' });
+  const tags = tagsInput(ing && ing.tags, 'ins-tags');
 
   function save() {
     const nm = name.value.trim();
     if (!nm) { name.focus(); return; }
     const p = parseNum(price.input.value);
+    const sup = supplier.value.trim();
+    const tg = tags.value();
     const id = ing ? ing.id : uuid();
     ctx.actions.mutate((s) => {
-      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value });
+      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined });
       const cur = ing ? s.currentPrice(id) : null;
       if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
     });
@@ -431,6 +451,8 @@ function insumoSheet(ctx, ing) {
     field('Nome', name),
     field('Unidade de compra', unit),
     field('Preço (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
+    field('Fornecedor (opcional)', supplier),
+    field('Etiquetas (opcional)', tags.el),
     history.length > 1 && el('details', { class: 'pa-history' }, [
       el('summary', { text: `histórico de preços (${history.length})` }),
       el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
@@ -459,7 +481,7 @@ function receitasPanel(ctx) {
     ]),
     store.state.recipes.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhuma receita. Toque em “+ Novo” para começar.' })
-      : el('div', {}, [searchInput('Buscar receita…', list, 'rec-search'), list]),
+      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em uma receita para editar o rendimento, os tempos e os itens.' }), searchInput('Buscar receita…', list, 'rec-search'), list]),
   ]);
 }
 
@@ -468,11 +490,12 @@ function receitaRow(ctx, recipe) {
   const { store } = ctx;
   const n = recipe.components.length;
   const semPreco = unpricedInRecipe(store, recipe.id).length > 0;
-  return el('li', { class: 'pa-row-item', 'data-search': recipe.name, onclick: () => ctx.actions.openModal({ kind: 'receita-edit', id: recipe.id }) }, [
+  return el('li', { class: 'pa-row-item', 'data-search': `${recipe.name} ${(recipe.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'receita-edit', id: recipe.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: recipe.name })),
       el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${n} ${n === 1 ? 'item' : 'itens'}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
+      tagChips(recipe.tags),
     ].filter(Boolean)),
     el('span', { class: 'pa-chev', text: '›' }),
   ]);
@@ -495,6 +518,10 @@ function receitaSheet(ctx, recipe) {
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno', value: recipe ? String(recipe.ovenMinutes) : '' });
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-notes', rows: '3', placeholder: 'Observação / modo de preparo (opcional)' });
   notes.value = recipe ? (recipe.notes || '') : '';
+  const weight = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-weight', type: 'text', inputmode: 'decimal', placeholder: 'peso do lote', value: recipe && recipe.weightTotal != null ? String(recipe.weightTotal).replace('.', ',') : '' });
+  const weightUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-wunit' },
+    ['g', 'kg'].map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.weightUnit ? { selected: 'selected' } : {}) })));
+  const tags = tagsInput(recipe && recipe.tags, 'rec-tags');
 
   // Component editor (insumos + other recipes, never itself).
   const options = [
@@ -536,11 +563,15 @@ function receitaSheet(ctx, recipe) {
     const y = parseNum(yieldQty.value);
     if (!nm || !(y > 0)) { name.focus(); return; }
     const obs = notes.value.trim();
+    const w = parseNum(weight.value);
+    const tg = tags.value();
     ctx.actions.mutate((s) => s.upsertRecipe({
       ...(recipe || { fermentMinutes: 0 }), id: recipe ? recipe.id : uuid(), name: nm,
       yieldNominal: y, yieldUnit: yieldUnit.value,
       activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
       components: comps, ...(obs ? { notes: obs } : { notes: undefined }),
+      weightTotal: w == null ? undefined : w, weightUnit: w == null ? undefined : weightUnit.value,
+      tags: tg.length ? tg : undefined,
     }));
   }
 
@@ -549,7 +580,10 @@ function receitaSheet(ctx, recipe) {
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yieldQty, yieldUnit]),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
     el('p', { class: 'pa-hint', text: 'Min ativos = mão na massa; min forno = gás. Fermentação não conta como trabalho.' }),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Peso do lote (opcional)' }), weight, weightUnit]),
+    el('p', { class: 'pa-hint', text: 'Peso total que a receita rende — ajuda a cotar por kg numa venda de lote maior.' }),
     field('Observação (modo de preparo)', notes),
+    field('Etiquetas (opcional)', tags.el),
     el('h3', { class: 'pa-h3', text: 'Itens' }),
     itemsList,
     options.length === 0
@@ -603,7 +637,7 @@ function produtosPanel(ctx) {
     !canBuild && el('p', { class: 'pa-hint', text: 'Crie uma receita ou um insumo primeiro.' }),
     store.state.products.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum produto ainda.' })
-      : el('div', {}, [searchInput('Buscar produto…', list, 'prod-search'), list]),
+      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um produto para editar (margem, itens, embalagem).' }), searchInput('Buscar produto…', list, 'prod-search'), list]),
   ].filter(Boolean));
 }
 
@@ -612,11 +646,12 @@ function produtoRow(ctx, product) {
   const { store } = ctx;
   const n = (product.components || []).length;
   const semPreco = unpricedInProduct(store, product.id).length > 0;
-  return el('li', { class: 'pa-row-item', 'data-search': product.name, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
+  return el('li', { class: 'pa-row-item', 'data-search': `${product.name} ${(product.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: product.name })),
       el('span', { class: 'pa-muted', text: `emb. ${brl(product.packagingCost)}${product.packagingDesc ? ` (${product.packagingDesc})` : ''} · ${n} ${n === 1 ? 'item' : 'itens'}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
+      tagChips(product.tags),
     ].filter(Boolean)),
     el('span', { class: 'pa-chev', text: '›' }),
   ]);
@@ -630,9 +665,12 @@ function produtoSheet(ctx, product) {
   // Local draft of components — committed atomically on Salvar (see receitaSheet).
   const comps = product ? (product.components || []).map((c) => ({ kind: c.kind, id: c.id, qty: c.qty })) : [];
 
+  const config = store.getConfig();
   const name = el('input', { class: 'pa-input', 'data-testid': 'prod-name', type: 'text', placeholder: 'Nome (ex.: Bolo 500g, Cesta de Natal)', value: product ? product.name : '' });
   const pkg = moneyField(product ? product.packagingCost : null, 'prod-pkg');
   const pkgDesc = el('input', { class: 'pa-input', 'data-testid': 'prod-pkgdesc', type: 'text', placeholder: 'descrição (ex.: boleira)', value: product ? (product.packagingDesc || '') : '' });
+  const margin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-margin', type: 'text', inputmode: 'decimal', placeholder: `padrão ${pct(config.targetMarginPct)}`, value: product && product.targetMarginPct != null ? String(pct(product.targetMarginPct)) : '' });
+  const tags = tagsInput(product && product.tags, 'prod-tags');
 
   // Component editor: recipes, other products (never itself), and bought insumos.
   const options = [
@@ -671,9 +709,14 @@ function produtoSheet(ctx, product) {
     const nm = name.value.trim();
     if (!nm) { name.focus(); return; }
     const d = pkgDesc.value.trim();
+    const mTxt = margin.value.trim();
+    const mPct = mTxt === '' ? null : parseNum(mTxt);
+    const tg = tags.value();
     ctx.actions.mutate((s) => s.upsertProduct({
       ...(product || {}), id: product ? product.id : uuid(), name: nm, components: comps,
       packagingCost: parseNum(pkg.input.value) || 0, ...(d ? { packagingDesc: d } : { packagingDesc: undefined }),
+      targetMarginPct: mPct == null ? undefined : mPct / 100,
+      tags: tg.length ? tg : undefined,
     }));
   }
 
@@ -681,6 +724,8 @@ function produtoSheet(ctx, product) {
     field('Nome', name),
     field('Embalagem', pkg),
     field('Descrição da embalagem (opcional)', pkgDesc),
+    el('div', { class: 'pa-field' }, [el('label', { text: 'Margem de lucro (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'deixe vazio para usar a margem padrão' })])]),
+    field('Etiquetas (opcional)', tags.el),
     el('h3', { class: 'pa-h3', text: 'Itens' }),
     el('p', { class: 'pa-hint', text: 'Receitas, outros produtos ou insumos comprados. Cesta = vários produtos/itens juntos.' }),
     itemsList,
@@ -749,7 +794,9 @@ function precosPanel(ctx) {
         ['Embalagem', b.packaging + p.packagingCost],
       ];
       const unitCost = parts.reduce((s, [, v]) => s + v, 0);
-      const price = priceFromCost(unitCost, config);
+      const margin = effectiveMargin(es, p.id, config);
+      const ownMargin = p.targetMarginPct != null;
+      const price = priceFromCost(unitCost, { ...config, targetMarginPct: margin });
       // Per-unit profit and per-hour metrics (her spreadsheet's decision numbers).
       const lucroUnit = price - unitCost - price * config.paymentFeePct;
       const activeHoursPerUnit = config.valorHora > 0 ? b.labor / config.valorHora : 0;
@@ -764,7 +811,7 @@ function precosPanel(ctx) {
         el('table', { class: 'pa-kv' }, [
           ...parts.map(([label, v]) => kv(label, v)),
           kv('Custo unitário', unitCost, 'pa-kv-total'),
-          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(config.targetMarginPct)}%, taxa ${pct(config.paymentFeePct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
+          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(config.paymentFeePct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
           el('tr', {}, [el('td', { text: 'Lucro por unidade' }), el('td', { class: 'pa-num' + (lucroUnit >= 0 ? '' : ' pa-bad'), text: brl(lucroUnit) })]),
           lucroHora != null && el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), el('td', { class: 'pa-num' + (lucroHora >= 0 ? '' : ' pa-bad'), text: brl(lucroHora) })]),
           custoHora != null && el('tr', {}, [el('td', { text: 'Custo por hora de trabalho' }), el('td', { class: 'pa-num', text: brl(custoHora) })]),
@@ -811,6 +858,7 @@ function fornadasPanel(ctx) {
       el('h2', { class: 'pa-grow', text: 'Fornadas' }),
       recipes.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'forn-new', onclick: () => ctx.actions.openModal({ kind: 'fornada-add' }) }, '+ Registrar'),
     ].filter(Boolean)),
+    el('p', { class: 'pa-hint', text: 'Fornada = o que você já produziu de verdade. Serve para o custo REAL por unidade (≠ estimativa da receita): quantas saíram divide o custo do lote. Opcional — use quando quiser acompanhar o real.' }),
     recipes.length === 0 && el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' }),
     all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar receita…', searchTestid: 'forn-search', monthTestid: 'forn-month' }),
     all.length === 0

@@ -4,7 +4,7 @@ import {
   indexStore, priceOf,
   estimateLens, actualLens,
   costBreakdown, cmvPerUnit, recipeUnitCost,
-  productUnitCost, productPrice, priceFromCost,
+  productUnitCost, productPrice, priceFromCost, effectiveMargin,
   CycleError, RefError, PriceError, YieldError, MarkupError,
 } from '../src/cost-engine.js';
 
@@ -133,6 +133,28 @@ test('productPrice returns cost and price together', () => {
   const est = estimateLens(config);
   const { unitCost, price } = productPrice(s, 'fatia', config, est);
   approx(price, unitCost / 0.65);
+});
+
+test('productPrice honours a per-product margin override (fee stays global)', () => {
+  // config: margin 0.30, fee 0.05. Override this product's margin to 0.50 → divisor 1-0.05-0.50.
+  const s = indexStore({
+    ingredients: [{ id: 'choc', name: 'Choc', stockUnit: 'kg' }],
+    recipes: [{ id: 'r', name: 'R', yieldNominal: 10, yieldUnit: 'un', activeMinutes: 0, ovenMinutes: 0, fermentMinutes: 0,
+      components: [{ ref: { kind: 'ingredient', id: 'choc' }, qty: 1, unit: 'kg' }] }],
+    products: [
+      { id: 'p_def', name: 'Padrão', packagingCost: 0, components: [{ kind: 'recipe', id: 'r', qty: 1 }] },
+      { id: 'p_own', name: 'Própria', packagingCost: 0, targetMarginPct: 0.50, components: [{ kind: 'recipe', id: 'r', qty: 1 }] },
+    ],
+    priceChanges: [{ id: 'pc', at: '2026-01-01', ingredientId: 'choc', price: 50 }],
+  });
+  const est = estimateLens(config);
+  assert.equal(effectiveMargin(s, 'p_def', config), 0.30);
+  assert.equal(effectiveMargin(s, 'p_own', config), 0.50);
+  const def = productPrice(s, 'p_def', config, est);
+  const own = productPrice(s, 'p_own', config, est);
+  approx(def.unitCost, own.unitCost);            // same cost
+  approx(def.price, def.unitCost / 0.65);        // global margin
+  approx(own.price, own.unitCost / 0.45);        // own margin → higher price
 });
 
 // ── Product as a component DAG (Lote 1.5) ─────────────────────────────────────

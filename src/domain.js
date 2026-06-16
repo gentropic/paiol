@@ -32,6 +32,8 @@
  * @property {string}        name          // "Farinha de trigo"
  * @property {Unit}          stockUnit     // unit it is bought/priced in (e.g. "kg")
  * @property {Conversion[]} [conversions]  // cross-dimension / count→mass overrides
+ * @property {string}       [lastSupplier] // fornecedor da última compra (free text)
+ * @property {string[]}     [tags]         // etiquetas (ex.: "revenda", "festa") — busca/filtro
  */
 
 /**
@@ -55,6 +57,9 @@
  * @property {number}      ovenMinutes    // oven on   → gas
  * @property {number}      fermentMinutes // passive rest/proof (captured, not a cost driver by default)
  * @property {string}     [notes]         // observacao / modo de preparo (free text, not costed)
+ * @property {number}     [weightTotal]   // optional peso total do lote — enables per-kg quoting (D1)
+ * @property {Unit}       [weightUnit]    // "g" | "kg" — unit of weightTotal
+ * @property {string[]}   [tags]          // etiquetas
  */
 
 /**
@@ -77,6 +82,8 @@
  * @property {ProductComponent[]} components
  * @property {number}             packagingCost // BRL per unit (embalagem)
  * @property {string}            [packagingDesc] // ex.: boleira, pacote, tubo, lata
+ * @property {number}            [targetMarginPct] // optional per-product margin override (0..1); falls back to Config
+ * @property {string[]}          [tags]          // etiquetas
  * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
 

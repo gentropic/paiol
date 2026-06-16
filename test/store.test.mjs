@@ -95,6 +95,18 @@ test('YAML round-trip preserves the whole business', () => {
   assert.deepEqual(back.state, s.state);
 });
 
+test('YAML round-trip preserves the Rev 03 optional fields (supplier, tags, weight, per-product margin)', () => {
+  const s = new PaiolStore();
+  s.upsertIngredient({ id: 'i', name: 'Farinha', stockUnit: 'kg', lastSupplier: 'Atacadão', tags: ['seco', 'base'] });
+  s.upsertRecipe({ id: 'r', name: 'Massa', yieldNominal: 10, yieldUnit: 'un', activeMinutes: 20, ovenMinutes: 30, fermentMinutes: 0, components: [], weightTotal: 1.2, weightUnit: 'kg', tags: ['vegano'] });
+  s.upsertProduct({ id: 'p', name: 'Bolo', components: [], packagingCost: 1, targetMarginPct: 0.5, tags: ['festa'] });
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.state, s.state);
+  assert.equal(back.get('ingredients', 'i').lastSupplier, 'Atacadão');
+  assert.deepEqual(back.get('recipes', 'r').tags, ['vegano']);
+  assert.equal(back.get('products', 'p').targetMarginPct, 0.5);
+});
+
 test('merge unions events by id and drops duplicates', () => {
   const a = seeded();
   const b = seeded(); // same seed, so pc1 is shared
