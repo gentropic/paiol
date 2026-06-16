@@ -124,6 +124,31 @@
  */
 
 /**
+ * Custo variável — a dated, ad-hoc expense (Rev 03 #4): logged as it happens, deducted from the
+ * period profit. Not part of a product's unit cost (those are the recipe/insumo costs); this is
+ * for things like delivery fuel, an extra bag, a one-off purchase.
+ * @typedef {object} VariableCost
+ * @property {string}  id
+ * @property {string}  at           // ISO date
+ * @property {number}  amount       // BRL
+ * @property {string} [description] // ex.: "gasolina entrega", "sacola extra"
+ */
+
+/**
+ * Perda — a loss/write-off (Rev 03 #3): value lost to waste (a failed batch, an unsold product,
+ * damaged packaging). `amount` is the BRL value lost, snapshotted at log time; the optional ref/qty
+ * are for the record. Deducted from the period profit.
+ * @typedef {object} Perda
+ * @property {string}  id
+ * @property {string}  at          // ISO date
+ * @property {number}  amount      // BRL value lost (snapshot)
+ * @property {'insumo'|'produto'|'embalagem'|'outro'} [refKind]
+ * @property {string} [refId]      // ingredient/product id when applicable
+ * @property {number} [qty]
+ * @property {string} [note]       // free description
+ */
+
+/**
  * The engine config — a SINGLE internal object, never exposed to Nayara (§4.3).
  * MEI-specific: `das` is a fixed monthly amount living in the fixed pool, never in
  * the markup divisor.

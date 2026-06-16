@@ -24,7 +24,11 @@ export function monthSummary(store, month) {
     taxas += rev * (s.paymentFeePct || 0);
     unidades += s.qty;
   }
-  const lucro = receita - custo - taxas;
+  // Ad-hoc deductions logged for the month (Rev 03): variable costs + losses. These are NOT in
+  // costSnapshot (which carries CMV/labor/gas/fixed), so they are additive to the deductions.
+  const custoVariavel = (store.state.variableCosts || []).reduce((acc, v) => (ym(v.at) === month ? acc + (v.amount || 0) : acc), 0);
+  const perdas = (store.state.perdas || []).reduce((acc, p) => (ym(p.at) === month ? acc + (p.amount || 0) : acc), 0);
+  const lucro = receita - custo - taxas - custoVariavel - perdas;
 
   let minutos = 0;
   for (const b of store.state.batches) {
@@ -35,7 +39,7 @@ export function monthSummary(store, month) {
   const horas = minutos / 60;
 
   return {
-    month, receita, custo, taxas, lucro, unidades, nVendas: sales.length, horas,
+    month, receita, custo, taxas, custoVariavel, perdas, lucro, unidades, nVendas: sales.length, horas,
     margem: receita > 0 ? lucro / receita : 0,
     lucroHora: horas > 0 ? lucro / horas : null,
   };

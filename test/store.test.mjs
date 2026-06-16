@@ -91,8 +91,12 @@ test('currentPrice returns the latest price or null', () => {
 test('YAML round-trip preserves the whole business', () => {
   const s = seeded();
   s.addBatch({ id: 'b1', at: '2026-06-10', recipeId: 'pao', yieldActual: 9, activeMinutes: 35 });
+  s.addVariableCost({ id: 'v1', at: '2026-06-11', amount: 12.5, description: 'gasolina' });
+  s.addPerda({ id: 'pd1', at: '2026-06-12', amount: 3.4, refKind: 'insumo', refId: 'farinha', qty: 0.5, note: 'caiu no chão' });
   const back = PaiolStore.fromYaml(s.toYaml());
   assert.deepEqual(back.state, s.state);
+  assert.equal(back.state.variableCosts.length, 1);
+  assert.equal(back.state.perdas[0].refKind, 'insumo');
 });
 
 test('YAML round-trip preserves the Rev 03 optional fields (supplier, tags, weight, per-product margin)', () => {

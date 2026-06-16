@@ -26,12 +26,14 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros',
-  Fornadas: 'operacao', Vendas: 'operacao', Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
+  Fornadas: 'operacao', Vendas: 'operacao', Custos: 'operacao', Perdas: 'operacao',
+  Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Fornadas: 'fornadas',
-  Vendas: 'vendas', Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
+  Vendas: 'vendas', Custos: 'custos', Perdas: 'perdas',
+  Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
   await page.locator(`.pa-navbtn[data-section="${SCREEN_SECTION[screen]}"]`).click();
@@ -613,6 +615,41 @@ describe('paiol UI smoke', () => {
     const margem = grid.find((r) => /Margem/.test(r[0]));
     assert.ok(money(custo[2]) < money(custo[1]), `simulated cost/un should drop (${custo[1]} → ${custo[2]})`);
     assert.ok(perc(margem[2]) > perc(margem[1]), `margin should rise (${margem[1]} → ${margem[2]})`);
+    await page.close();
+  });
+
+  test('Lote 3: custos variáveis + perdas log and hit the report', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // insumo "Farinha" (R$5/kg), product "Pãozinho"
+
+    // A variable cost.
+    await goto(page, 'Custos');
+    await page.click('[data-testid="custo-new"]');
+    await page.waitForSelector('[data-testid="custo-add"]');
+    await page.fill('[data-testid="custo-desc"]', 'Gasolina entrega');
+    await page.fill('[data-testid="custo-amount"]', '20');
+    await page.click('[data-testid="custo-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Gasolina/);
+
+    // A perda of an insumo — the value auto-computes from qty × price (2 × R$5 = R$10).
+    await goto(page, 'Perdas');
+    await page.click('[data-testid="perda-new"]');
+    await page.waitForSelector('[data-testid="perda-add"]');
+    await page.selectOption('[data-testid="perda-ref"]', { label: 'Farinha' });
+    await page.fill('[data-testid="perda-qty"]', '2');
+    await page.dispatchEvent('[data-testid="perda-qty"]', 'input');
+    assert.equal(await page.inputValue('[data-testid="perda-amount"]'), '10,00');
+    await page.click('[data-testid="perda-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Farinha/);
+
+    // Both land in the month's P&L.
+    await goto(page, 'Relatórios');
+    await page.waitForSelector('.pa-kv');
+    const txt = await page.textContent('.pa-card');
+    assert.match(txt, /Custos variáveis/);
+    assert.match(txt, /Perdas/);
     await page.close();
   });
 

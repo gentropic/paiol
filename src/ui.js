@@ -27,7 +27,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -63,6 +63,14 @@ const HELP_SCREENS = [
   { id: 'vendas', icon: '🛒', label: 'Vendas', paras: [
     'Registre suas vendas. O preço sugerido já vem preenchido; edite se vendeu por outro valor. O lucro de cada venda já desconta o custo e a taxa de pagamento.',
     'Dá pra lançar venda de outro dia pela data, e usar a busca ou o filtro de mês pra encontrar.',
+  ] },
+  { id: 'custos', icon: '🧾', label: 'Custos variáveis', paras: [
+    'Gastos avulsos que não são de uma receita específica — gasolina de entrega, uma sacola extra, uma compra pontual. Lance por data, conforme acontecem.',
+    'Eles entram como desconto no lucro do mês, nos Relatórios.',
+  ] },
+  { id: 'perdas', icon: '🗑️', label: 'Perdas', paras: [
+    'O que se perdeu e não virou venda: uma massa que deu errado, um produto que não vendeu, uma embalagem danificada. Para insumo ou produto, o valor já vem calculado pela quantidade.',
+    'O total entra como desconto no lucro do mês — deixa o resultado mais verdadeiro.',
   ] },
   { id: 'relatorios', icon: '📊', label: 'Relatórios', paras: [
     'Seu balanço por mês: faturamento, custos, taxas, lucro e margem, com gráfico e o resultado por produto. Dá pra exportar.',
@@ -222,6 +230,7 @@ export function renderApp(root, ctx) {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
+    custos: custosPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -1027,6 +1036,147 @@ function vendaSheet(ctx) {
   return sheet({ title: 'Registrar venda', rows, onSave: save, saveTestid: 'venda-add' });
 }
 
+// ── Custos variáveis (Rev 03 #4 — dated expense ledger) ──────────────────────────
+
+function custosPanel(ctx) {
+  const { store } = ctx;
+  const all = store.state.variableCosts.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const month = ctx.view.logMonth;
+  const items = month ? all.filter((v) => monthOf(v.at) === month) : all;
+  const total = items.reduce((s, v) => s + (v.amount || 0), 0);
+  const list = logList(items, (v) => el('li', { class: 'pa-list-item', 'data-search': v.description || '' }, [
+    el('div', { class: 'pa-grow' }, [el('div', {}, el('strong', { text: v.description || 'Custo' }))]),
+    el('span', { class: 'pa-num', text: brl(v.amount) }),
+  ]));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Custos variáveis' }),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'custo-new', onclick: () => ctx.actions.openModal({ kind: 'custo-add' }) }, '+ Registrar'),
+    ]),
+    el('p', { class: 'pa-hint', text: 'Gastos avulsos, lançados por data conforme acontecem (entrega, sacola extra, uma compra pontual). Entram no lucro do mês.' }),
+    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar custo…', searchTestid: 'custo-search', monthTestid: 'custo-month' }),
+    items.length > 0 && el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: `Total${month ? ` (${monthLabel(month)})` : ''} ` }), brl(total)])]),
+    all.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhum custo registrado. Toque em “+ Registrar”.' })
+      : items.length === 0 ? el('p', { class: 'pa-empty', text: 'Nenhum custo neste mês.' }) : list,
+  ].filter(Boolean));
+}
+
+MODALS['custo-add'] = (ctx) => custoSheet(ctx);
+
+function custoSheet(ctx) {
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'custo-date', type: 'date', value: todayInput() });
+  const desc = el('input', { class: 'pa-input', 'data-testid': 'custo-desc', type: 'text', placeholder: 'ex.: gasolina entrega' });
+  const amount = moneyField(null, 'custo-amount');
+  function save() {
+    const a = parseNum(amount.input.value);
+    if (a == null || !(a > 0)) { amount.input.focus(); return; }
+    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
+    ctx.actions.mutate((s) => s.addVariableCost({ id: uuid(), at, amount: a, ...(desc.value.trim() ? { description: desc.value.trim() } : {}) }));
+  }
+  return sheet({
+    title: 'Registrar custo variável',
+    rows: [field('Data', date), field('Descrição', desc), field('Valor', amount)],
+    onSave: save, saveTestid: 'custo-add',
+  });
+}
+
+// ── Perdas / baixas (Rev 03 #3 — value lost to waste) ────────────────────────────
+
+const PERDA_KINDS = [['insumo', 'Insumo'], ['produto', 'Produto'], ['embalagem', 'Embalagem'], ['outro', 'Outro']];
+
+function perdasPanel(ctx) {
+  const { store } = ctx;
+  const all = store.state.perdas.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const month = ctx.view.logMonth;
+  const items = month ? all.filter((p) => monthOf(p.at) === month) : all;
+  const total = items.reduce((s, p) => s + (p.amount || 0), 0);
+  const list = logList(items, (p) => el('li', { class: 'pa-list-item', 'data-search': p.note || '' }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: p.note || (PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1]) || 'Perda' })),
+      el('span', { class: 'pa-muted', text: PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1] || 'Outro' }),
+    ]),
+    el('span', { class: 'pa-num pa-bad', text: `− ${brl(p.amount)}` }),
+  ]));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Perdas' }),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'perda-new', onclick: () => ctx.actions.openModal({ kind: 'perda-add' }) }, '+ Registrar'),
+    ]),
+    el('p', { class: 'pa-hint', text: 'O que se perdeu: massa que deu errado, produto que não vendeu, embalagem danificada. O valor entra como desconto no lucro do mês.' }),
+    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar perda…', searchTestid: 'perda-search', monthTestid: 'perda-month' }),
+    items.length > 0 && el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: `Total${month ? ` (${monthLabel(month)})` : ''} ` }), brl(total)])]),
+    all.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma perda registrada. Toque em “+ Registrar”.' })
+      : items.length === 0 ? el('p', { class: 'pa-empty', text: 'Nenhuma perda neste mês.' }) : list,
+  ].filter(Boolean));
+}
+
+MODALS['perda-add'] = (ctx) => perdaSheet(ctx);
+
+function perdaSheet(ctx) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const es = store.toEngineStore();
+  const lens = estimateLens(config);
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'perda-date', type: 'date', value: todayInput() });
+  const kind = el('select', { class: 'pa-input', 'data-testid': 'perda-kind' }, PERDA_KINDS.map(([v, t]) => el('option', { value: v, text: t })));
+  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'perda-qty', type: 'text', inputmode: 'decimal', placeholder: 'qtd', value: '1' });
+  const refSel = el('select', { class: 'pa-input', 'data-testid': 'perda-ref' });
+  const note = el('input', { class: 'pa-input', 'data-testid': 'perda-note', type: 'text', placeholder: 'descrição (opcional)' });
+  const amount = moneyField(null, 'perda-amount');
+  const refRow = el('div', { class: 'pa-row pa-form' }, [refSel, qty]);
+
+  const unitCostOf = (k, id) => {
+    try {
+      if (k === 'insumo') return store.currentPrice(id);
+      if (k === 'produto') return productUnitCost(es, id, config, lens);
+    } catch { /* unpriced */ }
+    return null;
+  };
+  function fillRefs() {
+    const k = kind.value;
+    const opts = k === 'insumo' ? store.state.ingredients : k === 'produto' ? store.state.products : [];
+    refSel.replaceChildren(...opts.map((o) => el('option', { value: o.id, text: o.name })));
+    const refable = k === 'insumo' || k === 'produto';
+    refRow.style.display = refable ? '' : 'none';
+    recalc();
+  }
+  function recalc() {
+    const k = kind.value;
+    if (k !== 'insumo' && k !== 'produto') return; // 'embalagem'/'outro' → she types the amount
+    const c = unitCostOf(k, refSel.value);
+    const q = parseNum(qty.value) || 0;
+    if (c != null) amount.input.value = fmtMoneyInput(c * q);
+  }
+  kind.addEventListener('change', fillRefs);
+  refSel.addEventListener('change', recalc);
+  qty.addEventListener('input', recalc);
+  fillRefs();
+
+  function save() {
+    const a = parseNum(amount.input.value);
+    if (a == null || !(a > 0)) { amount.input.focus(); return; }
+    const k = kind.value;
+    const refable = k === 'insumo' || k === 'produto';
+    const ref = refable ? store.get(k === 'insumo' ? 'ingredients' : 'products', refSel.value) : null;
+    const q = parseNum(qty.value);
+    const noteText = note.value.trim() || (ref ? `${q} × ${ref.name}` : '');
+    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
+    ctx.actions.mutate((s) => s.addPerda({
+      id: uuid(), at, amount: a, refKind: k,
+      ...(refable && ref ? { refId: ref.id, qty: q } : {}),
+      ...(noteText ? { note: noteText } : {}),
+    }));
+  }
+  return sheet({
+    title: 'Registrar perda',
+    rows: [field('Data', date), field('Tipo', kind), refRow, field('Descrição (opcional)', note), field('Valor perdido', amount),
+      el('p', { class: 'pa-hint', text: 'Para insumo ou produto, o valor já vem calculado pela quantidade — ajuste se precisar.' })],
+    onSave: save, saveTestid: 'perda-add',
+  });
+}
+
 // ── Relatórios (period P&L; §4.5 actuals) ────────────────────────────────────────
 
 function relatoriosPanel(ctx) {
@@ -1044,6 +1194,8 @@ function relatoriosPanel(ctx) {
     kv('Receita', brl(sum.receita)),
     kv('Custo dos produtos', brl(sum.custo)),
     kv('Taxas de pagamento', brl(sum.taxas)),
+    sum.custoVariavel > 0 && kv('Custos variáveis', brl(sum.custoVariavel)),
+    sum.perdas > 0 && kv('Perdas', brl(sum.perdas)),
     kv('Lucro', brl(sum.lucro), 'pa-kv-total'),
     kv('Margem', `${(sum.margem * 100).toFixed(0)}%`),
     kv('Unidades vendidas', String(sum.unidades)),
@@ -1056,8 +1208,8 @@ function relatoriosPanel(ctx) {
       el('h2', { class: 'pa-grow', text: 'Relatórios' }),
       el('span', { class: 'pa-lab', text: 'Mês' }), monthInput,
     ]),
-    sum.nVendas === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma venda neste mês.' })
+    (sum.nVendas === 0 && sum.custoVariavel === 0 && sum.perdas === 0)
+      ? el('p', { class: 'pa-empty', text: 'Nada registrado neste mês.' })
       : el('div', {}, [
           resumo,
           el('p', { class: 'pa-hint', text: `O custo já inclui a parte rateada dos custos fixos. Custos fixos do mês (referência): ${brl(config.custosFixosMes)}.` }),

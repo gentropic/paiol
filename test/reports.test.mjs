@@ -32,6 +32,19 @@ test('monthSummary aggregates revenue, cost, fees, profit, hours', () => {
   assert.ok(Math.abs(m.margem - 29 / 50) < 1e-9);
 });
 
+test('monthSummary deducts variable costs and perdas from profit (Rev 03)', () => {
+  const s = storeWithSales();
+  // May baseline profit = 29. Add a R$5 variable cost + a R$4 perda in May, and noise in June.
+  s.addVariableCost({ id: 'v1', at: '2026-05-15T12:00:00.000Z', amount: 5, description: 'entrega' });
+  s.addPerda({ id: 'pd1', at: '2026-05-16T12:00:00.000Z', amount: 4, note: 'massa queimada' });
+  s.addVariableCost({ id: 'v2', at: '2026-06-02T12:00:00.000Z', amount: 99, description: 'junho' });
+  const m = monthSummary(s, '2026-05');
+  assert.equal(m.custoVariavel, 5);
+  assert.equal(m.perdas, 4);
+  assert.equal(m.lucro, 29 - 5 - 4);            // 20
+  assert.ok(Math.abs(m.margem - 20 / 50) < 1e-9);
+});
+
 test('monthSummary excludes other months', () => {
   const s = storeWithSales();
   const jun = monthSummary(s, '2026-06');

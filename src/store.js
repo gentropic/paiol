@@ -11,7 +11,7 @@ import { toYaml, fromYaml } from './yaml-bridge.js';
 export const SCHEMA_VERSION = 1;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas'];
 /** Mutable master-data collections (§2.1). */
 const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
@@ -50,7 +50,7 @@ export function emptyState() {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
     ingredients: [], recipes: [], products: [],
-    priceChanges: [], batches: [], sales: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [],
   };
 }
 
@@ -148,6 +148,10 @@ export class PaiolStore {
   addBatch(ev) { return this._append('batches', ev); }
   /** @param {import('./domain.js').Sale} ev */
   addSale(ev) { return this._append('sales', ev); }
+  /** @param {import('./domain.js').VariableCost} ev */
+  addVariableCost(ev) { return this._append('variableCosts', ev); }
+  /** @param {import('./domain.js').Perda} ev */
+  addPerda(ev) { return this._append('perdas', ev); }
 
   // ── Read model ───────────────────────────────────────────────────────────────
 
