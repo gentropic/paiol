@@ -7,7 +7,7 @@ import { createSyncController, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp, renderModal } from './ui.js';
 import { setupPwa } from './pwa.js';
-import { importYaml } from './exchange.js';
+import { importYaml, applyExchange } from './exchange.js';
 import { DEFAULT_CATEGORIES } from './store.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
@@ -100,6 +100,18 @@ export async function boot(root) {
       if (r.fornadas) parts.push(`${r.fornadas} fornada(s)`);
       const avisos = r.warnings.length ? ` · ${r.warnings.length} aviso(s)` : '';
       view.status = `Importado: ${parts.join(', ')}${avisos}.`;
+      rerender();
+      return r;
+    },
+    // Apply already-parsed interchange (the xlsx import, after the preview-confirm). Closes the modal.
+    importParsed(data) {
+      const r = applyExchange(store, data);
+      view.modal = null;
+      saver.schedule();
+      scheduleSync();
+      const parts = [`${r.insumos} insumo(s)`, `${r.receitas} receita(s)`, `${r.produtos} produto(s)`];
+      const avisos = r.warnings.length ? ` · ${r.warnings.length} aviso(s)` : '';
+      view.status = `Planilha importada: ${parts.join(', ')}${avisos}.`;
       rerender();
       return r;
     },

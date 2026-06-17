@@ -400,6 +400,32 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Rev 06: exportar + importar planilha .xlsx (round-trip via the UI)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // insumo Farinha, receita Pão, produto Pãozinho
+
+    await goto(page, 'Ajustes');
+    await page.waitForSelector('[data-testid="xlsx-export"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="xlsx-export"]')]);
+    assert.match(dl.suggestedFilename(), /\.xlsx$/);
+    const xlsxPath = await dl.path();
+    assert.equal((await readFile(xlsxPath)).slice(0, 2).toString(), 'PK', 'not a valid .xlsx (zip)');
+
+    // Re-import the file the app just produced → preview-before-apply, then apply.
+    await page.setInputFiles('[data-testid="xlsx-file"]', xlsxPath);
+    await page.waitForSelector('[data-testid="xlsx-preview"]');
+    assert.match(await page.textContent('[data-testid="xlsx-preview"]'), /atualizado/); // re-import of own data
+    await page.click('[data-testid="xlsx-apply"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.waitForFunction(() => /Planilha importada/.test(document.querySelector('.pa-status')?.textContent || ''));
+
+    // catalog intact (1 insumo / 1 receita / 1 produto from seedBusiness, merged not duplicated)
+    await goto(page, 'Receitas');
+    await page.waitForSelector('.pa-row-item');
+    assert.match(await page.textContent('.pa-list'), /Pão/);
+    await page.close();
+  });
+
   test('imports without prices and flags the missing ones by name', async () => {
     const page = await context.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle' });

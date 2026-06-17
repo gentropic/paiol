@@ -28,7 +28,7 @@ const SW_OUT = resolve(HERE, 'sw.js');
 const SW_CONFIG = {
   app: 'paiol',
   cache: 'paiol-shell-v1',
-  precache: ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './vendor/pdf-lib/pdf-lib.min.js'],
+  precache: ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './vendor/pdf-lib/pdf-lib.min.js', './vendor/exceljs/exceljs.min.js'],
   navFallback: './index.html',
 };
 

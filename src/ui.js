@@ -12,6 +12,7 @@ import {
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
 import { generateFichasPdf, generateReciboPdf, savePdf } from './pdf.js';
+import { workbookBytes, parseInterchange, previewExchange } from './xlsx-exchange.js';
 import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend } from './reports.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
@@ -307,13 +308,13 @@ function modalOverlay(ctx) {
 }
 
 /** Standard sheet scaffold: title, body rows, a Salvar/Cancelar footer, optional danger action. */
-function sheet({ title, rows, onSave, saveTestid, danger }) {
+function sheet({ title, rows, onSave, saveTestid, saveLabel, danger }) {
   return [
     el('div', { class: 'pa-sheet-grab' }),
     el('h2', { class: 'pa-sheet-title', text: title }),
     el('div', { class: 'pa-sheet-body' }, rows),
     el('div', { class: 'pa-sheet-actions' }, [
-      onSave && el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': saveTestid, onclick: onSave }, 'Salvar'),
+      onSave && el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': saveTestid, onclick: onSave }, saveLabel || 'Salvar'),
     ].filter(Boolean)),
     danger && el('button', { class: 'pa-btn pa-ghost pa-bad pa-sheet-danger', 'data-testid': danger.testid, onclick: danger.onClick }, danger.label),
   ].filter(Boolean);
@@ -2081,15 +2082,73 @@ function dadosCard(ctx) {
       e.target.value = '';
     },
   });
+  // Excel (.xlsx) — the friendly, formatted face of the same name-based interchange.
+  const xlsxInput = el('input', {
+    type: 'file', accept: '.xlsx', style: 'display:none', 'data-testid': 'xlsx-file',
+    onchange: async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const data = await parseInterchange(bytes);
+        ctx.actions.openModal({ kind: 'import-xlsx', data, preview: previewExchange(ctx.store, data), filename: file.name });
+      } catch (err) { ctx.actions.importFailed(String((err && err.message) || err)); }
+      e.target.value = '';
+    },
+  });
+  const xlsxExportBtn = el('button', { class: 'pa-btn', 'data-testid': 'xlsx-export' }, '🟢 Exportar planilha');
+  xlsxExportBtn.addEventListener('click', async () => {
+    const orig = xlsxExportBtn.textContent; xlsxExportBtn.textContent = 'Gerando…'; xlsxExportBtn.disabled = true;
+    try { downloadFile('paiol-planilha.xlsx', await workbookBytes(ctx.store), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); }
+    catch (e) { window.alert('Não foi possível gerar a planilha: ' + ((e && e.message) || e)); }
+    finally { xlsxExportBtn.textContent = orig; xlsxExportBtn.disabled = false; }
+  });
+
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Dados' }),
-    el('div', { class: 'pa-row' }, [
+    el('h3', { class: 'pa-h3', text: 'Planilha (Excel)' }),
+    el('div', { class: 'pa-row pa-form' }, [
+      xlsxExportBtn,
+      el('button', { class: 'pa-btn', 'data-testid': 'xlsx-import', onclick: () => xlsxInput.click() }, '🟢 Importar planilha'),
+      xlsxInput,
+    ]),
+    el('p', { class: 'pa-hint', text: 'Baixa seus insumos, receitas e produtos numa planilha bonita (uma aba por receita). Edite no Excel e importe de volta — mostra um resumo antes, mescla pelos nomes e não apaga nada.' }),
+    el('h3', { class: 'pa-h3', text: 'Backup (YAML)' }),
+    el('div', { class: 'pa-row pa-form' }, [
       el('button', { class: 'pa-btn', 'data-testid': 'export-btn', onclick: () => downloadFile('paiol-dados.yaml', exportYaml(ctx.store)) }, 'Exportar dados'),
       el('button', { class: 'pa-btn', 'data-testid': 'import-btn', onclick: () => fileInput.click() }, 'Importar dados'),
       fileInput,
     ]),
-    el('p', { class: 'pa-hint', text: 'Exporta/importa insumos, receitas e produtos (formato YAML). A importação mescla pelos nomes, sem apagar o que já existe.' }),
   ]);
+}
+
+MODALS['import-xlsx'] = (ctx, m) => importXlsxSheet(ctx, m);
+
+// Preview-before-apply for the xlsx import: show what will be created/updated + warnings; confirm
+// applies (name-based merge, never deletes), Cancelar discards.
+function importXlsxSheet(ctx, m) {
+  const { data, preview, filename } = m;
+  if (preview.error) {
+    return sheet({ title: 'Importar planilha', rows: [el('p', { class: 'pa-status pa-bad', text: 'Não foi possível ler a planilha: ' + preview.error })] });
+  }
+  const line = (label, c) => el('tr', {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: `${c.novos} novo(s) · ${c.att} atualizado(s)` })]);
+  const rows = [
+    el('p', { class: 'pa-hint', text: `Arquivo: ${filename}. Confira antes de importar — mescla pelos nomes e NÃO apaga nada do que já existe.` }),
+    el('table', { class: 'pa-kv', 'data-testid': 'xlsx-preview' }, [
+      line('Insumos', preview.insumos), line('Receitas', preview.receitas), line('Produtos', preview.produtos),
+    ]),
+    preview.warnings.length > 0 && el('div', {}, [
+      el('h3', { class: 'pa-h3', text: `Avisos (${preview.warnings.length})` }),
+      el('ul', { class: 'pa-list pa-tight' }, preview.warnings.slice(0, 15).map((w) => el('li', { class: 'pa-list-item' }, el('span', { class: 'pa-muted', text: w })))),
+      preview.warnings.length > 15 && el('p', { class: 'pa-hint', text: `… e mais ${preview.warnings.length - 15}.` }),
+    ].filter(Boolean)),
+  ].filter(Boolean);
+  return sheet({
+    title: 'Importar planilha',
+    rows,
+    onSave: () => ctx.actions.importParsed(data),
+    saveTestid: 'xlsx-apply', saveLabel: 'Importar',
+  });
 }
 
 function downloadFile(name, text, mime = 'text/yaml') {
