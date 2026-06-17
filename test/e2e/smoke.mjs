@@ -553,8 +553,8 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Relatórios');
     await page.waitForSelector('.pa-kv');
     const txt = await page.textContent('.pa-card');
-    assert.match(txt, /Receita/);
-    assert.match(txt, /Lucro/);
+    assert.match(txt, /Recebido/);                       // cash-basis result
+    assert.match(txt, /Lucro do mês/);
     assert.match(txt, /Pãozinho/);                       // per-product row
     assert.equal(await page.locator('svg.pa-chart').count(), 1); // trend chart present
     await page.close();
@@ -711,6 +711,13 @@ describe('paiol UI smoke', () => {
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Despesas');
     assert.match(await page.textContent('.pa-list'), /Gás/, 'despesa did not persist');
+
+    // it flows into the cash-basis report (despesas por categoria + the variável total)
+    await goto(page, 'Relatórios');
+    await page.waitForSelector('.pa-kv');
+    const rel = await page.textContent('.pa-card');
+    assert.match(rel, /Despesas variáveis/);
+    assert.match(rel, /Gás/);
     await page.close();
   });
 

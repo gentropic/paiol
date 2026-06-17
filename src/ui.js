@@ -12,7 +12,7 @@ import {
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
 import { generateFichasPdf, generateReciboPdf, savePdf } from './pdf.js';
-import { monthSummary, productSummary, profitTrend } from './reports.js';
+import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend } from './reports.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -407,9 +407,10 @@ function inicioPanel(ctx) {
         el('h2', { class: 'pa-grow', text: `Este mês — ${monthLabel(currentMonth())}` }),
       ]),
       el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Receita' }), el('td', { class: 'pa-num', text: brl(sum.receita) })]),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Lucro' }), el('td', { class: 'pa-num' + (sum.lucro >= 0 ? '' : ' pa-bad'), text: brl(sum.lucro) })]),
-      ]),
+        el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(sum.recebido) })]),
+        sum.aReceber > 0 && el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Lucro do mês' }), el('td', { class: 'pa-num' + (sum.lucro >= 0 ? '' : ' pa-bad'), text: brl(sum.lucro) })]),
+      ].filter(Boolean)),
       el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'home-rel', onclick: () => ctx.actions.setTab('relatorios') }, 'Ver relatório completo →'),
     ]),
     semPreco > 0 && el('section', { class: 'pa-card' }, [
@@ -1722,52 +1723,82 @@ function relatoriosPanel(ctx) {
   const { store } = ctx;
   const month = ctx.view.reportMonth || currentMonth();
   const sum = monthSummary(store, month);
-  const byProduct = productSummary(store, month);
-  const config = store.getConfig();
+  const despCat = despesasByCategory(store, month);
+  const sortKey = ctx.view.prodSort || 'lucro';
+  const byProduct = productSummary(store, month).sort((a, b) =>
+    sortKey === 'qtd' ? b.qty - a.qty : sortKey === 'faturamento' ? b.faturamento - a.faturamento : b.lucroEstimado - a.lucroEstimado);
+  const byClient = clientSummary(store, month);
 
   const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rel-month', type: 'month', value: month });
   monthInput.addEventListener('change', () => ctx.actions.setReportMonth(monthInput.value || currentMonth()));
 
-  const kv = (label, value, cls) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: value })]);
-  const resumo = el('table', { class: 'pa-kv' }, [
-    kv('Receita', brl(sum.receita)),
-    kv('Custo dos produtos', brl(sum.custo)),
-    kv('Taxas de pagamento', brl(sum.taxas)),
-    sum.custoVariavel > 0 && kv('Custos variáveis', brl(sum.custoVariavel)),
+  const kv = (label, value, cls, bad) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (bad ? ' pa-bad' : ''), text: value })]);
+  const empty = sum.recebido === 0 && sum.despesas === 0 && sum.faturado === 0;
+
+  // The cash-basis result.
+  const resultado = el('table', { class: 'pa-kv' }, [
+    el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Entrou' })]),
+    kv('Recebido', brl(sum.recebido)),
+    sum.faturado !== sum.recebidoVendas && kv('Faturado (entregue)', brl(sum.faturado)),
+    sum.aReceber > 0 && kv('A receber (fiado)', brl(sum.aReceber)),
+    el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Saiu' })]),
+    kv('Despesas variáveis', brl(sum.despVar)),
+    kv('Despesas fixas', brl(sum.despFix)),
     sum.perdas > 0 && kv('Perdas', brl(sum.perdas)),
-    kv('Lucro', brl(sum.lucro), 'pa-kv-total'),
-    kv('Margem', `${(sum.margem * 100).toFixed(0)}%`),
-    kv('Unidades vendidas', String(sum.unidades)),
-    kv('Horas trabalhadas', `${sum.horas.toFixed(1).replace('.', ',')} h`),
-    sum.lucroHora != null && kv('Lucro por hora', brl(sum.lucroHora)),
+    kv('Lucro do mês', brl(sum.lucro), 'pa-kv-total', sum.lucro < 0),
+    // Margem only when the month is profitable — on a stocking-up month (despesas ≫ recebido) the
+    // % is extreme noise; the negative Lucro do mês already tells the story.
+    sum.recebido > 0 && sum.lucro >= 0 && kv('Margem', `${(sum.margem * 100).toFixed(0)}%`),
   ].filter(Boolean));
+
+  const prodSortBtn = (key, label) => el('button', { class: 'pa-chip' + (sortKey === key ? ' pa-chip-on' : ''), 'data-testid': `rel-sort-${key}`, onclick: () => ctx.actions.setProdSort(key) }, label);
 
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-row' }, [
       el('h2', { class: 'pa-grow', text: 'Relatórios' }),
       el('span', { class: 'pa-lab', text: 'Mês' }), monthInput,
     ]),
-    (sum.nVendas === 0 && sum.custoVariavel === 0 && sum.perdas === 0)
+    empty
       ? el('p', { class: 'pa-empty', text: 'Nada registrado neste mês.' })
       : el('div', {}, [
-          resumo,
-          el('p', { class: 'pa-hint', text: `O custo já inclui a parte rateada dos custos fixos. Custos fixos do mês (referência): ${brl(config.custosFixosMes)}.` }),
+          resultado,
+          el('p', { class: 'pa-hint', text: 'Lucro do mês = o que você recebeu − despesas − perdas. Conta só dinheiro que entrou e saiu de verdade (o custo das receitas é só para formar preço).' }),
+
+          despCat.length > 0 && el('h3', { class: 'pa-h3', text: 'Despesas por categoria' }),
+          despCat.length > 0 && el('table', { class: 'pa-kv pa-report' }, despCat.map((d) => el('tr', {}, [
+            el('td', { text: d.name }), el('td', { class: 'pa-num', text: brl(d.total) }),
+          ]))),
+
           el('h3', { class: 'pa-h3', text: 'Lucro nos últimos meses' }),
-          barChart(profitTrend(store, month, 6)),
-          el('h3', { class: 'pa-h3', text: 'Por produto' }),
-          el('table', { class: 'pa-kv pa-report' }, [
-            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Produto' }), el('td', { class: 'pa-num', text: 'Qtd' }), el('td', { class: 'pa-num', text: 'Receita' }), el('td', { class: 'pa-num', text: 'Lucro' })]),
+          barChart(revenueTrend(store, month, 6)),
+
+          byProduct.length > 0 && el('div', { class: 'pa-row pa-h3row' }, [el('h3', { class: 'pa-h3 pa-grow', text: 'Por produto' }), prodSortBtn('lucro', 'Lucro'), prodSortBtn('qtd', 'Qtd'), prodSortBtn('faturamento', 'Faturamento')]),
+          byProduct.length > 0 && el('table', { class: 'pa-kv pa-report' }, [
+            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Produto' }), el('td', { class: 'pa-num', text: 'Qtd' }), el('td', { class: 'pa-num', text: 'Fatur.' }), el('td', { class: 'pa-num', text: 'Lucro*' })]),
             ...byProduct.map((r) => el('tr', {}, [
               el('td', { text: r.name }),
-              el('td', { class: 'pa-num', text: String(r.qty) }),
-              el('td', { class: 'pa-num', text: brl(r.receita) }),
-              el('td', { class: 'pa-num' + (r.lucro >= 0 ? '' : ' pa-bad'), text: brl(r.lucro) }),
+              el('td', { class: 'pa-num', text: fmtNum(r.qty) }),
+              el('td', { class: 'pa-num', text: brl(r.faturamento) }),
+              el('td', { class: 'pa-num' + (r.lucroEstimado >= 0 ? '' : ' pa-bad'), text: brl(r.lucroEstimado) }),
             ])),
           ]),
-          el('div', { class: 'pa-row pa-form' }, [
-            el('button', { class: 'pa-btn', 'data-testid': 'rel-export', onclick: () => downloadFile(`relatorio-${month}.csv`, reportCsv(month, sum, byProduct), 'text/csv') }, 'Exportar CSV'),
+          byProduct.length > 0 && el('p', { class: 'pa-hint', text: '* lucro por produto é uma estimativa (preço − custo da receita), para comparar produtos — não é o lucro do caixa acima.' }),
+
+          byClient.length > 0 && el('h3', { class: 'pa-h3', text: 'Por cliente' }),
+          byClient.length > 0 && el('table', { class: 'pa-kv pa-report' }, [
+            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Cliente' }), el('td', { class: 'pa-num', text: 'Comprou' }), el('td', { class: 'pa-num', text: 'Recebido' }), el('td', { class: 'pa-num', text: 'A receber' })]),
+            ...byClient.map((c) => el('tr', {}, [
+              el('td', { text: c.name }),
+              el('td', { class: 'pa-num', text: brl(c.total) }),
+              el('td', { class: 'pa-num', text: brl(c.recebido) }),
+              el('td', { class: 'pa-num' + (c.saldo > 0.005 ? ' pa-bad' : ''), text: brl(c.saldo) }),
+            ])),
           ]),
-        ]),
+
+          el('div', { class: 'pa-row pa-form' }, [
+            el('button', { class: 'pa-btn', 'data-testid': 'rel-export', onclick: () => downloadFile(`relatorio-${month}.csv`, reportCsv(month, sum, despCat, byProduct, byClient), 'text/csv') }, 'Exportar CSV'),
+          ]),
+        ].filter(Boolean)),
   ]);
 }
 
@@ -1796,20 +1827,27 @@ function barChart(series) {
 }
 
 const csvCell = (v) => { const s = String(v ?? ''); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-function reportCsv(month, sum, byProduct) {
+function reportCsv(month, sum, despCat, byProduct, byClient) {
   const n2 = (x) => x.toFixed(2).replace('.', ','); // pt-BR decimals; ';' separator
   const rows = [
     ['Relatório', month], [],
-    ['Receita', n2(sum.receita)],
-    ['Custo dos produtos', n2(sum.custo)],
-    ['Taxas', n2(sum.taxas)],
-    ['Lucro', n2(sum.lucro)],
+    ['Recebido', n2(sum.recebido)],
+    ['Faturado (entregue)', n2(sum.faturado)],
+    ['A receber (fiado)', n2(sum.aReceber)],
+    ['Despesas variáveis', n2(sum.despVar)],
+    ['Despesas fixas', n2(sum.despFix)],
+    ['Perdas', n2(sum.perdas)],
+    ['Lucro do mês', n2(sum.lucro)],
     ['Margem %', (sum.margem * 100).toFixed(1).replace('.', ',')],
-    ['Unidades vendidas', String(sum.unidades)],
-    ['Horas trabalhadas', n2(sum.horas)],
     [],
-    ['Produto', 'Qtd', 'Receita', 'Lucro'],
-    ...byProduct.map((r) => [r.name, String(r.qty), n2(r.receita), n2(r.lucro)]),
+    ['Despesa (categoria)', 'Valor'],
+    ...despCat.map((d) => [d.name, n2(d.total)]),
+    [],
+    ['Produto', 'Qtd', 'Faturamento', 'Lucro estimado'],
+    ...byProduct.map((r) => [r.name, String(r.qty), n2(r.faturamento), n2(r.lucroEstimado)]),
+    [],
+    ['Cliente', 'Comprou', 'Recebido', 'A receber'],
+    ...byClient.map((c) => [c.name, n2(c.total), n2(c.recebido), n2(c.saldo)]),
   ];
   return rows.map((r) => r.map(csvCell).join(';')).join('\n');
 }
