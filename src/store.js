@@ -11,7 +11,7 @@ import { toYaml, fromYaml } from './yaml-bridge.js';
 export const SCHEMA_VERSION = 1;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'reversals'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'reversals'];
 /** Mutable master-data collections (§2.1). */
 const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
@@ -50,7 +50,7 @@ export function emptyState() {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
     ingredients: [], recipes: [], products: [], clients: [], encomendas: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], reversals: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], reversals: [],
   };
 }
 
@@ -164,8 +164,19 @@ export class PaiolStore {
   addVariableCost(ev) { return this._append('variableCosts', ev); }
   /** @param {import('./domain.js').Perda} ev */
   addPerda(ev) { return this._append('perdas', ev); }
+  /** @param {import('./domain.js').Pagamento} ev — a (partial) payment toward an encomenda. */
+  addPayment(ev) { return this._append('payments', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
+
+  /** Total received toward an encomenda (non-reversed payments). Saldo/status derive from this. */
+  paidFor(encomendaId) {
+    let sum = 0;
+    for (const pg of this.state.payments) {
+      if (pg.encomendaId === encomendaId && !this.isReversed('payment', pg.id)) sum += pg.valor || 0;
+    }
+    return sum;
+  }
 
   // ── Read model ───────────────────────────────────────────────────────────────
 

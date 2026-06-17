@@ -118,15 +118,30 @@ test('encomendas are mutable master data that round-trip (Rev 04)', () => {
   s.upsertEncomenda({
     id: 'e1', at: '2026-06-16', deliveryDate: '2026-06-18', clienteId: 'c1',
     itens: [{ productId: 'p1', qty: 2, unitPrice: 10 }], total: 23, costSnapshot: 8,
-    deliveryMethod: 'motoboy', frete: 3, notes: 'sem açúcar', paid: false,
+    deliveryMethod: 'motoboy', frete: 3, notes: 'sem açúcar',
   });
   const back = PaiolStore.fromYaml(s.toYaml());
   assert.deepEqual(back.state.encomendas, s.state.encomendas);
   assert.equal(back.get('encomendas', 'e1').itens[0].qty, 2);
-  // mutable: editing replaces the record
-  s.upsertEncomenda({ ...s.get('encomendas', 'e1'), paid: true });
-  assert.equal(s.get('encomendas', 'e1').paid, true);
+  // mutable: editing replaces the record in place
+  s.upsertEncomenda({ ...s.get('encomendas', 'e1'), notes: 'editado' });
+  assert.equal(s.get('encomendas', 'e1').notes, 'editado');
   assert.equal(s.state.encomendas.length, 1);
+});
+
+test('payments: saldo/status derive from append-only payments; estorno reverses (Rev 04)', () => {
+  const s = new PaiolStore();
+  s.upsertEncomenda({ id: 'e1', at: '2026-06-16', deliveryDate: '2026-06-18', itens: [], total: 100, costSnapshot: 40 });
+  assert.equal(s.paidFor('e1'), 0);
+  s.addPayment({ id: 'pg1', at: '2026-06-18', encomendaId: 'e1', valor: 30, forma: 'Pix' });   // sinal
+  s.addPayment({ id: 'pg2', at: '2026-06-20', encomendaId: 'e1', valor: 70 });                  // quita
+  assert.equal(s.paidFor('e1'), 100);            // total ⇒ pago
+  // estorno the R$70 → back to R$30 outstanding
+  s.addReversal({ id: 'rv1', at: '2026-06-21', kind: 'payment', refId: 'pg2' });
+  assert.equal(s.paidFor('e1'), 30);
+  // payments round-trip
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.equal(back.paidFor('e1'), 30);
 });
 
 test('YAML round-trip preserves the Rev 03 optional fields (supplier, tags, weight, per-product margin)', () => {

@@ -26,13 +26,13 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Fornadas: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Custos: 'operacao', Perdas: 'operacao',
+  Fornadas: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Custos: 'operacao', Perdas: 'operacao',
   Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Fornadas: 'fornadas',
-  Vendas: 'vendas', Encomendas: 'encomendas', Custos: 'custos', Perdas: 'perdas',
+  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Custos: 'custos', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
@@ -721,6 +721,41 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Encomendas');
     await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Dona Márcia/, 'encomenda did not persist');
+    await page.close();
+  });
+
+  test('Rev 04: pagamento parcial deriva saldo + status (encomenda → fiado)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // product "Pãozinho"
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.waitForSelector('[data-testid="enc-save"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão');
+    await page.click('[data-testid="enc-prodresult"]');
+    // clean numbers: qty 2 × R$10 = R$20
+    await page.locator('.pa-encitem .pa-qty').first().fill('2');
+    await page.locator('.pa-encitem .pa-qty').first().dispatchEvent('input');
+    await page.locator('.pa-encitem .pa-unit').first().fill('10,00');
+    await page.locator('.pa-encitem .pa-unit').first().dispatchEvent('input');
+    assert.match(await page.textContent('[data-testid="enc-total"]'), /20,00/);
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /não pago/);
+
+    // Fiado: R$20 to receive → register a R$8 partial.
+    await goto(page, 'Fiado');
+    await page.waitForSelector('[data-testid="fiado-row"]');
+    assert.match(await page.textContent('.pa-totals'), /20,00/);
+    await page.click('[data-testid="fiado-row"]');
+    await page.waitForSelector('[data-testid="pag-add"]');
+    await page.fill('[data-testid="pag-valor"]', '8');
+    await page.click('[data-testid="pag-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-totals'), /12,00/, 'saldo not reduced by the payment');
+
+    // The order's derived status is now "parcial".
+    await goto(page, 'Encomendas');
+    assert.match(await page.textContent('.pa-list'), /parcial/);
     await page.close();
   });
 

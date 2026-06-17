@@ -27,7 +27,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas'], ['fornadas', 'Fornadas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['fornadas', 'Fornadas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -66,6 +66,10 @@ const HELP_SCREENS = [
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
     'Os pedidos com data de entrega. Escolha o cliente, a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
     'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar.',
+  ] },
+  { id: 'fiado', icon: '💳', label: 'Fiado', paras: [
+    'Quem ainda tem valor a pagar das encomendas — o total a receber e cada pendência. Toque numa para registrar um pagamento (total ou parcial); o saldo é recalculado sozinho.',
+    'Para corrigir um pagamento lançado errado, use o estorno (↩) na encomenda — ele cancela sem apagar o histórico.',
   ] },
   { id: 'vendas', icon: '🛒', label: 'Vendas', paras: [
     'Registre suas vendas. O preço sugerido já vem preenchido; edite se vendeu por outro valor. O lucro de cada venda já desconta o custo e a taxa de pagamento.',
@@ -238,7 +242,7 @@ export function renderApp(root, ctx) {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
-    encomendas: encomendasPanel, custos: custosPanel, perdas: perdasPanel,
+    encomendas: encomendasPanel, fiado: fiadoPanel, custos: custosPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -1139,13 +1143,23 @@ function encomendaItemsResumo(store, e) {
   return (e.itens || []).map((it) => { const p = store.get('products', it.productId); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}`; }).join(', ');
 }
 
+/** Derived payment status of an order from its payments (never a stored flag). */
+function paymentStatus(store, e) {
+  const paid = store.paidFor(e.id);
+  const saldo = (e.total || 0) - paid;
+  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, saldo: 0 };
+  if (paid > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, saldo };
+  return { label: 'não pago', cls: 'pa-warn', paid, saldo };
+}
+
 function encomendaRow(ctx, e) {
   const { store } = ctx;
   const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
   const resumo = encomendaItemsResumo(store, e);
+  const st = paymentStatus(store, e);
   return el('li', { class: 'pa-row-item', 'data-search': `${cli ? cli.name : ''} ${resumo}`, onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: e.id }) }, [
     el('div', { class: 'pa-grow' }, [
-      el('div', {}, [el('strong', { text: cli ? cli.name : 'Sem cliente' }), e.paid ? el('span', { class: 'pa-badge pa-ok', text: 'pago' }) : el('span', { class: 'pa-badge pa-warn', text: 'não pago' })]),
+      el('div', {}, [el('strong', { text: cli ? cli.name : 'Sem cliente' }), el('span', { class: `pa-badge ${st.cls}`, text: st.label })]),
       el('span', { class: 'pa-muted', text: `${fmtDate(e.deliveryDate)} · ${resumo}` }),
     ]),
     el('span', { class: 'pa-num', text: brl(e.total) }),
@@ -1175,8 +1189,6 @@ function encomendaSheet(ctx, enc) {
   const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observações (opcional)' });
   notes.value = enc ? (enc.notes || '') : '';
-  const paid = el('input', { type: 'checkbox', 'data-testid': 'enc-paid' });
-  paid.checked = !!(enc && enc.paid);
 
   const totalEl = el('strong', { 'data-testid': 'enc-total' });
   const grandTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
@@ -1235,8 +1247,29 @@ function encomendaSheet(ctx, enc) {
       deliveryMethod: entrega.value,
       frete: fr == null ? undefined : fr,
       notes: ob || undefined,
-      paid: paid.checked,
     }));
+  }
+
+  // Payment summary + history (edit mode). Registering a payment happens from Fiado (or here, after
+  // a save) so unsaved item edits can't be lost — the order's saldo/status are always derived.
+  const paymentSection = [];
+  if (enc) {
+    const st = paymentStatus(store, enc);
+    const hist = store.state.payments.filter((pg) => pg.encomendaId === enc.id).sort((a, b) => (a.at < b.at ? 1 : -1));
+    paymentSection.push(
+      el('h3', { class: 'pa-h3', text: 'Pagamento' }),
+      el('table', { class: 'pa-kv' }, [
+        el('tr', {}, [el('td', { text: 'Total' }), el('td', { class: 'pa-num', text: brl(enc.total) })]),
+        el('tr', {}, [el('td', { text: 'Pago' }), el('td', { class: 'pa-num', text: brl(st.paid) })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num' + (st.saldo > 0.005 ? ' pa-bad' : ''), text: brl(st.saldo) })]),
+      ]),
+      hist.length > 0 && el('ul', { class: 'pa-list pa-tight' }, hist.map((pg) => el('li', { class: 'pa-list-item' + (store.isReversed('payment', pg.id) ? ' pa-reversed' : '') }, [
+        el('span', { class: 'pa-grow pa-muted', text: `${fmtDate(pg.at)}${pg.forma ? ` · ${pg.forma}` : ''}` }),
+        el('span', { class: 'pa-num', text: brl(pg.valor) }),
+        estornoControl(ctx, 'payment', pg.id),
+      ]))),
+      st.saldo > 0.005 && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-pagar', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: enc.id }) }, '+ Registrar pagamento'),
+    );
   }
 
   const rows = [
@@ -1248,7 +1281,7 @@ function encomendaSheet(ctx, enc) {
     el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Total ' }), totalEl])]),
     field('Frete (opcional)', frete),
     field('Observações (opcional)', notes),
-    el('label', { class: 'pa-check' }, [paid, el('span', { text: 'Pago' })]),
+    ...paymentSection.filter(Boolean),
   ];
 
   const cliName = enc && enc.clienteId ? (store.get('clients', enc.clienteId)?.name || 'cliente') : 'sem cliente';
@@ -1259,6 +1292,68 @@ function encomendaSheet(ctx, enc) {
     saveTestid: 'enc-save',
     danger: enc ? { label: '🗑 Excluir encomenda', testid: 'enc-delete', onClick: () => confirmRemove(ctx, `a encomenda de ${cliName}`, (s) => s.removeEncomenda(enc.id)) } : null,
   });
+}
+
+// ── Pagamentos (Rev 04 — append-only; saldo/status derived; estorno corrige) ─────
+
+MODALS['pagamento-add'] = (ctx, m) => pagamentoSheet(ctx, m.encomendaId);
+
+function pagamentoSheet(ctx, encomendaId) {
+  const { store } = ctx;
+  const enc = store.get('encomendas', encomendaId);
+  const saldo = enc ? Math.max(0, (enc.total || 0) - store.paidFor(encomendaId)) : 0;
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'pag-date', type: 'date', value: todayInput() });
+  const valor = moneyField(saldo > 0 ? saldo : null, 'pag-valor');
+  const forma = el('select', { class: 'pa-input', 'data-testid': 'pag-forma' }, ['Pix', 'Dinheiro', 'Cartão', 'Outro'].map((f) => el('option', { value: f, text: f })));
+
+  function save() {
+    const v = parseNum(valor.input.value);
+    if (v == null || !(v > 0)) { valor.input.focus(); return; }
+    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
+    ctx.actions.mutate((s) => s.addPayment({ id: uuid(), at, encomendaId, valor: v, forma: forma.value }));
+  }
+  return sheet({
+    title: 'Registrar pagamento',
+    rows: [
+      el('p', { class: 'pa-hint', text: `Saldo a receber: ${brl(saldo)}` }),
+      field('Data', date),
+      field('Valor', valor),
+      field('Forma', forma),
+    ],
+    onSave: save,
+    saveTestid: 'pag-add',
+  });
+}
+
+// ── Fiado / Quem me deve (Rev 04 — outstanding order balances) ───────────────────
+
+function fiadoPanel(ctx) {
+  const { store } = ctx;
+  const pend = store.state.encomendas
+    .map((e) => ({ e, saldo: (e.total || 0) - store.paidFor(e.id) }))
+    .filter((x) => x.saldo > 0.005)
+    .sort((a, b) => (a.e.deliveryDate < b.e.deliveryDate ? 1 : -1));
+  const total = pend.reduce((s, x) => s + x.saldo, 0);
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Fiado' })]),
+    el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento.' }),
+    pend.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Ninguém devendo. 🎉' })
+      : el('div', {}, [
+          el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'A receber ' }), brl(total)])]),
+          el('ul', { class: 'pa-list pa-rows' }, pend.map(({ e, saldo }) => {
+            const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
+            return el('li', { class: 'pa-row-item', 'data-testid': 'fiado-row', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: e.id }) }, [
+              el('div', { class: 'pa-grow' }, [
+                el('div', {}, el('strong', { text: cli ? cli.name : 'Sem cliente' })),
+                el('span', { class: 'pa-muted', text: `${encomendaItemsResumo(store, e)} · entrega ${fmtDate(e.deliveryDate)}` }),
+              ]),
+              el('span', { class: 'pa-num pa-bad', text: brl(saldo) }),
+              el('span', { class: 'pa-chev', text: '›' }),
+            ]);
+          })),
+        ]),
+  ]);
 }
 
 // ── Custos variáveis (Rev 03 #4 — dated expense ledger) ──────────────────────────

@@ -120,7 +120,6 @@
  * @property {'retirada'|'motoboy'} [deliveryMethod]
  * @property {number} [frete]
  * @property {string} [notes]
- * @property {boolean}[paid]          // interim; replaced by derived-from-payments next slice
  */
 
 // ── Events (append-only, immutable; §2.2) ──
@@ -185,13 +184,25 @@
  */
 
 /**
+ * Pagamento — a (partial) payment toward an {@link Encomenda} (Rev 04). Append-only, immutable; a
+ * correction is an estorno (Reversal kind 'payment'). The order's pago/saldo are DERIVED from the
+ * sum of payments, never stored — so they can't drift.
+ * @typedef {object} Pagamento
+ * @property {string} id
+ * @property {string} at            // ISO — data do pagamento
+ * @property {string} encomendaId
+ * @property {number} valor         // BRL
+ * @property {string} [forma]       // Pix / Dinheiro / Cartão / ...
+ */
+
+/**
  * Estorno — a reversal of a prior append-only event (Rev 03). Append-only itself, so the original
  * stays in the history (audit trail) but no longer counts. `kind` + `refId` point at the reversed
  * event.
  * @typedef {object} Reversal
  * @property {string} id
  * @property {string} at
- * @property {'sale'|'batch'|'variableCost'|'perda'} kind
+ * @property {'sale'|'batch'|'variableCost'|'perda'|'payment'} kind
  * @property {string} refId
  */
 
