@@ -265,7 +265,7 @@ export function renderApp(root, ctx) {
   root.replaceChildren(...[
     el('header', { class: 'pa-header' }, [
       el('div', { class: 'pa-grow' }, [
-        el('h1', { text: 'Quitutes do Paiol' }),
+        el('h1', {}, [el('span', { text: 'Quitutes do Paiol' }), el('span', { class: 'pa-beta', title: 'Em testes — novidades chegando', text: 'beta' })]),
         el('p', { class: 'pa-sub', text: 'Custos, receitas e vendas' }),
       ]),
       el('button', { class: 'pa-help-btn', 'data-testid': 'help-open', title: 'Ajuda', 'aria-label': 'Ajuda', onclick: () => ctx.actions.openModal({ kind: 'help' }) }, '?'),

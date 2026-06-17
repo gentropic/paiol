@@ -147,7 +147,7 @@ describe('paiol UI smoke', () => {
 
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await page.waitForSelector('h1');
-    assert.equal((await page.textContent('h1')).trim(), 'Quitutes do Paiol');
+    assert.match((await page.textContent('h1')).trim(), /^Quitutes do Paiol/);
     assert.deepEqual(errors, [], `console/page errors: ${errors.join(' | ')}`);
     await page.close();
   });
@@ -887,7 +887,7 @@ describe('paiol UI smoke', () => {
     }));
     await page.reload({ waitUntil: 'networkidle' });
 
-    assert.equal((await page.textContent('h1')).trim(), 'Quitutes do Paiol');
+    assert.match((await page.textContent('h1')).trim(), /^Quitutes do Paiol/);
     // PWA wiring is present in the shipped shell (the SW itself is gated off on localhost).
     assert.equal(await page.locator('link[rel="manifest"]').count(), 1, 'manifest link missing');
     assert.equal(await page.locator('link[rel="apple-touch-icon"]').count(), 1, 'apple-touch-icon missing');
