@@ -26,7 +26,7 @@ function unitsInDimension(u) {
 // segmented control. Grouped by frequency/mental-model so 8 screens fit ~5 thumb-reachable tabs.
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
-  { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos']] },
+  { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
   { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
@@ -51,6 +51,9 @@ const HELP_SCREENS = [
   { id: 'produtos', icon: '🎂', label: 'Produtos', paras: [
     'O que você vende. Um produto pode ser feito de uma receita, de várias (combos), de outros produtos (cestas!) ou de insumos comprados.',
     'A embalagem entra como custo, com uma descrição (boleira, saco, lata). Toque em “+ Novo” pra criar e montar os itens.',
+  ] },
+  { id: 'clientes', icon: '👥', label: 'Clientes', paras: [
+    'Seus clientes — nome, telefone e endereço. Como a maioria é recorrente, cadastrar uma vez agiliza lançar os pedidos e montar a ficha (histórico de compras) de cada um.',
   ] },
   { id: 'precos', icon: '💰', label: 'Preços', paras: [
     'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
@@ -229,7 +232,7 @@ function searchInput(placeholder, container, testid) {
 export function renderApp(root, ctx) {
   const panels = {
     inicio: inicioPanel,
-    insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel,
+    insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
     custos: custosPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
@@ -792,6 +795,58 @@ function unpricedInProduct(store, productId, seenP = new Set()) {
     else if (c.kind === 'ingredient') { const ing = store.get('ingredients', c.id); if (ing && store.currentPrice(ing.id) == null) out.add(ing.name); }
   }
   return [...out];
+}
+
+// ── Clientes (Rev 04 — master data; encomendas/fichas attach to a client) ────────
+
+function clientesPanel(ctx) {
+  const { store } = ctx;
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.clients.map((c) => clienteRow(ctx, c)));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Clientes' }),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cli-new', onclick: () => ctx.actions.openModal({ kind: 'cliente-add' }) }, '+ Novo'),
+    ]),
+    store.state.clients.length === 0
+      ? el('p', { class: 'pa-empty', text: 'Nenhum cliente. Toque em “+ Novo” para começar.' })
+      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um cliente para editar.' }), searchInput('Buscar cliente…', list, 'cli-search'), list]),
+  ]);
+}
+
+function clienteRow(ctx, c) {
+  const meta = [c.phone, c.address].filter(Boolean).join(' · ');
+  return el('li', { class: 'pa-row-item', 'data-search': `${c.name} ${c.phone || ''}`, onclick: () => ctx.actions.openModal({ kind: 'cliente-edit', id: c.id }) }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: c.name })),
+      meta && el('span', { class: 'pa-muted', text: meta }),
+    ].filter(Boolean)),
+    el('span', { class: 'pa-chev', text: '›' }),
+  ]);
+}
+
+MODALS['cliente-add'] = (ctx) => clienteSheet(ctx, null);
+MODALS['cliente-edit'] = (ctx, m) => clienteSheet(ctx, ctx.store.get('clients', m.id) || null);
+
+function clienteSheet(ctx, cli) {
+  const name = el('input', { class: 'pa-input', 'data-testid': 'cli-name', type: 'text', placeholder: 'Nome do cliente', value: cli ? cli.name : '' });
+  const phone = el('input', { class: 'pa-input', 'data-testid': 'cli-phone', type: 'tel', inputmode: 'tel', placeholder: 'Telefone', value: cli ? (cli.phone || '') : '' });
+  const address = el('input', { class: 'pa-input', 'data-testid': 'cli-address', type: 'text', placeholder: 'Endereço', value: cli ? (cli.address || '') : '' });
+
+  function save() {
+    const nm = name.value.trim();
+    if (!nm) { name.focus(); return; }
+    const ph = phone.value.trim();
+    const ad = address.value.trim();
+    ctx.actions.mutate((s) => s.upsertClient({ ...(cli || {}), id: cli ? cli.id : uuid(), name: nm, phone: ph || undefined, address: ad || undefined }));
+  }
+
+  return sheet({
+    title: cli ? 'Editar cliente' : 'Novo cliente',
+    rows: [field('Nome', name), field('Telefone (opcional)', phone), field('Endereço (opcional)', address)],
+    onSave: save,
+    saveTestid: 'cli-save',
+    danger: cli ? { label: '🗑 Excluir cliente', testid: 'cli-delete', onClick: () => confirmRemove(ctx, `o cliente "${cli.name}"`, (s) => s.removeClient(cli.id)) } : null,
+  });
 }
 
 // ── Preços (the payoff) ─────────────────────────────────────────────────────────

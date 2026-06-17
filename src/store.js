@@ -13,7 +13,7 @@ export const SCHEMA_VERSION = 1;
 /** Append-only, immutable event collections (§2.2). */
 const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'reversals'];
 /** Mutable master-data collections (§2.1). */
-const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products'];
+const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 
 /**
@@ -49,7 +49,7 @@ export function emptyState() {
   return {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
-    ingredients: [], recipes: [], products: [],
+    ingredients: [], recipes: [], products: [], clients: [],
     priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], reversals: [],
   };
 }
@@ -141,10 +141,13 @@ export class PaiolStore {
   upsertRecipe(x) { return this._upsert('recipes', x); }
   /** @param {import('./domain.js').Product} x */
   upsertProduct(x) { return this._upsert('products', x); }
+  /** @param {import('./domain.js').Cliente} x */
+  upsertClient(x) { return this._upsert('clients', x); }
 
   removeIngredient(id) { return this._remove('ingredients', id); }
   removeRecipe(id) { return this._remove('recipes', id); }
   removeProduct(id) { return this._remove('products', id); }
+  removeClient(id) { return this._remove('clients', id); }
 
   // ── Events (append-only) ─────────────────────────────────────────────────────
 

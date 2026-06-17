@@ -102,6 +102,17 @@ test('YAML round-trip preserves the whole business', () => {
   assert.equal(back.isReversed('perda', 'pd1'), false);
 });
 
+test('clients are master data: upsert, index lookup, YAML round-trip (Rev 04)', () => {
+  const s = new PaiolStore();
+  s.upsertClient({ id: 'c1', name: 'Dona Márcia', phone: '11999990000', address: 'Rua X, 10' });
+  assert.equal(s.get('clients', 'c1').name, 'Dona Márcia');     // O(1) index
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.state.clients, s.state.clients);
+  assert.equal(back.get('clients', 'c1').phone, '11999990000');
+  s.removeClient('c1');
+  assert.equal(s.get('clients', 'c1'), undefined);
+});
+
 test('YAML round-trip preserves the Rev 03 optional fields (supplier, tags, weight, per-product margin)', () => {
   const s = new PaiolStore();
   s.upsertIngredient({ id: 'i', name: 'Farinha', stockUnit: 'kg', lastSupplier: 'Atacadão', tags: ['seco', 'base'] });

@@ -25,13 +25,13 @@ async function waitForServer(url, timeoutMs = 10_000) {
 
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
-  Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros',
+  Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
   Fornadas: 'operacao', Vendas: 'operacao', Custos: 'operacao', Perdas: 'operacao',
   Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
-  Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Fornadas: 'fornadas',
+  Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Fornadas: 'fornadas',
   Vendas: 'vendas', Custos: 'custos', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
@@ -687,6 +687,30 @@ describe('paiol UI smoke', () => {
     const txt = await page.textContent('.pa-card');
     assert.match(txt, /Custos variáveis/);
     assert.match(txt, /Perdas/);
+    await page.close();
+  });
+
+  test('Rev 04: cadastra um cliente que sobrevive ao reload', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE);
+    await page.evaluate(() => new Promise((r) => { const q = indexedDB.deleteDatabase('paiol'); q.onsuccess = q.onerror = q.onblocked = () => r(); }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Clientes');
+    await page.click('[data-testid="cli-new"]');
+    await page.waitForSelector('[data-testid="cli-save"]');
+    await page.fill('[data-testid="cli-name"]', 'Dona Márcia');
+    await page.fill('[data-testid="cli-phone"]', '11999990000');
+    await page.fill('[data-testid="cli-address"]', 'Rua das Flores, 10');
+    await page.click('[data-testid="cli-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.waitForSelector('.pa-row-item');
+    assert.match(await page.textContent('.pa-list'), /Dona Márcia/);
+    assert.match(await page.textContent('.pa-list'), /Rua das Flores/);   // address shown on the row
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Clientes');
+    await page.waitForSelector('.pa-row-item');
+    assert.match(await page.textContent('.pa-list'), /Dona Márcia/, 'cliente did not persist');
     await page.close();
   });
 

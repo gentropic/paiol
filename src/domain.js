@@ -87,6 +87,16 @@
  * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
 
+/**
+ * Cliente — a customer (Rev 04). Most are recurring, so the cadastro speeds order entry, and
+ * encomendas attach to a client to build the printable ficha/histórico de compras.
+ * @typedef {object} Cliente
+ * @property {string}  id
+ * @property {string}  name        // nome
+ * @property {string} [phone]      // telefone
+ * @property {string} [address]    // endereço
+ */
+
 // ── Events (append-only, immutable; §2.2) ──
 
 /**
