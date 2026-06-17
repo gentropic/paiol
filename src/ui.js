@@ -28,7 +28,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['comanda', 'Comanda'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['comanda', 'Comanda'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['despesas', 'Despesas'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -76,9 +76,9 @@ const HELP_SCREENS = [
     'Registre suas vendas. O preço sugerido já vem preenchido; edite se vendeu por outro valor. O lucro de cada venda já desconta o custo e a taxa de pagamento.',
     'Dá pra lançar venda de outro dia pela data, e usar a busca ou o filtro de mês pra encontrar.',
   ] },
-  { id: 'custos', icon: '🧾', label: 'Custos variáveis', paras: [
-    'Gastos avulsos que não são de uma receita específica — gasolina de entrega, uma sacola extra, uma compra pontual. Lance por data, conforme acontecem.',
-    'Eles entram como desconto no lucro do mês, nos Relatórios.',
+  { id: 'despesas', icon: '🧾', label: 'Despesas', paras: [
+    'Tudo que você gasta, organizado por categoria: matéria-prima, embalagens, gás, frete, aluguel, água, luz, pró-labore… Lance cada gasto por data, conforme acontece — é assim que o lucro do mês fica real.',
+    'Toque em “Categorias” para criar, renomear, arquivar ou apagar categorias e subcategorias do seu jeito. As despesas entram como desconto no lucro do mês, nos Relatórios.',
   ] },
   { id: 'perdas', icon: '🗑️', label: 'Perdas', paras: [
     'O que se perdeu e não virou venda: uma massa que deu errado, um produto que não vendeu, uma embalagem danificada. Para insumo ou produto, o valor já vem calculado pela quantidade.',
@@ -243,7 +243,7 @@ export function renderApp(root, ctx) {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
     precos: precosPanel, vendas: vendasPanel,
-    encomendas: encomendasPanel, comanda: comandaPanel, fiado: fiadoPanel, custos: custosPanel, perdas: perdasPanel,
+    encomendas: encomendasPanel, comanda: comandaPanel, fiado: fiadoPanel, despesas: despesasPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -1488,47 +1488,134 @@ function fiadoPanel(ctx) {
 
 // ── Custos variáveis (Rev 03 #4 — dated expense ledger) ──────────────────────────
 
-function custosPanel(ctx) {
+// ── Despesas (Rev 06 — categorized cash-expense ledger; feeds the cash-basis result) ─────────────
+
+const CATEGORY_KINDS = [
+  ['despesaVariavel', 'Despesa Variável', 'Despesas Variáveis'],
+  ['despesaFixa', 'Despesa Fixa', 'Despesas Fixas'],
+  ['receita', 'Receita', 'Receitas'],
+  ['perda', 'Perda', 'Perdas'],
+];
+const kindShort = (k) => ({ despesaFixa: 'Fixa', despesaVariavel: 'Variável', receita: 'Receita', perda: 'Perda' }[k] || '');
+
+/** <optgroup>s of the despesa-able categories (fixa/variável), subcategorias indented, archived hidden. */
+function despesaCategoryGroups(store) {
+  return [['despesaVariavel', 'Despesas Variáveis'], ['despesaFixa', 'Despesas Fixas']].map(([kind, label]) => {
+    const cats = store.state.categories.filter((c) => c.kind === kind && !c.archived);
+    const tops = cats.filter((c) => !c.parentId);
+    const opts = [];
+    for (const t of tops) {
+      opts.push(el('option', { value: t.id, text: t.name }));
+      for (const sub of cats.filter((c) => c.parentId === t.id)) opts.push(el('option', { value: sub.id, text: `— ${sub.name}` }));
+    }
+    for (const orphan of cats.filter((c) => c.parentId && !tops.some((t) => t.id === c.parentId))) opts.push(el('option', { value: orphan.id, text: orphan.name }));
+    return opts.length ? el('optgroup', { label }, opts) : null;
+  }).filter(Boolean);
+}
+
+function despesasPanel(ctx) {
   const { store } = ctx;
-  const all = store.state.variableCosts.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const all = store.state.despesas.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
   const month = ctx.view.logMonth;
-  const items = month ? all.filter((v) => monthOf(v.at) === month) : all;
-  const total = items.reduce((s, v) => (store.isReversed('variableCost', v.id) ? s : s + (v.amount || 0)), 0);
-  const list = logList(items, (v) => el('li', { class: 'pa-list-item' + (store.isReversed('variableCost', v.id) ? ' pa-reversed' : ''), 'data-search': v.description || '' }, [
-    el('div', { class: 'pa-grow' }, [el('div', {}, el('strong', { text: v.description || 'Custo' }))]),
-    el('span', { class: 'pa-num', text: brl(v.amount) }),
-    estornoControl(ctx, 'variableCost', v.id),
+  const items = month ? all.filter((d) => monthOf(d.at) === month) : all;
+  const total = items.reduce((s, d) => (store.isReversed('despesa', d.id) ? s : s + (d.valor || 0)), 0);
+  const catName = (id) => store.get('categories', id)?.name || '(sem categoria)';
+  const list = logList(items, (d) => el('li', { class: 'pa-list-item' + (store.isReversed('despesa', d.id) ? ' pa-reversed' : ''), 'data-search': `${catName(d.categoryId)} ${d.description || ''}` }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, el('strong', { text: catName(d.categoryId) })),
+      el('span', { class: 'pa-muted', text: [kindShort(store.get('categories', d.categoryId)?.kind), d.description].filter(Boolean).join(' · ') }),
+    ]),
+    el('span', { class: 'pa-num', text: brl(d.valor) }),
+    estornoControl(ctx, 'despesa', d.id),
   ]));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Custos variáveis' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'custo-new', onclick: () => ctx.actions.openModal({ kind: 'custo-add' }) }, '+ Registrar'),
+      el('h2', { class: 'pa-grow', text: 'Despesas' }),
+      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cat-manage', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, 'Categorias'),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'desp-new', onclick: () => ctx.actions.openModal({ kind: 'despesa-add' }) }, '+ Lançar'),
     ]),
-    el('p', { class: 'pa-hint', text: 'Gastos avulsos, lançados por data conforme acontecem (entrega, sacola extra, uma compra pontual). Entram no lucro do mês.' }),
-    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar custo…', searchTestid: 'custo-search', monthTestid: 'custo-month' }),
+    el('p', { class: 'pa-hint', text: 'Tudo que você gasta, por categoria: matéria-prima, embalagens, gás, frete, aluguel, pró-labore… Lançadas por data — entram no lucro do mês (Relatórios).' }),
+    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar despesa…', searchTestid: 'desp-search', monthTestid: 'desp-month' }),
     items.length > 0 && el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: `Total${month ? ` (${monthLabel(month)})` : ''} ` }), brl(total)])]),
     all.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhum custo registrado. Toque em “+ Registrar”.' })
-      : items.length === 0 ? el('p', { class: 'pa-empty', text: 'Nenhum custo neste mês.' }) : list,
+      ? el('p', { class: 'pa-empty', text: 'Nenhuma despesa lançada. Toque em “+ Lançar”.' })
+      : items.length === 0 ? el('p', { class: 'pa-empty', text: 'Nenhuma despesa neste mês.' }) : list,
   ].filter(Boolean));
 }
 
-MODALS['custo-add'] = (ctx) => custoSheet(ctx);
+MODALS['despesa-add'] = (ctx) => despesaSheet(ctx);
 
-function custoSheet(ctx) {
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'custo-date', type: 'date', value: todayInput() });
-  const desc = el('input', { class: 'pa-input', 'data-testid': 'custo-desc', type: 'text', placeholder: 'ex.: gasolina entrega' });
-  const amount = moneyField(null, 'custo-amount');
+function despesaSheet(ctx) {
+  const { store } = ctx;
+  const groups = despesaCategoryGroups(store);
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'desp-date', type: 'date', value: todayInput() });
+  const catSel = el('select', { class: 'pa-input', 'data-testid': 'desp-cat' }, groups);
+  const desc = el('input', { class: 'pa-input', 'data-testid': 'desp-desc', type: 'text', placeholder: 'descrição (opcional)' });
+  const amount = moneyField(null, 'desp-amount');
   function save() {
     const a = parseNum(amount.input.value);
+    if (!catSel.value) { catSel.focus(); return; }
     if (a == null || !(a > 0)) { amount.input.focus(); return; }
     const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addVariableCost({ id: uuid(), at, amount: a, ...(desc.value.trim() ? { description: desc.value.trim() } : {}) }));
+    ctx.actions.mutate((s) => s.addDespesa({ id: uuid(), at, valor: a, categoryId: catSel.value, ...(desc.value.trim() ? { description: desc.value.trim() } : {}) }));
+  }
+  if (!groups.length) {
+    return sheet({ title: 'Lançar despesa', rows: [el('p', { class: 'pa-hint', text: 'Crie uma categoria de despesa primeiro — toque em “Categorias” na tela de Despesas.' })] });
   }
   return sheet({
-    title: 'Registrar custo variável',
-    rows: [field('Data', date), field('Descrição', desc), field('Valor', amount)],
-    onSave: save, saveTestid: 'custo-add',
+    title: 'Lançar despesa',
+    rows: [field('Data', date), field('Categoria', catSel), field('Descrição', desc), field('Valor', amount)],
+    onSave: save, saveTestid: 'desp-add',
+  });
+}
+
+MODALS['categorias'] = (ctx) => categoriasSheet(ctx);
+
+// Manage categorias + subcategorias. CRUD happens in place (mutateModal) so the list updates without
+// closing the sheet. Archive (soft) keeps history labeled; hard-delete only when never used.
+function categoriasSheet(ctx) {
+  const { store } = ctx;
+  const nameI = el('input', { class: 'pa-input pa-grow', 'data-testid': 'cat-name', type: 'text', placeholder: 'Nova categoria' });
+  const kindSel = el('select', { class: 'pa-input', 'data-testid': 'cat-kind' }, CATEGORY_KINDS.map(([v, t]) => el('option', { value: v, text: t })));
+  const parentSel = el('select', { class: 'pa-input', 'data-testid': 'cat-parent' });
+  function fillParents() {
+    const tops = store.state.categories.filter((c) => c.kind === kindSel.value && !c.parentId && !c.archived);
+    parentSel.replaceChildren(el('option', { value: '', text: '— categoria principal —' }), ...tops.map((t) => el('option', { value: t.id, text: `sub de: ${t.name}` })));
+  }
+  fillParents();
+  kindSel.addEventListener('change', fillParents);
+  function add() {
+    const nm = nameI.value.trim();
+    if (!nm) { nameI.focus(); return; }
+    ctx.actions.mutateModal((s) => s.upsertCategory({ id: uuid(), name: nm, kind: kindSel.value, ...(parentSel.value ? { parentId: parentSel.value } : {}) }));
+  }
+
+  const used = (id) => store.state.despesas.some((d) => d.categoryId === id && !store.isReversed('despesa', d.id));
+  const catRow = (c, sub) => el('li', { class: 'pa-list-item' + (c.archived ? ' pa-reversed' : ''), 'data-testid': 'cat-row' }, [
+    el('span', { class: 'pa-grow', text: (sub ? '— ' : '') + c.name }),
+    el('button', { class: 'pa-btn pa-ghost pa-sm', title: c.archived ? 'Reativar' : 'Arquivar', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...c, archived: !c.archived })) }, c.archived ? '↺' : '🗄'),
+    !used(c.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir', onclick: () => ctx.actions.mutateModal((s) => s.removeCategory(c.id)) }, '✕'),
+  ].filter(Boolean));
+  const groups = CATEGORY_KINDS.map(([kind, , label]) => {
+    const cats = store.state.categories.filter((c) => c.kind === kind);
+    if (!cats.length) return null;
+    const tops = cats.filter((c) => !c.parentId);
+    const lis = [];
+    for (const t of tops) { lis.push(catRow(t, false)); for (const s of cats.filter((c) => c.parentId === t.id)) lis.push(catRow(s, true)); }
+    for (const orphan of cats.filter((c) => c.parentId && !tops.some((t) => t.id === c.parentId))) lis.push(catRow(orphan, false));
+    return el('div', {}, [el('h3', { class: 'pa-h3', text: label }), el('ul', { class: 'pa-list pa-tight' }, lis)]);
+  }).filter(Boolean);
+
+  return sheet({
+    title: 'Categorias',
+    rows: [
+      el('div', { class: 'pa-row pa-form' }, [nameI]),
+      el('div', { class: 'pa-row pa-form' }, [kindSel, parentSel]),
+      el('div', { class: 'pa-row' }, [el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cat-add', onclick: add }, '+ Adicionar')]),
+      el('p', { class: 'pa-hint', text: 'Arquive (🗄) o que não usa mais — o histórico continua certo. Excluir (✕) só aparece nas que nunca foram usadas.' }),
+      ...groups,
+      el('div', { class: 'pa-row pa-cardfoot' }, [el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-done', onclick: () => ctx.actions.closeModal() }, 'Concluir')]),
+    ],
   });
 }
 

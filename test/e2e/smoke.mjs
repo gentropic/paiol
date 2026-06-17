@@ -27,13 +27,13 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Comanda: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Custos: 'operacao', Perdas: 'operacao',
+  Comanda: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Despesas: 'operacao', Perdas: 'operacao',
   Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Comanda: 'comanda',
-  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Custos: 'custos', Perdas: 'perdas',
+  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'despesas', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
@@ -680,19 +680,43 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Lote 3: custos variáveis + perdas log and hit the report', async () => {
+  test('Rev 06: despesas por categoria + gerenciar categorias (Slice 2)', async () => {
     const page = await context.newPage();
-    await seedBusiness(page); // insumo "Farinha" (R$5/kg), product "Pãozinho"
+    await seedBusiness(page); // boot seeds DEFAULT_CATEGORIES (Gás, Matéria-prima, …)
 
-    // A variable cost.
-    await goto(page, 'Custos');
-    await page.click('[data-testid="custo-new"]');
-    await page.waitForSelector('[data-testid="custo-add"]');
-    await page.fill('[data-testid="custo-desc"]', 'Gasolina entrega');
-    await page.fill('[data-testid="custo-amount"]', '20');
-    await page.click('[data-testid="custo-add"]');
+    await goto(page, 'Despesas');
+    // Manage categories: add one; the sheet stays open (mutateModal) and the list updates in place.
+    await page.click('[data-testid="cat-manage"]');
+    await page.waitForSelector('[data-testid="cat-add"]');
+    await page.fill('[data-testid="cat-name"]', 'Manutenção');
+    await page.selectOption('[data-testid="cat-kind"]', 'despesaFixa');
+    await page.click('[data-testid="cat-add"]');
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="cat-row"]')].some((r) => /Manutenção/.test(r.textContent)));
+    await page.click('[data-testid="cat-done"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-list'), /Gasolina/);
+
+    // Log a despesa under a seeded category.
+    await page.click('[data-testid="desp-new"]');
+    await page.waitForSelector('[data-testid="desp-add"]');
+    await page.selectOption('[data-testid="desp-cat"]', { label: 'Gás' });
+    await page.fill('[data-testid="desp-amount"]', '90');
+    await page.fill('[data-testid="desp-desc"]', 'botijão');
+    await page.click('[data-testid="desp-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Gás/);
+    assert.match(await page.textContent('.pa-card'), /Total/);
+
+    // survives reload (persisted to IndexedDB)
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Despesas');
+    assert.match(await page.textContent('.pa-list'), /Gás/, 'despesa did not persist');
+    await page.close();
+  });
+
+  test('Lote 3: perdas log and hit the report', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // insumo "Farinha" (R$5/kg)
 
     // A perda of an insumo — the value auto-computes from qty × price (2 × R$5 = R$10).
     await goto(page, 'Perdas');
@@ -706,12 +730,10 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     assert.match(await page.textContent('.pa-list'), /Farinha/);
 
-    // Both land in the month's P&L.
+    // It lands in the month's P&L.
     await goto(page, 'Relatórios');
     await page.waitForSelector('.pa-kv');
-    const txt = await page.textContent('.pa-card');
-    assert.match(txt, /Custos variáveis/);
-    assert.match(txt, /Perdas/);
+    assert.match(await page.textContent('.pa-card'), /Perdas/);
     await page.close();
   });
 

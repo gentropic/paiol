@@ -8,6 +8,7 @@ import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinke
 import { renderApp, renderModal } from './ui.js';
 import { setupPwa } from './pwa.js';
 import { importYaml } from './exchange.js';
+import { DEFAULT_CATEGORIES } from './store.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
@@ -24,6 +25,13 @@ export async function boot(root) {
   const localVfs = await VFS.create({ type: 'idb', name: LOCAL_DB_NAME });
   const store = await loadStore(localVfs);
   const saver = createDebouncedSaver(localVfs, () => store);
+
+  // Seed financial categories on first run (Rev 06) so the Despesas picker is never empty. Only when
+  // none exist — once seeded (or if she's reshaped them) this never re-runs and overwrites nothing.
+  if (store.state.categories.length === 0) {
+    for (const c of DEFAULT_CATEGORIES) store.upsertCategory({ id: crypto.randomUUID(), ...c });
+    saver.schedule();
+  }
 
   const ctx = { store, view, actions: {} };
   const rerender = () => renderApp(root, ctx);
@@ -75,6 +83,9 @@ export async function boot(root) {
     closeModal() { view.modal = null; rerenderModal(); },
     // Generic business mutation: run fn(store), persist locally (debounced) + sync (debounced), re-render.
     mutate(fn) { fn(store); view.modal = null; saver.schedule(); scheduleSync(); rerender(); },
+    // Mutate but KEEP the modal open, re-rendering only the overlay — for in-place CRUD inside a
+    // sheet (managing categorias) where each add/archive/delete should update the list, not close it.
+    mutateModal(fn) { fn(store); saver.schedule(); scheduleSync(); rerenderModal(); },
     // Like mutate but WITHOUT a re-render — for in-place edits (the comanda's realizado/feito inputs)
     // that update their own DOM, so the panel must not rebuild under them (keeps input focus).
     persist(fn) { fn(store); saver.schedule(); scheduleSync(); },
