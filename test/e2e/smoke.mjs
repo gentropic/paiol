@@ -808,6 +808,14 @@ describe('paiol UI smoke', () => {
     // The order's derived status is now "parcial".
     await goto(page, 'Encomendas');
     assert.match(await page.textContent('.pa-list'), /parcial/);
+
+    // A recibo (PDF) can be generated from the order once something is paid.
+    await page.click('.pa-row-item');
+    await page.waitForSelector('[data-testid="gerar-recibo"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-recibo"]')]);
+    assert.match(dl.suggestedFilename(), /^recibo-.*\.pdf$/);
+    const buf = await readFile(await dl.path());
+    assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'recibo is not a valid PDF');
     await page.close();
   });
 

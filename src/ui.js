@@ -11,7 +11,7 @@ import {
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
-import { generateFichasPdf, savePdf } from './pdf.js';
+import { generateFichasPdf, generateReciboPdf, savePdf } from './pdf.js';
 import { monthSummary, productSummary, profitTrend } from './reports.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
@@ -62,7 +62,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
     'Os pedidos com data de entrega. Escolha o cliente, a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
-    'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar.',
+    'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar. Depois de um pagamento, dá pra gerar um recibo (PDF) ali mesmo — é um comprovante, não substitui nota fiscal.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
     'A lista do que produzir num dia. O previsto vem sozinho das encomendas com entrega nessa data; você marca o que já fez (✓) e anota quanto saiu de verdade (“Saiu”). Sobra ou falta aparece ao lado.',
@@ -1323,7 +1323,10 @@ function encomendaSheet(ctx, enc) {
         el('span', { class: 'pa-num', text: brl(pg.valor) }),
         estornoControl(ctx, 'payment', pg.id),
       ]))),
-      st.saldo > 0.005 && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-pagar', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: enc.id }) }, '+ Registrar pagamento'),
+      el('div', { class: 'pa-row pa-form' }, [
+        st.saldo > 0.005 && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-pagar', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: enc.id }) }, '+ Registrar pagamento'),
+        st.paid > 0.005 && reciboButton(ctx, enc),
+      ].filter(Boolean)),
     );
   }
 
@@ -1409,6 +1412,42 @@ function fichasButton(ctx, label, getFichas, filename) {
     btn.textContent = 'Gerando…'; btn.disabled = true;
     try { await savePdf(await generateFichasPdf(fichas), filename); }
     catch (e) { window.alert('Não foi possível gerar o PDF: ' + (e && e.message ? e.message : e)); }
+    finally { btn.textContent = orig; btn.disabled = false; }
+  });
+  return btn;
+}
+
+/** Assemble a recibo (payment proof) object from an encomenda + its derived payment state. */
+function buildRecibo(store, enc) {
+  const client = enc.clienteId ? store.get('clients', enc.clienteId) : null;
+  const st = paymentStatus(store, enc);
+  const formas = new Set(store.state.payments.filter((pg) => pg.encomendaId === enc.id && !store.isReversed('payment', pg.id) && pg.forma).map((pg) => pg.forma));
+  return {
+    numero: 'Nº ' + enc.id.slice(0, 8),
+    date: fmtDate(nowIso()),
+    clientName: client ? client.name : 'Consumidor',
+    clientContato: client ? [client.phone, client.address].filter(Boolean).join(' · ') : '',
+    items: enc.itens.map((it) => { const p = store.get('products', it.productId); return { name: p ? p.name : '(produto)', qty: it.qty, unitPrice: it.unitPrice, total: (Number(it.qty) || 0) * (Number(it.unitPrice) || 0) }; }),
+    referente: `pedido de ${fmtDate(enc.deliveryDate)}`,
+    total: enc.total || 0,
+    pago: st.paid,
+    saldo: st.saldo,
+    forma: formas.size === 1 ? [...formas][0] : undefined,
+  };
+}
+
+/** A button that generates + saves a recibo PDF for one order, with inline "Gerando…" feedback. */
+function reciboButton(ctx, enc) {
+  const { store } = ctx;
+  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'gerar-recibo' }, '🧾 Recibo (PDF)');
+  btn.addEventListener('click', async () => {
+    const orig = btn.textContent;
+    btn.textContent = 'Gerando…'; btn.disabled = true;
+    try {
+      const r = buildRecibo(store, enc);
+      const safe = (r.clientName || 'cliente').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      await savePdf(await generateReciboPdf(r), `recibo-${safe}.pdf`);
+    } catch (e) { window.alert('Não foi possível gerar o PDF: ' + (e && e.message ? e.message : e)); }
     finally { btn.textContent = orig; btn.disabled = false; }
   });
   return btn;
