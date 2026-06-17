@@ -333,14 +333,14 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('.pa-comanda tbody tr');
     assert.match(await page.textContent('.pa-comanda'), /Pãozinho/, 'comanda did not derive previsto from the order');
 
-    // Fill realizado + mark feito; indicators reflect realized production.
+    // Produced 2 against a previsto of 1 → 1 unit available to sell; production cost > 0.
     await page.fill('[data-testid="cmd-realizado"]', '2');
     await page.check('[data-testid="cmd-feito"]');
     await page.waitForFunction(() => {
-      const el = document.querySelector('[data-testid="cmd-faturamento"]');
+      const el = document.querySelector('[data-testid="cmd-custo"]');
       return el && /R\$\s*[1-9]/.test(el.textContent);
     });
-    assert.match(await page.textContent('[data-testid="cmd-lucro"]'), /R\$/);
+    assert.match(await page.textContent('[data-testid="cmd-disponivel"]'), /\b1\b/, 'produced beyond previsto should be available to sell');
 
     // realizado persists across reload (saved without re-render via ctx.actions.persist).
     await page.waitForTimeout(1200);

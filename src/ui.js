@@ -65,8 +65,8 @@ const HELP_SCREENS = [
     'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar. Depois de um pagamento, dá pra gerar um recibo (PDF) ali mesmo — é um comprovante, não substitui nota fiscal.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
-    'A lista do que produzir num dia. O previsto vem sozinho das encomendas com entrega nessa data; você marca o que já fez (✓) e anota quanto saiu de verdade (“Saiu”). Sobra ou falta aparece ao lado.',
-    'Precisou fazer algo extra que não foi encomendado? Adicione um item avulso pela busca. No fim aparecem faturamento, custo e lucro do que foi produzido.',
+    'A lista do que produzir num dia. O previsto vem sozinho das encomendas com entrega nessa data; você marca o que já fez (✓) e anota quanto PRODUZIU (“Produzi”) — não o que vendeu.',
+    'O que você produziu além do previsto fica “disponível para venda” (pra vender avulso). No fim aparecem o total disponível e o custo de produção do dia. O lucro do mês fica nos Relatórios.',
   ] },
   { id: 'fiado', icon: '💳', label: 'Fiado', paras: [
     'Quem ainda tem valor a pagar das encomendas — o total a receber e cada pendência. Toque numa para registrar um pagamento (total ou parcial); o saldo é recalculado sozinho.',
@@ -954,7 +954,6 @@ function comandaPanel(ctx) {
   const config = store.getConfig();
   const es = store.toEngineStore();
   const lens = estimateLens(config);
-  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return 0; } };
   const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
 
   const date = ctx.view.comandaDate || todayInput();
@@ -988,21 +987,21 @@ function comandaPanel(ctx) {
 
   const indEl = el('div', { class: 'pa-comanda-ind', 'data-testid': 'cmd-indicadores' });
   function recompute() {
-    let fat = 0, cst = 0, totalPrev = 0, totalReal = 0;
+    let custo = 0, totalPrev = 0, totalProd = 0, disponivel = 0;
     for (const pid of pids) {
-      const r = real.get(pid)?.realizado || 0;
-      fat += r * suggested(pid); cst += r * unitCost(pid);
-      totalPrev += prev.get(pid) || 0; totalReal += r;
+      const prod = real.get(pid)?.realizado || 0;
+      const previsto = prev.get(pid) || 0;
+      custo += prod * unitCost(pid);
+      totalPrev += previsto; totalProd += prod;
+      disponivel += Math.max(0, prod - previsto);  // produced beyond what was ordered → free to sell
     }
-    const lucro = fat - cst - fat * (config.paymentFeePct || 0);
     indEl.replaceChildren(
       el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Previsto · Realizado' }), el('td', { class: 'pa-num', text: `${fmtNum(totalPrev)} · ${fmtNum(totalReal)}` })]),
-        el('tr', {}, [el('td', { text: 'Faturamento realizado' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-faturamento', text: brl(fat) })]),
-        el('tr', {}, [el('td', { text: 'Custo realizado' }), el('td', { class: 'pa-num', text: brl(cst) })]),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Lucro realizado' }), el('td', { class: 'pa-num' + (lucro >= 0 ? '' : ' pa-bad'), 'data-testid': 'cmd-lucro', text: brl(lucro) })]),
+        el('tr', {}, [el('td', { text: 'Previsto · Produzido' }), el('td', { class: 'pa-num', text: `${fmtNum(totalPrev)} · ${fmtNum(totalProd)}` })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Disponível para venda' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-disponivel', text: `${fmtNum(disponivel)} un` })]),
+        el('tr', {}, [el('td', { text: 'Custo de produção' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-custo', text: brl(custo) })]),
       ]),
-      el('p', { class: 'pa-hint', text: 'Faturamento e lucro contam só o que você produziu de verdade (realizado), pelo preço sugerido. O dinheiro que entrou de fato aparece no Fiado/Relatórios.' }),
+      el('p', { class: 'pa-hint', text: 'Produzido = o que você FEZ (não o que vendeu). O que passou do previsto fica disponível para vender avulso. O dinheiro recebido e o lucro do mês ficam no Fiado/Relatórios.' }),
     );
   }
 
@@ -1015,7 +1014,7 @@ function comandaPanel(ctx) {
       const rInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: cur.realizado ? fmtNum(cur.realizado) : '', 'aria-label': 'realizado' });
       const chk = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); chk.checked = cur.feito;
       const exced = el('span', { class: 'pa-muted pa-exced' });
-      const updExced = () => { const r = real.get(pid)?.realizado || 0; const d = r - previsto; exced.textContent = d > 0 ? `sobra ${fmtNum(d)}` : (r > 0 && d < 0 ? `falta ${fmtNum(-d)}` : ''); };
+      const updExced = () => { const r = real.get(pid)?.realizado || 0; const d = r - previsto; exced.textContent = d > 0 ? `disponível: ${fmtNum(d)}` : (r > 0 && d < 0 ? `faltam ${fmtNum(-d)}` : ''); };
       rInput.addEventListener('input', () => {
         const v = parseNum(rInput.value) || 0;
         real.set(pid, { realizado: v, feito: real.get(pid)?.feito || false });
@@ -1060,10 +1059,10 @@ function comandaPanel(ctx) {
       el('h2', { class: 'pa-grow', text: 'Comanda do dia' }),
       dateInput,
     ]),
-    el('p', { class: 'pa-hint', text: 'O que produzir hoje. Previsto vem das encomendas do dia; marque feito e anote quanto saiu de verdade (realizado) — sobra/falta aparece ao lado.' }),
+    el('p', { class: 'pa-hint', text: 'O que produzir hoje. Previsto vem das encomendas do dia; marque ✓ e anote quanto você PRODUZIU — o que passar do previsto fica disponível para vender avulso.' }),
     el('table', { class: 'pa-comanda' }, [
       el('thead', {}, el('tr', {}, [
-        el('th', { text: 'Produto' }), el('th', { class: 'pa-num', text: 'Prev.' }), el('th', { class: 'pa-num', text: 'Saiu' }), el('th', { class: 'pa-center', text: '✓' }),
+        el('th', { text: 'Produto' }), el('th', { class: 'pa-num', text: 'Prev.' }), el('th', { class: 'pa-num', text: 'Produzi' }), el('th', { class: 'pa-center', text: '✓' }),
       ])),
       body,
     ]),
