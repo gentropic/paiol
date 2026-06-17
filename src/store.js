@@ -11,9 +11,29 @@ import { toYaml, fromYaml } from './yaml-bridge.js';
 export const SCHEMA_VERSION = 1;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'reversals'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'reversals'];
 /** Mutable master-data collections (§2.1). */
-const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas'];
+const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas', 'categories'];
+
+/**
+ * Seed financial categories (Rev 06) — the user reshapes them freely afterwards. `{name, kind}`
+ * pairs; ids are assigned at seed time (the app seeds these once if `categories` is empty).
+ * @type {Array<{name: string, kind: import('./domain.js').Category['kind']}>}
+ */
+export const DEFAULT_CATEGORIES = [
+  { name: 'Vendas', kind: 'receita' },
+  { name: 'Aluguel', kind: 'despesaFixa' },
+  { name: 'Energia elétrica', kind: 'despesaFixa' },
+  { name: 'Água', kind: 'despesaFixa' },
+  { name: 'Internet', kind: 'despesaFixa' },
+  { name: 'Pró-labore', kind: 'despesaFixa' },
+  { name: 'Matéria-prima', kind: 'despesaVariavel' },
+  { name: 'Embalagens', kind: 'despesaVariavel' },
+  { name: 'Gás', kind: 'despesaVariavel' },
+  { name: 'Frete', kind: 'despesaVariavel' },
+  { name: 'Salários', kind: 'despesaVariavel' },
+  { name: 'Outras', kind: 'despesaVariavel' },
+];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 
 /**
@@ -49,8 +69,8 @@ export function emptyState() {
   return {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
-    ingredients: [], recipes: [], products: [], clients: [], encomendas: [], comandas: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], reversals: [],
+    ingredients: [], recipes: [], products: [], clients: [], encomendas: [], comandas: [], categories: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], reversals: [],
   };
 }
 
@@ -147,6 +167,8 @@ export class PaiolStore {
   upsertEncomenda(x) { return this._upsert('encomendas', x); }
   /** @param {import('./domain.js').Comanda} x */
   upsertComanda(x) { return this._upsert('comandas', x); }
+  /** @param {import('./domain.js').Category} x */
+  upsertCategory(x) { return this._upsert('categories', x); }
 
   removeIngredient(id) { return this._remove('ingredients', id); }
   removeRecipe(id) { return this._remove('recipes', id); }
@@ -154,6 +176,7 @@ export class PaiolStore {
   removeClient(id) { return this._remove('clients', id); }
   removeEncomenda(id) { return this._remove('encomendas', id); }
   removeComanda(id) { return this._remove('comandas', id); }
+  removeCategory(id) { return this._remove('categories', id); }
 
   // ── Events (append-only) ─────────────────────────────────────────────────────
 
@@ -169,6 +192,8 @@ export class PaiolStore {
   addPerda(ev) { return this._append('perdas', ev); }
   /** @param {import('./domain.js').Pagamento} ev — a (partial) payment toward an encomenda. */
   addPayment(ev) { return this._append('payments', ev); }
+  /** @param {import('./domain.js').Despesa} ev — a dated cash expense (fixa/variável via its category). */
+  addDespesa(ev) { return this._append('despesas', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
 

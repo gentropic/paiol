@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PaiolStore, emptyState, StoreError } from '../src/store.js';
+import { PaiolStore, emptyState, StoreError, DEFAULT_CATEGORIES } from '../src/store.js';
 import { recipeUnitCost, estimateLens } from '../src/cost-engine.js';
 
 function seeded() {
@@ -127,6 +127,51 @@ test('encomendas are mutable master data that round-trip (Rev 04)', () => {
   s.upsertEncomenda({ ...s.get('encomendas', 'e1'), notes: 'editado' });
   assert.equal(s.get('encomendas', 'e1').notes, 'editado');
   assert.equal(s.state.encomendas.length, 1);
+});
+
+test('categorias: master CRUD, subcategoria via parentId, soft-archive, round-trip (Rev 06)', () => {
+  const s = new PaiolStore();
+  s.upsertCategory({ id: 'fixa', name: 'Despesas Fixas', kind: 'despesaFixa' });
+  s.upsertCategory({ id: 'aluguel', name: 'Aluguel', kind: 'despesaFixa', parentId: 'fixa' });
+  assert.equal(s.get('categories', 'aluguel').parentId, 'fixa');
+  // edit in place (mutable master)
+  s.upsertCategory({ ...s.get('categories', 'aluguel'), name: 'Aluguel + condomínio' });
+  assert.equal(s.get('categories', 'aluguel').name, 'Aluguel + condomínio');
+  // soft-archive keeps the record (so old lançamentos stay labeled)
+  s.upsertCategory({ ...s.get('categories', 'aluguel'), archived: true });
+  assert.equal(s.get('categories', 'aluguel').archived, true);
+  assert.equal(s.state.categories.length, 2);
+  const back = PaiolStore.fromYaml(s.toYaml());           // canonical YAML sorts master by id
+  assert.equal(back.state.categories.length, 2);
+  assert.deepEqual(back.get('categories', 'aluguel'), s.get('categories', 'aluguel'));
+  assert.deepEqual(back.get('categories', 'fixa'), s.get('categories', 'fixa'));
+  // hard-remove still possible
+  s.removeCategory('aluguel');
+  assert.equal(s.get('categories', 'aluguel'), undefined);
+});
+
+test('despesas: append-only cash expenses classified by category; round-trip + estorno (Rev 06)', () => {
+  const s = new PaiolStore();
+  s.upsertCategory({ id: 'gas', name: 'Gás', kind: 'despesaVariavel' });
+  s.addDespesa({ id: 'd1', at: '2026-06-10', valor: 90, categoryId: 'gas', description: 'botijão' });
+  s.addDespesa({ id: 'd2', at: '2026-06-12', valor: 700, categoryId: 'gas' });
+  assert.equal(s.state.despesas.length, 2);
+  assert.throws(() => s.addDespesa({ id: 'd1', at: '2026-06-13', valor: 1, categoryId: 'gas' }), StoreError); // dup id
+  assert.throws(() => s.addDespesa({ valor: 1, categoryId: 'gas' }), StoreError);                              // needs id+at
+  // estorno reuses the Reversal mechanism
+  s.addReversal({ id: 'rv1', at: '2026-06-14', kind: 'despesa', refId: 'd2' });
+  assert.equal(s.isReversed('despesa', 'd2'), true);
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.state.despesas, s.state.despesas);
+  assert.equal(back.isReversed('despesa', 'd2'), true);
+});
+
+test('DEFAULT_CATEGORIES seed: covers the four buckets, valid kinds (Rev 06)', () => {
+  const kinds = new Set(DEFAULT_CATEGORIES.map((c) => c.kind));
+  assert.ok(kinds.has('despesaFixa') && kinds.has('despesaVariavel') && kinds.has('receita'));
+  assert.ok(DEFAULT_CATEGORIES.some((c) => c.name === 'Pró-labore' && c.kind === 'despesaFixa'));
+  assert.ok(DEFAULT_CATEGORIES.some((c) => c.name === 'Gás' && c.kind === 'despesaVariavel'));
+  for (const c of DEFAULT_CATEGORIES) assert.match(c.kind, /^(receita|despesaFixa|despesaVariavel|perda)$/);
 });
 
 test('comandas are master data keyed by date: round-trip + remove (Rev 04)', () => {

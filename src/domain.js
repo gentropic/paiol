@@ -138,6 +138,19 @@
  * @property {ComandaItem[]} itens
  */
 
+/**
+ * Categoria financeira (Rev 06) — user-definable. Four fixed top-level KINDS give the accounting
+ * backbone; within each, the user freely creates/edits/archives categorias and subcategorias
+ * (`parentId` nests a subcategory under its parent of the same kind). Archived (not hard-deleted)
+ * once used, so historical {@link Despesa} lançamentos stay labeled.
+ * @typedef {object} Category
+ * @property {string} id
+ * @property {string} name
+ * @property {'receita'|'despesaFixa'|'despesaVariavel'|'perda'} kind
+ * @property {string}  [parentId]   // subcategory → its parent category (same kind)
+ * @property {boolean} [archived]   // hidden from pickers; kept so old lançamentos stay labeled
+ */
+
 // ── Events (append-only, immutable; §2.2) ──
 
 /**
@@ -200,6 +213,20 @@
  */
 
 /**
+ * Despesa — a dated cash expense lançamento (Rev 06, cash-basis result). Append-only money fact: it
+ * hits the month it is lançada. The referenced {@link Category}'s kind (despesaFixa / despesaVariavel)
+ * classifies it. Matéria-prima, embalagens, gás, frete assumido, aluguel, pró-labore, salários… are
+ * ALL despesas here — the recipe unit-cost is for PRICING only and never enters the monthly result
+ * (this separation is what guarantees no duplicity, §9).
+ * @typedef {object} Despesa
+ * @property {string} id
+ * @property {string} at            // ISO date — when it was lançada
+ * @property {number} valor         // BRL
+ * @property {string} categoryId
+ * @property {string} [description]
+ */
+
+/**
  * Pagamento — a (partial) payment toward an {@link Encomenda} (Rev 04). Append-only, immutable; a
  * correction is an estorno (Reversal kind 'payment'). The order's pago/saldo are DERIVED from the
  * sum of payments, never stored — so they can't drift.
@@ -218,7 +245,7 @@
  * @typedef {object} Reversal
  * @property {string} id
  * @property {string} at
- * @property {'sale'|'batch'|'variableCost'|'perda'|'payment'} kind
+ * @property {'sale'|'batch'|'variableCost'|'perda'|'payment'|'despesa'} kind
  * @property {string} refId
  */
 
