@@ -174,6 +174,17 @@ test('DEFAULT_CATEGORIES seed: covers the four buckets, valid kinds (Rev 06)', (
   for (const c of DEFAULT_CATEGORIES) assert.match(c.kind, /^(receita|despesaFixa|despesaVariavel|perda)$/);
 });
 
+test('config.empresa: patches independently of engine settings, round-trips (Rev 06)', () => {
+  const s = new PaiolStore();
+  s.setConfig({ valorHora: 25 });
+  s.setConfig({ empresa: { nome: 'Quitutes do Paiol', cnpj: '35.973.314/0001-55', endereco: 'Rua X', telefone: '11999', responsavel: 'Nayara', logo: 'data:image/png;base64,AAAA' } });
+  assert.equal(s.getConfig().valorHora, 25);                 // empresa patch didn't clobber engine config
+  assert.equal(s.getConfig().empresa.nome, 'Quitutes do Paiol');
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.getConfig().empresa, s.getConfig().empresa);
+  assert.equal(back.getConfig().valorHora, 25);
+});
+
 test('comandas are master data keyed by date: round-trip + remove (Rev 04)', () => {
   const s = new PaiolStore();
   s.upsertComanda({ id: '2026-06-18', date: '2026-06-18', itens: [{ productId: 'p1', realizado: 6, feito: true }] });

@@ -812,6 +812,45 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Rev 06: dados da empresa (+ logo) feed a recibo PDF (Slice 5)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // product "Pãozinho"
+
+    // Fill empresa data + upload a tiny PNG logo (inline buffer → works in CI; no personal/ asset).
+    await page.locator('.pa-navbtn[data-section="ajustes"]').click();
+    await page.waitForSelector('[data-testid="emp-nome"]');
+    await page.fill('[data-testid="emp-nome"]', 'Quitutes do Paiol');
+    await page.fill('[data-testid="emp-cnpj"]', '00.000.000/0001-00');
+    await page.fill('[data-testid="emp-responsavel"]', 'Nayara');
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    await page.setInputFiles('[data-testid="emp-logo-file"]', { name: 'logo.png', mimeType: 'image/png', buffer: png });
+    await page.waitForSelector('.pa-logo-img');
+    await page.click('[data-testid="emp-save"]');
+
+    // An order + a payment, then generate the recibo (header now carries the empresa data + logo).
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.waitForSelector('[data-testid="enc-save"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão');
+    await page.click('[data-testid="enc-prodresult"]');
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.click('.pa-row-item');
+    await page.waitForSelector('[data-testid="enc-pagar"]');
+    await page.click('[data-testid="enc-pagar"]');
+    await page.waitForSelector('[data-testid="pag-add"]');
+    await page.fill('[data-testid="pag-valor"]', '5');
+    await page.click('[data-testid="pag-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await page.click('.pa-row-item');
+    await page.waitForSelector('[data-testid="gerar-recibo"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-recibo"]')]);
+    assert.match(dl.suggestedFilename(), /^recibo-.*\.pdf$/);
+    assert.equal((await readFile(await dl.path())).slice(0, 5).toString(), '%PDF-', 'recibo with logo not a valid PDF');
+    await page.close();
+  });
+
   test('Rev 04: pagamento parcial deriva saldo + status (encomenda → fiado)', async () => {
     const page = await context.newPage();
     await seedBusiness(page); // product "Pãozinho"

@@ -79,11 +79,13 @@ export async function generateFichasPdf(fichas) {
 
 /**
  * Build a single-page recibo (payment proof). Explicitly NOT a nota fiscal — a recibo has no rigid
- * legal format; this attests "recebemos de X a quantia de R$Y". Framed card, business header, the
- * recebemos sentence, an optional item table, totals (pago/saldo), a signature line + disclaimer.
+ * legal format; this attests "recebemos de X a quantia de R$Y". Framed card with the empresa header
+ * (logo + nome + CNPJ/endereço/telefone), the recebemos sentence, optional item table, totals
+ * (pago/saldo/forma), optional observações, and a signature line (responsável) + disclaimer.
  * @param {{numero?:string, date:string, clientName:string, clientContato?:string,
  *   items?:Array<{name:string,qty:number,unitPrice:number,total:number}>, referente:string,
- *   total:number, pago:number, saldo:number, forma?:string}} r
+ *   total:number, pago:number, saldo:number, forma?:string, observacoes?:string,
+ *   empresa?:{nome?:string,cnpj?:string,endereco?:string,telefone?:string,responsavel?:string,logo?:string}}} r
  * @returns {Promise<Uint8Array>}
  */
 export async function generateReciboPdf(r) {
@@ -103,15 +105,33 @@ export async function generateReciboPdf(r) {
 
   // Content is drawn first (tracking y); the framing rectangle is drawn LAST, sized to the content,
   // so a short recibo doesn't leave a big empty box.
+  const emp = r.empresa || {};
   const cardTop = A4[1] - M;
-  // Header band
-  page.drawLine({ start: { x: padL, y: cardTop - 40 }, end: { x: padR, y: cardTop - 40 }, thickness: 2, color: terr });
-  page.drawText('Quitutes do Paiol', { x: padL, y: cardTop - 32, size: 15, font: bold, color: terr });
-  rightText('RECIBO', padR, cardTop - 32, 13, bold, soft);
-  let y = cardTop - 40 - 22;
-  page.drawText(`Data: ${r.date}`, { x: padL, y, size: 9, font, color: soft });
-  if (r.numero) rightText(r.numero, padR, y, 9, font, soft);
+  let y = cardTop - 10;
+
+  // Logo (optional) — top-left, aspect-preserved. Bad/unsupported image just skips.
+  if (emp.logo) {
+    try {
+      const img = /^data:image\/jpe?g/i.test(emp.logo) ? await doc.embedJpg(emp.logo) : await doc.embedPng(emp.logo);
+      const w = Math.min(130, img.width); const h = img.height * (w / img.width);
+      page.drawImage(img, { x: padL, y: y - h, width: w, height: h });
+      y -= h + 8;
+    } catch { /* unreadable logo → skip */ }
+  }
+
+  // Empresa name (left) + RECIBO (right); then CNPJ/endereço/telefone; then data + número; rule.
+  const nome = emp.nome || 'Quitutes do Paiol';
+  page.drawText(trunc(nome, 46), { x: padL, y: y - 13, size: 14, font: bold, color: terr });
+  rightText('RECIBO', padR, y - 11, 13, bold, soft);
   y -= 28;
+  for (const ln of [emp.cnpj && `CNPJ ${emp.cnpj}`, emp.endereco, emp.telefone].filter(Boolean)) {
+    page.drawText(trunc(ln, 84), { x: padL, y, size: 8.5, font, color: soft }); y -= 11;
+  }
+  page.drawText(`Data: ${r.date}`, { x: padL, y: y - 2, size: 9, font, color: soft });
+  if (r.numero) rightText(r.numero, padR, y - 2, 9, font, soft);
+  y -= 11;
+  page.drawLine({ start: { x: padL, y }, end: { x: padR, y }, thickness: 2, color: terr });
+  y -= 22;
 
   // The recebemos sentence.
   page.drawText('Recebemos de', { x: padL, y, size: 11, font, color: fg });
@@ -147,14 +167,21 @@ export async function generateReciboPdf(r) {
   if (r.saldo > 0.005) kv('Saldo restante', money(r.saldo), false, rgb(0.70, 0.15, 0.12));
   else kv('Situação', 'QUITADO', true, rgb(0.18, 0.45, 0.20));
 
+  // Optional observações.
+  if (r.observacoes) {
+    y -= 2;
+    page.drawText(trunc(`Obs.: ${r.observacoes}`, 92), { x: padL, y, size: 9, font, color: soft });
+    y -= 14;
+  }
+
   // Frame the card around the content just drawn (border only — page is already white).
   const cardBottom = y - 4;
   page.drawRectangle({ x: M, y: cardBottom, width: right - M, height: cardTop - cardBottom, borderColor: line, borderWidth: 1 });
 
-  // Signature line + disclaimer (below the card).
+  // Signature line + responsável + disclaimer (below the card).
   const sy = cardBottom - 48;
   page.drawLine({ start: { x: padL, y: sy }, end: { x: padL + 220, y: sy }, thickness: 0.7, color: soft });
-  page.drawText('Quitutes do Paiol', { x: padL, y: sy - 12, size: 9, font, color: soft });
+  page.drawText(trunc(emp.responsavel || nome, 50), { x: padL, y: sy - 12, size: 9, font, color: soft });
   page.drawText('Comprovante de pagamento — não substitui nota fiscal.', { x: M, y: cardBottom - 84, size: 8, font, color: soft });
 
   return doc.save();

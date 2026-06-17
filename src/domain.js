@@ -261,6 +261,19 @@
  * @property {number} paymentFeePct          // 0..1, goes in the markup divisor
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
  * @property {'active-time'|'total-time'} [rateioBase] // default 'active-time' (§4.3; 'per-unit' deferred)
+ * @property {Empresa} [empresa]             // Dados da empresa (Rev 06) — recibo header; filled in Ajustes
+ */
+
+/**
+ * Dados da empresa (Rev 06) — recibo header. User-filled in Ajustes, persisted with config; never
+ * hardcoded in shipped source. `logo` is a data: URL (PNG/JPG).
+ * @typedef {object} Empresa
+ * @property {string} [nome]
+ * @property {string} [cnpj]
+ * @property {string} [endereco]
+ * @property {string} [telefone]
+ * @property {string} [responsavel]
+ * @property {string} [logo]
  */
 
 export {}; // types-only module

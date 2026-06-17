@@ -1453,6 +1453,8 @@ function buildRecibo(store, enc) {
     pago: st.paid,
     saldo: st.saldo,
     forma: formas.size === 1 ? [...formas][0] : undefined,
+    observacoes: enc.notes || undefined,
+    empresa: store.getConfig().empresa || undefined,
   };
 }
 
@@ -2009,8 +2011,62 @@ function ajustesPanel(ctx) {
       field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct)),
       el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar ajustes')]),
     ]),
+    empresaCard(ctx),
     dadosCard(ctx),
     dropboxPanel(ctx),
+  ]);
+}
+
+// Dados da empresa (Rev 06) — recibo header. Stored in config (synced/backed up), never in source.
+function empresaCard(ctx) {
+  const emp = ctx.store.getConfig().empresa || {};
+  let logo = emp.logo || '';
+  const f = {};
+  const tf = (key, label, ph) => {
+    const i = el('input', { class: 'pa-input', 'data-testid': `emp-${key}`, type: 'text', placeholder: ph || '', value: emp[key] || '' });
+    f[key] = i;
+    return el('div', { class: 'pa-field' }, [el('label', { text: label }), i]);
+  };
+  const preview = el('div', { class: 'pa-logo-preview' });
+  const renderPreview = () => preview.replaceChildren(logo
+    ? el('img', { src: logo, alt: 'logo', class: 'pa-logo-img' })
+    : el('span', { class: 'pa-hint', text: 'Sem logo ainda.' }));
+  renderPreview();
+  const fileInput = el('input', {
+    type: 'file', accept: 'image/png,image/jpeg', style: 'display:none', 'data-testid': 'emp-logo-file',
+    onchange: (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => { logo = String(reader.result); renderPreview(); };
+      reader.readAsDataURL(file);
+      e.target.value = '';
+    },
+  });
+  function save() {
+    ctx.actions.setConfig({ empresa: {
+      nome: f.nome.value.trim(), cnpj: f.cnpj.value.trim(), endereco: f.endereco.value.trim(),
+      telefone: f.telefone.value.trim(), responsavel: f.responsavel.value.trim(), logo,
+    } });
+  }
+  return el('section', { class: 'pa-card' }, [
+    el('h2', { text: 'Dados da empresa' }),
+    el('p', { class: 'pa-hint', text: 'Aparecem no cabeçalho do recibo. Ficam só no seu aparelho e no backup — não vão pro código.' }),
+    tf('nome', 'Nome', 'Quitutes do Paiol'),
+    tf('cnpj', 'CNPJ / MEI', '00.000.000/0001-00'),
+    tf('endereco', 'Endereço'),
+    tf('telefone', 'Telefone / contato'),
+    tf('responsavel', 'Responsável'),
+    el('div', { class: 'pa-field' }, [
+      el('label', { text: 'Logo' }),
+      preview,
+      el('div', { class: 'pa-row pa-form' }, [
+        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'emp-logo-btn', onclick: () => fileInput.click() }, 'Escolher imagem'),
+        logo && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { logo = ''; renderPreview(); } }, 'Remover'),
+      ].filter(Boolean)),
+      fileInput,
+    ]),
+    el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', 'data-testid': 'emp-save', onclick: save }, 'Salvar dados da empresa')]),
   ]);
 }
 

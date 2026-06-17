@@ -49,6 +49,9 @@ export const DEFAULT_CONFIG = {
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
   rateioBase: 'active-time',
+  // Dados da empresa (Rev 06) — she fills these in Ajustes; they appear on the recibo header. Empty
+  // by default (never hardcode real CNPJ/owner). `logo` is a data: URL (PNG/JPG) stored with the data.
+  empresa: { nome: '', cnpj: '', endereco: '', telefone: '', responsavel: '', logo: '' },
 };
 const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
 
