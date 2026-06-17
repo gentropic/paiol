@@ -12,7 +12,7 @@ import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
+  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, logMonth: null, comandaDate: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
@@ -69,11 +69,15 @@ export async function boot(root) {
     setTab(tab) { view.tab = tab; view.status = null; view.modal = null; view.logMonth = null; rerender(); },
     setReportMonth(month) { view.reportMonth = month; rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
+    setComandaDate(date) { view.comandaDate = date; rerender(); },
     // Modal/bottom-sheet (add/edit forms, confirmations).
     openModal(modal) { view.modal = modal; rerenderModal(); },
     closeModal() { view.modal = null; rerenderModal(); },
     // Generic business mutation: run fn(store), persist locally (debounced) + sync (debounced), re-render.
     mutate(fn) { fn(store); view.modal = null; saver.schedule(); scheduleSync(); rerender(); },
+    // Like mutate but WITHOUT a re-render — for in-place edits (the comanda's realizado/feito inputs)
+    // that update their own DOM, so the panel must not rebuild under them (keeps input focus).
+    persist(fn) { fn(store); saver.schedule(); scheduleSync(); },
     setConfig(partial) { store.setConfig(partial); saver.schedule(); scheduleSync(); view.status = 'Ajustes salvos.'; rerender(); },
     importData(text) {
       const r = importYaml(store, text);

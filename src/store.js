@@ -13,7 +13,7 @@ export const SCHEMA_VERSION = 1;
 /** Append-only, immutable event collections (§2.2). */
 const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'reversals'];
 /** Mutable master-data collections (§2.1). */
-const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas'];
+const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas'];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 
 /**
@@ -49,7 +49,7 @@ export function emptyState() {
   return {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
-    ingredients: [], recipes: [], products: [], clients: [], encomendas: [],
+    ingredients: [], recipes: [], products: [], clients: [], encomendas: [], comandas: [],
     priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], reversals: [],
   };
 }
@@ -145,12 +145,15 @@ export class PaiolStore {
   upsertClient(x) { return this._upsert('clients', x); }
   /** @param {import('./domain.js').Encomenda} x */
   upsertEncomenda(x) { return this._upsert('encomendas', x); }
+  /** @param {import('./domain.js').Comanda} x */
+  upsertComanda(x) { return this._upsert('comandas', x); }
 
   removeIngredient(id) { return this._remove('ingredients', id); }
   removeRecipe(id) { return this._remove('recipes', id); }
   removeProduct(id) { return this._remove('products', id); }
   removeClient(id) { return this._remove('clients', id); }
   removeEncomenda(id) { return this._remove('encomendas', id); }
+  removeComanda(id) { return this._remove('comandas', id); }
 
   // ── Events (append-only) ─────────────────────────────────────────────────────
 

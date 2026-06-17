@@ -27,12 +27,12 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Fornadas: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Custos: 'operacao', Perdas: 'operacao',
+  Comanda: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Custos: 'operacao', Perdas: 'operacao',
   Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
-  Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Fornadas: 'fornadas',
+  Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Comanda: 'comanda',
   Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Custos: 'custos', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
@@ -87,19 +87,6 @@ async function addProduto(page, { name, pkg, pkgDesc, comp } = {}) {
     await page.waitForSelector('.pa-sheet .pa-list-item');
   }
   await page.click('[data-testid="prod-save"]');
-  await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-}
-
-// Log a fornada via the "+ Registrar" bottom sheet. (Must be on the Fornadas screen.)
-async function addFornada(page, { recipe, units, active, oven, date } = {}) {
-  await page.click('[data-testid="forn-new"]');
-  await page.waitForSelector('[data-testid="forn-add"]');
-  if (recipe) await page.selectOption('[data-testid="forn-recipe"]', { label: recipe });
-  if (date) await page.fill('[data-testid="forn-date"]', date);
-  if (units != null) await page.fill('[data-testid="forn-units"]', String(units));
-  if (active != null) await page.fill('[data-testid="forn-active"]', String(active));
-  if (oven != null) await page.fill('[data-testid="forn-oven"]', String(oven));
-  await page.click('[data-testid="forn-add"]');
   await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 }
 
@@ -297,19 +284,13 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('log a fornada and a venda (actuals), with running totals', async () => {
+  test('log a venda (actuals), with running totals', async () => {
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 
     await seedBusiness(page);
-
-    // Fornada for the recipe.
-    await goto(page, 'Fornadas');
-    await addFornada(page, { recipe: 'Pão', units: 9, active: 35 });
-    await page.waitForSelector('.pa-list-item');
-    assert.match(await page.textContent('.pa-list'), /Pão/);
 
     // Venda — price comes pre-filled from the suggested price; just register.
     await goto(page, 'Vendas');
@@ -326,6 +307,49 @@ describe('paiol UI smoke', () => {
     assert.match(await page.textContent('.pa-list'), /Pãozinho/);
 
     assert.deepEqual(errors, [], `errors during actuals flow: ${errors.join(' | ')}`);
+    await page.close();
+  });
+
+  test('Rev 04: comanda do dia — previsto from orders, realizado persists, indicators (Slice 5)', async () => {
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+
+    await seedBusiness(page); // product "Pãozinho" (priced)
+
+    // An order delivered today (default delivery date = today, same as comanda's default).
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.waitForSelector('[data-testid="enc-save"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão');
+    await page.click('[data-testid="enc-prodresult"]');
+    await page.waitForSelector('.pa-encitem');
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    // Comanda for today picks up the order as previsto.
+    await goto(page, 'Comanda');
+    await page.waitForSelector('.pa-comanda tbody tr');
+    assert.match(await page.textContent('.pa-comanda'), /Pãozinho/, 'comanda did not derive previsto from the order');
+
+    // Fill realizado + mark feito; indicators reflect realized production.
+    await page.fill('[data-testid="cmd-realizado"]', '2');
+    await page.check('[data-testid="cmd-feito"]');
+    await page.waitForFunction(() => {
+      const el = document.querySelector('[data-testid="cmd-faturamento"]');
+      return el && /R\$\s*[1-9]/.test(el.textContent);
+    });
+    assert.match(await page.textContent('[data-testid="cmd-lucro"]'), /R\$/);
+
+    // realizado persists across reload (saved without re-render via ctx.actions.persist).
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Comanda');
+    await page.waitForSelector('[data-testid="cmd-realizado"]');
+    assert.equal(await page.inputValue('[data-testid="cmd-realizado"]'), '2', 'realizado did not persist');
+
+    assert.deepEqual(errors, [], `errors in comanda flow: ${errors.join(' | ')}`);
     await page.close();
   });
 
@@ -548,7 +572,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('.pa-bottomnav');
     assert.match(await page.textContent('.pa-card'), /Este mês/);        // lands on Início dashboard
 
-    await page.click('[data-testid="home-venda"]');                       // quick action → Operação/Vendas
+    await page.click('[data-testid="home-encomenda"]');                   // quick action → Operação/Encomendas
     await page.waitForSelector('.pa-navbtn[data-section="operacao"].active');
 
     await page.click('.pa-navbtn[data-section="cadastros"]');             // bottom nav → Cadastro

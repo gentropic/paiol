@@ -122,6 +122,22 @@
  * @property {string} [notes]
  */
 
+/**
+ * Comanda do dia — the day's production list (Rev 04). `previsto` is DERIVED live from that day's
+ * encomendas; only the `realizado` quantity + `feito` check are STORED (per product), so the comanda
+ * stays in sync as orders change. Avulso items (made to sell, not ordered) appear with previsto 0.
+ * Keyed by date (id = the YYYY-MM-DD).
+ * @typedef {object} ComandaItem
+ * @property {string} productId
+ * @property {number} realizado
+ * @property {boolean} feito
+ *
+ * @typedef {object} Comanda
+ * @property {string} id            // = date (YYYY-MM-DD)
+ * @property {string} date
+ * @property {ComandaItem[]} itens
+ */
+
 // ── Events (append-only, immutable; §2.2) ──
 
 /**

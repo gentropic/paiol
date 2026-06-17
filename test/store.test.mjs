@@ -129,6 +129,21 @@ test('encomendas are mutable master data that round-trip (Rev 04)', () => {
   assert.equal(s.state.encomendas.length, 1);
 });
 
+test('comandas are master data keyed by date: round-trip + remove (Rev 04)', () => {
+  const s = new PaiolStore();
+  s.upsertComanda({ id: '2026-06-18', date: '2026-06-18', itens: [{ productId: 'p1', realizado: 6, feito: true }] });
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.state.comandas, s.state.comandas);
+  assert.equal(back.get('comandas', '2026-06-18').itens[0].realizado, 6);
+  assert.equal(back.get('comandas', '2026-06-18').itens[0].feito, true);
+  // mutable, keyed by the date string
+  s.upsertComanda({ id: '2026-06-18', date: '2026-06-18', itens: [{ productId: 'p1', realizado: 7, feito: true }] });
+  assert.equal(s.get('comandas', '2026-06-18').itens[0].realizado, 7);
+  assert.equal(s.state.comandas.length, 1);
+  s.removeComanda('2026-06-18');
+  assert.equal(s.get('comandas', '2026-06-18'), undefined);
+});
+
 test('payments: saldo/status derive from append-only payments; estorno reverses (Rev 04)', () => {
   const s = new PaiolStore();
   s.upsertEncomenda({ id: 'e1', at: '2026-06-16', deliveryDate: '2026-06-18', itens: [], total: 100, costSnapshot: 40 });

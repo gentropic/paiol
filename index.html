@@ -161,6 +161,21 @@
     .pa-check { display: flex; align-items: center; gap: 8px; margin: 8px 2px; }
     .pa-check input { width: 20px; height: 20px; }
 
+    /* Rev 04: comanda do dia (production table) */
+    .pa-comanda { width: 100%; border-collapse: collapse; margin: 6px 0 4px; }
+    .pa-comanda th { text-align: left; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em;
+      color: var(--au-fg-soft); font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--au-border); }
+    .pa-comanda th.pa-num { text-align: right; } .pa-comanda th.pa-center { text-align: center; }
+    .pa-comanda td { padding: 7px 6px; border-bottom: 1px solid var(--au-border); vertical-align: middle; }
+    .pa-comanda td.pa-center { text-align: center; }
+    .pa-comanda td.pa-prev { color: var(--au-fg-soft); white-space: nowrap; }
+    .pa-comanda .pa-qty { width: 56px; text-align: center; padding: 6px 4px; }
+    .pa-comanda input[type=checkbox] { width: 22px; height: 22px; }
+    .pa-comanda tr.pa-done td:first-child div:first-child { color: var(--au-fg-soft); }
+    .pa-exced { display: block; font-size: 0.74rem; color: var(--au-fg-soft); }
+    .pa-comanda-ind { margin-top: 10px; }
+    .pa-cardhead [data-testid="cmd-date"] { width: 9.5em; }  /* fit the full date (pa-narrow clips the year) */
+
     /* Lote 1: search, edit, history, observação */
     .pa-search { width: 100%; margin: 0 0 10px; }
     .pa-list-item.pa-stack { display: block; }

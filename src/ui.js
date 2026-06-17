@@ -28,7 +28,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['fornadas', 'Fornadas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['comanda', 'Comanda'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -39,7 +39,7 @@ for (const sec of SECTIONS) for (const [sid] of sec.screens) SECTION_OF[sid] = s
 // concept answers. The ? button opens it with the current screen's topic expanded.
 const HELP_SCREENS = [
   { id: 'inicio', icon: '🏠', label: 'Início', paras: [
-    'Sua visão geral do mês: quanto você vendeu e lucrou, avisos (como insumos sem preço) e atalhos pra registrar uma venda ou fornada na hora.',
+    'Sua visão geral do mês: quanto você vendeu e lucrou, avisos (como insumos sem preço) e atalhos pra lançar uma encomenda ou abrir a comanda do dia.',
   ] },
   { id: 'insumos', icon: '🧺', label: 'Insumos', paras: [
     'Tudo que você compra pra produzir — farinha, ovos, chocolate — e também embalagens e itens prontos de revenda (bombom, laço, cartãozinho). Cadastre cada um com a unidade de compra e o preço.',
@@ -60,13 +60,13 @@ const HELP_SCREENS = [
     'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
     'Se aparecer “sem preço”, é porque falta cadastrar o preço de algum insumo usado.',
   ] },
-  { id: 'fornadas', icon: '🔥', label: 'Fornadas', paras: [
-    'Registre o que você produziu de verdade. Quantas unidades saíram ajusta o custo real por unidade (o custo do lote dividido pelo que rendeu).',
-    'Os minutos já vêm da receita — mude só se foi diferente. É um registro: pra corrigir, lance uma nova fornada.',
-  ] },
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
     'Os pedidos com data de entrega. Escolha o cliente, a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
     'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar.',
+  ] },
+  { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
+    'A lista do que produzir num dia. O previsto vem sozinho das encomendas com entrega nessa data; você marca o que já fez (✓) e anota quanto saiu de verdade (“Saiu”). Sobra ou falta aparece ao lado.',
+    'Precisou fazer algo extra que não foi encomendado? Adicione um item avulso pela busca. No fim aparecem faturamento, custo e lucro do que foi produzido.',
   ] },
   { id: 'fiado', icon: '💳', label: 'Fiado', paras: [
     'Quem ainda tem valor a pagar das encomendas — o total a receber e cada pendência. Toque numa para registrar um pagamento (total ou parcial); o saldo é recalculado sozinho.',
@@ -98,7 +98,7 @@ const HELP_SCREENS = [
 ];
 const HELP_CONCEPTS = [
   { q: 'Por que um produto fica “sem preço”?', a: 'Quando algum insumo que ele usa ainda não tem preço cadastrado. Cadastre o preço em Insumos e o preço do produto aparece sozinho.' },
-  { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir preços, e os dados reais (fornadas e vendas) pra mostrar a verdade nos relatórios.' },
+  { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir preços, e os dados reais (vendas e o que você produziu na comanda) pra mostrar a verdade nos relatórios.' },
   { q: 'Margem e taxa', a: 'Margem é o lucro que você quer sobre o custo; taxa é o que a maquininha/pagamento cobra. O preço sugerido já considera as duas.' },
   { q: 'Meus dados estão seguros?', a: 'Ficam salvos no seu aparelho. Conecte o Dropbox em Ajustes pra ter backup e poder usar em mais de um lugar.' },
 ];
@@ -242,8 +242,8 @@ export function renderApp(root, ctx) {
   const panels = {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
-    precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
-    encomendas: encomendasPanel, fiado: fiadoPanel, custos: custosPanel, perdas: perdasPanel,
+    precos: precosPanel, vendas: vendasPanel,
+    encomendas: encomendasPanel, comanda: comandaPanel, fiado: fiadoPanel, custos: custosPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -419,8 +419,8 @@ function inicioPanel(ctx) {
     el('section', { class: 'pa-card' }, [
       el('h3', { class: 'pa-h3', text: 'Ações rápidas' }),
       el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-venda', onclick: () => ctx.actions.setTab('vendas') }, 'Registrar venda'),
-        el('button', { class: 'pa-btn', 'data-testid': 'home-fornada', onclick: () => ctx.actions.setTab('fornadas') }, 'Registrar fornada'),
+        el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-encomenda', onclick: () => ctx.actions.setTab('encomendas') }, 'Nova encomenda'),
+        el('button', { class: 'pa-btn', 'data-testid': 'home-comanda', onclick: () => ctx.actions.setTab('comanda') }, 'Comanda do dia'),
       ]),
       vazio && el('p', { class: 'pa-hint', text: 'Comece cadastrando seus insumos e receitas em Cadastro.' }),
     ]),
@@ -944,84 +944,132 @@ function friendlyError(e) {
   return String(e && e.message ? e.message : e);
 }
 
-// ── Fornadas (Batch — production runs; actuals) ──────────────────────────────────
-
-function fornadasPanel(ctx) {
+// ── Comanda do dia (Rev 04 — the day's production list) ──────────────────────────
+// Previsto is DERIVED live from that day's encomendas; only realizado + the "feito" check are
+// stored (per product) in a Comanda record keyed by date. Avulso items (made to sell, not ordered)
+// appear with previsto 0. Edits persist WITHOUT re-render (ctx.actions.persist) so the inputs keep
+// focus while she fills the table; indicators recompute in place.
+function comandaPanel(ctx) {
   const { store } = ctx;
-  const recipes = store.state.recipes;
-  const all = store.state.batches.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
-  const month = ctx.view.logMonth;
-  const batches = month ? all.filter((b) => monthOf(b.at) === month) : all;
-  const list = logList(batches, (b) => batchRow(ctx, b));
+  const config = store.getConfig();
+  const es = store.toEngineStore();
+  const lens = estimateLens(config);
+  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return 0; } };
+  const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
+
+  const date = ctx.view.comandaDate || todayInput();
+  const dateInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-date', type: 'date', value: date });
+  dateInput.addEventListener('change', () => ctx.actions.setComandaDate(dateInput.value || todayInput()));
+
+  // Previsto: sum the day's orders by product.
+  const prev = new Map();
+  for (const e of store.state.encomendas) {
+    if ((e.deliveryDate || '').slice(0, 10) !== date) continue;
+    for (const it of (e.itens || [])) prev.set(it.productId, (prev.get(it.productId) || 0) + (Number(it.qty) || 0));
+  }
+  // Realizado/feito: local working copy of the stored comanda for this date.
+  const stored = store.get('comandas', date);
+  const real = new Map(); // productId → { realizado, feito }
+  for (const it of (stored?.itens || [])) real.set(it.productId, { realizado: Number(it.realizado) || 0, feito: !!it.feito });
+
+  // Products to show = order products ∪ stored (avulso) products, ordered by product name.
+  const pids = [...new Set([...prev.keys(), ...real.keys()])]
+    .sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
+
+  function persistComanda() {
+    const itens = [...real.entries()]
+      .filter(([, v]) => (v.realizado || 0) > 0 || v.feito)
+      .map(([productId, v]) => ({ productId, realizado: v.realizado || 0, feito: !!v.feito }));
+    ctx.actions.persist((s) => {
+      if (itens.length) s.upsertComanda({ id: date, date, itens });
+      else if (s.get('comandas', date)) s.removeComanda(date);
+    });
+  }
+
+  const indEl = el('div', { class: 'pa-comanda-ind', 'data-testid': 'cmd-indicadores' });
+  function recompute() {
+    let fat = 0, cst = 0, totalPrev = 0, totalReal = 0;
+    for (const pid of pids) {
+      const r = real.get(pid)?.realizado || 0;
+      fat += r * suggested(pid); cst += r * unitCost(pid);
+      totalPrev += prev.get(pid) || 0; totalReal += r;
+    }
+    const lucro = fat - cst - fat * (config.paymentFeePct || 0);
+    indEl.replaceChildren(
+      el('table', { class: 'pa-kv' }, [
+        el('tr', {}, [el('td', { text: 'Previsto · Realizado' }), el('td', { class: 'pa-num', text: `${fmtNum(totalPrev)} · ${fmtNum(totalReal)}` })]),
+        el('tr', {}, [el('td', { text: 'Faturamento realizado' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-faturamento', text: brl(fat) })]),
+        el('tr', {}, [el('td', { text: 'Custo realizado' }), el('td', { class: 'pa-num', text: brl(cst) })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Lucro realizado' }), el('td', { class: 'pa-num' + (lucro >= 0 ? '' : ' pa-bad'), 'data-testid': 'cmd-lucro', text: brl(lucro) })]),
+      ]),
+      el('p', { class: 'pa-hint', text: 'Faturamento e lucro contam só o que você produziu de verdade (realizado), pelo preço sugerido. O dinheiro que entrou de fato aparece no Fiado/Relatórios.' }),
+    );
+  }
+
+  const body = el('tbody');
+  function renderRows() {
+    body.replaceChildren(...(pids.length ? pids.map((pid) => {
+      const p = store.get('products', pid);
+      const previsto = prev.get(pid) || 0;
+      const cur = real.get(pid) || { realizado: 0, feito: false };
+      const rInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: cur.realizado ? fmtNum(cur.realizado) : '', 'aria-label': 'realizado' });
+      const chk = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); chk.checked = cur.feito;
+      const exced = el('span', { class: 'pa-muted pa-exced' });
+      const updExced = () => { const r = real.get(pid)?.realizado || 0; const d = r - previsto; exced.textContent = d > 0 ? `sobra ${fmtNum(d)}` : (r > 0 && d < 0 ? `falta ${fmtNum(-d)}` : ''); };
+      rInput.addEventListener('input', () => {
+        const v = parseNum(rInput.value) || 0;
+        real.set(pid, { realizado: v, feito: real.get(pid)?.feito || false });
+        updExced(); recompute(); persistComanda();
+      });
+      chk.addEventListener('change', () => {
+        real.set(pid, { realizado: real.get(pid)?.realizado || 0, feito: chk.checked });
+        persistComanda();
+      });
+      updExced();
+      return el('tr', { class: chk.checked ? 'pa-done' : '' }, [
+        el('td', {}, [el('div', { text: p ? p.name : '(produto removido)' + (previsto ? '' : ' · avulso') }), previsto ? null : el('span', { class: 'pa-muted pa-exced', text: 'avulso' }), exced].filter(Boolean)),
+        el('td', { class: 'pa-num pa-prev', text: previsto ? fmtNum(previsto) : '—' }),
+        el('td', {}, rInput),
+        el('td', { class: 'pa-center' }, chk),
+      ]);
+    }) : [el('tr', {}, el('td', { colspan: '4' }, el('p', { class: 'pa-empty', text: 'Nada para este dia. Faça uma encomenda com entrega nesta data, ou adicione um item avulso abaixo.' })))]));
+  }
+  renderRows();
+  recompute();
+
+  // Add an avulso product (made to sell, not ordered). Uses mutate (re-render) — a discrete action,
+  // not per-keystroke — which re-reads the stored comanda so the new row appears.
+  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'cmd-prodsearch', type: 'search', placeholder: 'Adicionar item avulso…' });
+  const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+  function renderResults() {
+    const q = norm(search.value);
+    if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
+    const matches = store.state.products.filter((p) => norm(p.name).includes(q) && !real.has(p.id) && !prev.has(p.id)).slice(0, 6);
+    results.style.display = matches.length ? '' : 'none';
+    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-prodresult', onclick: () => {
+      real.set(p.id, { realizado: 0, feito: false });
+      const itens = [...real.entries()].map(([productId, v]) => ({ productId, realizado: v.realizado || 0, feito: !!v.feito }));
+      // realizado 0 wouldn't persist on its own, so add the row to the live table now and seed storage.
+      ctx.actions.mutate((s) => s.upsertComanda({ id: date, date, itens }));
+    } }, [el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' })])));
+  }
+  search.addEventListener('input', renderResults);
+
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Fornadas' }),
-      recipes.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'forn-new', onclick: () => ctx.actions.openModal({ kind: 'fornada-add' }) }, '+ Registrar'),
-    ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Fornada = o que você já produziu de verdade. Serve para o custo REAL por unidade (≠ estimativa da receita): quantas saíram divide o custo do lote. Opcional — use quando quiser acompanhar o real.' }),
-    recipes.length === 0 && el('p', { class: 'pa-hint', text: 'Crie uma receita primeiro.' }),
-    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar receita…', searchTestid: 'forn-search', monthTestid: 'forn-month' }),
-    all.length === 0
-      ? recipes.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma fornada registrada. Toque em “+ Registrar”.' })
-      : batches.length === 0
-        ? el('p', { class: 'pa-empty', text: 'Nenhuma fornada neste mês.' })
-        : list,
-  ].filter(Boolean));
-}
-
-// Read-only log entry (append-only — no edit; a correction is an estorno + a new fornada).
-function batchRow(ctx, b) {
-  const { store } = ctx;
-  const r = store.get('recipes', b.recipeId);
-  const mins = [b.activeMinutes != null ? `${b.activeMinutes}min ativos` : null, b.ovenMinutes != null ? `${b.ovenMinutes}min forno` : null].filter(Boolean).join(' · ');
-  return el('li', { class: 'pa-list-item' + (store.isReversed('batch', b.id) ? ' pa-reversed' : ''), 'data-search': r ? r.name : '' }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', {}, el('strong', { text: r ? r.name : '(receita removida)' })),
-      el('span', { class: 'pa-muted', text: `${b.yieldActual} produzidas` + (r ? ` (previsto ${r.yieldNominal})` : '') + (mins ? ` · ${mins}` : '') }),
+      el('h2', { class: 'pa-grow', text: 'Comanda do dia' }),
+      dateInput,
     ]),
-    estornoControl(ctx, 'batch', b.id),
+    el('p', { class: 'pa-hint', text: 'O que produzir hoje. Previsto vem das encomendas do dia; marque feito e anote quanto saiu de verdade (realizado) — sobra/falta aparece ao lado.' }),
+    el('table', { class: 'pa-comanda' }, [
+      el('thead', {}, el('tr', {}, [
+        el('th', { text: 'Produto' }), el('th', { class: 'pa-num', text: 'Prev.' }), el('th', { class: 'pa-num', text: 'Saiu' }), el('th', { class: 'pa-center', text: '✓' }),
+      ])),
+      body,
+    ]),
+    search, results,
+    indEl,
   ]);
-}
-
-MODALS['fornada-add'] = (ctx) => fornadaSheet(ctx);
-
-function fornadaSheet(ctx) {
-  const { store } = ctx;
-  const recipes = store.state.recipes;
-  const recipeSel = el('select', { class: 'pa-input', 'data-testid': 'forn-recipe' },
-    recipes.map((r) => el('option', { value: r.id, text: r.name })));
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-date', type: 'date', value: todayInput() });
-  const units = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-units', type: 'text', inputmode: 'decimal', placeholder: 'un' });
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos' });
-  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'forn-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno' });
-  // Prefill the times with the recipe's estimate (she adjusts only if reality differed).
-  function prefill() {
-    const r = store.get('recipes', recipeSel.value);
-    if (r) { active.value = String(r.activeMinutes); oven.value = String(r.ovenMinutes); }
-  }
-  prefill();
-  recipeSel.addEventListener('change', prefill);
-
-  function save() {
-    const r = store.get('recipes', recipeSel.value);
-    const y = parseNum(units.value);
-    if (!r || !(y > 0)) { units.focus(); return; }
-    const a = parseNum(active.value);
-    const o = parseNum(oven.value);
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addBatch({
-      id: uuid(), at, recipeId: r.id, yieldActual: y,
-      ...(a != null ? { activeMinutes: a } : {}), ...(o != null ? { ovenMinutes: o } : {}),
-    }));
-  }
-
-  const rows = [
-    field('Receita', recipeSel),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Saíram' }), units]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'Quantas saíram de verdade (ajusta o custo real por unidade). Os minutos já vêm da receita — mude só se foi diferente.' }),
-  ];
-  return sheet({ title: 'Registrar fornada', rows, onSave: save, saveTestid: 'forn-add' });
 }
 
 // ── Vendas (Sale — revenue, with snapshotted cost for true margin) ───────────────
