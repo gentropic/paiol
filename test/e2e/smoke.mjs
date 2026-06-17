@@ -802,6 +802,13 @@ describe('paiol UI smoke', () => {
     assert.match(dl.suggestedFilename(), /\.pdf$/);
     const buf = await readFile(await dl.path());
     assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'not a valid PDF');
+
+    // Rev 06 slice 4: the three ficha modes on Clientes (todas / em aberto / pagas).
+    await goto(page, 'Clientes');
+    await page.waitForSelector('[data-testid="fichas-todas"]');
+    const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="fichas-todas"]')]);
+    assert.match(dl2.suggestedFilename(), /^fichas-todas\.pdf$/);
+    assert.equal((await readFile(await dl2.path())).slice(0, 5).toString(), '%PDF-', 'fichas-todas not a valid PDF');
     await page.close();
   });
 

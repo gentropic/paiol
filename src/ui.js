@@ -55,6 +55,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'clientes', icon: '👥', label: 'Clientes', paras: [
     'Seus clientes — nome, telefone e endereço. Como a maioria é recorrente, cadastrar uma vez agiliza lançar os pedidos e montar a ficha (histórico de compras) de cada um.',
+    'No fim da tela você gera as fichas em PDF (3 por folha, pra imprimir e arquivar): todas as vendas, só as em aberto (com saldo) ou só as pagas.',
   ] },
   { id: 'precos', icon: '💰', label: 'Preços', paras: [
     'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
@@ -820,7 +821,16 @@ function clientesPanel(ctx) {
     store.state.clients.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum cliente. Toque em “+ Novo” para começar.' })
       : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um cliente para editar.' }), searchInput('Buscar cliente…', list, 'cli-search'), list]),
-  ]);
+    store.state.encomendas.length > 0 && el('div', { class: 'pa-fichas' }, [
+      el('h3', { class: 'pa-h3', text: 'Fichas para imprimir (3 por folha)' }),
+      el('p', { class: 'pa-hint', text: 'Gera o PDF com as vendas de cada cliente — escolha quais incluir, imprima e arquive.' }),
+      el('div', { class: 'pa-row pa-form' }, [
+        fichasButton(ctx, '🖨 Todas', () => buildFichas(store, encomendasByMode(store, 'todas')), 'fichas-todas.pdf', 'fichas-todas'),
+        fichasButton(ctx, '🖨 Em aberto', () => buildFichas(store, encomendasByMode(store, 'aberto')), 'fichas-em-aberto.pdf', 'fichas-aberto'),
+        fichasButton(ctx, '🖨 Pagas', () => buildFichas(store, encomendasByMode(store, 'pagas')), 'fichas-pagas.pdf', 'fichas-pagas'),
+      ]),
+    ]),
+  ].filter(Boolean));
 }
 
 function clienteRow(ctx, c) {
@@ -1402,9 +1412,19 @@ function buildFichas(store, encomendas) {
   });
 }
 
+/** Encomendas filtered by payment state, for the ficha report modes. */
+function encomendasByMode(store, mode) {
+  return store.state.encomendas.filter((e) => {
+    const saldo = (e.total || 0) - store.paidFor(e.id);
+    if (mode === 'aberto') return saldo > 0.005;     // em aberto + parcialmente pagas
+    if (mode === 'pagas') return saldo <= 0.005;      // quitadas
+    return true;                                      // todas
+  });
+}
+
 /** A button that generates + saves a fichas PDF, with inline "Gerando…" feedback. */
-function fichasButton(ctx, label, getFichas, filename) {
-  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'gerar-fichas' }, label);
+function fichasButton(ctx, label, getFichas, filename, testid = 'gerar-fichas') {
+  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': testid }, label);
   btn.addEventListener('click', async () => {
     const fichas = getFichas();
     if (!fichas.length) return;
