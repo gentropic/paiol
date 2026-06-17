@@ -26,13 +26,13 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Fornadas: 'operacao', Vendas: 'operacao', Custos: 'operacao', Perdas: 'operacao',
+  Fornadas: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Custos: 'operacao', Perdas: 'operacao',
   Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Fornadas: 'fornadas',
-  Vendas: 'vendas', Custos: 'custos', Perdas: 'perdas',
+  Vendas: 'vendas', Encomendas: 'encomendas', Custos: 'custos', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
@@ -687,6 +687,40 @@ describe('paiol UI smoke', () => {
     const txt = await page.textContent('.pa-card');
     assert.match(txt, /Custos variáveis/);
     assert.match(txt, /Perdas/);
+    await page.close();
+  });
+
+  test('Rev 04: cria uma encomenda (busca-pra-adicionar) com total e persiste', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // product "Pãozinho" exists (priced)
+    // a client to attach
+    await goto(page, 'Clientes');
+    await page.click('[data-testid="cli-new"]');
+    await page.waitForSelector('[data-testid="cli-save"]');
+    await page.fill('[data-testid="cli-name"]', 'Dona Márcia');
+    await page.click('[data-testid="cli-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.waitForSelector('[data-testid="enc-save"]');
+    await page.selectOption('[data-testid="enc-cliente"]', { label: 'Dona Márcia' });
+    // search-to-add a product
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão');
+    await page.click('[data-testid="enc-prodresult"]');
+    // line + total appear (suggested price prefilled, qty 1)
+    await page.waitForSelector('.pa-encitem');
+    assert.match(await page.textContent('[data-testid="enc-total"]'), /R\$\s*\d/);
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Dona Márcia/);
+    assert.match(await page.textContent('.pa-list'), /Pãozinho/);
+
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Encomendas');
+    await page.waitForSelector('.pa-row-item');
+    assert.match(await page.textContent('.pa-list'), /Dona Márcia/, 'encomenda did not persist');
     await page.close();
   });
 

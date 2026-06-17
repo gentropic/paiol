@@ -113,6 +113,22 @@ test('clients are master data: upsert, index lookup, YAML round-trip (Rev 04)', 
   assert.equal(s.get('clients', 'c1'), undefined);
 });
 
+test('encomendas are mutable master data that round-trip (Rev 04)', () => {
+  const s = new PaiolStore();
+  s.upsertEncomenda({
+    id: 'e1', at: '2026-06-16', deliveryDate: '2026-06-18', clienteId: 'c1',
+    itens: [{ productId: 'p1', qty: 2, unitPrice: 10 }], total: 23, costSnapshot: 8,
+    deliveryMethod: 'motoboy', frete: 3, notes: 'sem açúcar', paid: false,
+  });
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.deepEqual(back.state.encomendas, s.state.encomendas);
+  assert.equal(back.get('encomendas', 'e1').itens[0].qty, 2);
+  // mutable: editing replaces the record
+  s.upsertEncomenda({ ...s.get('encomendas', 'e1'), paid: true });
+  assert.equal(s.get('encomendas', 'e1').paid, true);
+  assert.equal(s.state.encomendas.length, 1);
+});
+
 test('YAML round-trip preserves the Rev 03 optional fields (supplier, tags, weight, per-product margin)', () => {
   const s = new PaiolStore();
   s.upsertIngredient({ id: 'i', name: 'Farinha', stockUnit: 'kg', lastSupplier: 'Atacadão', tags: ['seco', 'base'] });

@@ -146,6 +146,20 @@
     .pa-totals { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--au-border); }
     .pa-bad { color: #b3261e; }
     .pa-badge.pa-bad { background: #fbe3e1; color: #b3261e; }
+    .pa-badge.pa-warn { background: #f6e6c9; color: #9a6b2f; }
+
+    /* Encomenda line item (qty · name+linetotal · R$ unit · remove) + product search-to-add */
+    .pa-encitem { gap: 6px; }
+    .pa-encitem .pa-qty { width: 44px; flex: 0 0 auto; text-align: center; padding: 7px 4px; }
+    .pa-encitem .pa-unit { width: 76px; flex: 0 0 auto; padding: 7px 6px; }
+    .pa-encitem .pa-grow { min-width: 0; }
+    .pa-encitem .pa-grow > div:first-child { overflow: hidden; text-overflow: ellipsis; }
+    .pa-linetot { font-size: 0.8rem; }
+    .pa-suggest { background: #fffdfb; border: 1px solid var(--au-border); border-radius: 10px; margin: 6px 0 0; }
+    .pa-suggest .pa-row-item { padding: 9px 11px; }
+    .pa-add { color: var(--au-action); font-size: 1.35rem; font-weight: 700; line-height: 1; flex: 0 0 auto; }
+    .pa-check { display: flex; align-items: center; gap: 8px; margin: 8px 2px; }
+    .pa-check input { width: 20px; height: 20px; }
 
     /* Lote 1: search, edit, history, observação */
     .pa-search { width: 100%; margin: 0 0 10px; }

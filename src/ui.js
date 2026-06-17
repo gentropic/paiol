@@ -27,7 +27,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['fornadas', 'Fornadas'], ['vendas', 'Vendas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas'], ['fornadas', 'Fornadas'], ['custos', 'Custos'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -62,6 +62,10 @@ const HELP_SCREENS = [
   { id: 'fornadas', icon: '🔥', label: 'Fornadas', paras: [
     'Registre o que você produziu de verdade. Quantas unidades saíram ajusta o custo real por unidade (o custo do lote dividido pelo que rendeu).',
     'Os minutos já vêm da receita — mude só se foi diferente. É um registro: pra corrigir, lance uma nova fornada.',
+  ] },
+  { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
+    'Os pedidos com data de entrega. Escolha o cliente, a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
+    'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar.',
   ] },
   { id: 'vendas', icon: '🛒', label: 'Vendas', paras: [
     'Registre suas vendas. O preço sugerido já vem preenchido; edite se vendeu por outro valor. O lucro de cada venda já desconta o custo e a taxa de pagamento.',
@@ -234,7 +238,7 @@ export function renderApp(root, ctx) {
     inicio: inicioPanel,
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
     precos: precosPanel, fornadas: fornadasPanel, vendas: vendasPanel,
-    custos: custosPanel, perdas: perdasPanel,
+    encomendas: encomendasPanel, custos: custosPanel, perdas: perdasPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -1110,6 +1114,151 @@ function vendaSheet(ctx) {
     el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
   ];
   return sheet({ title: 'Registrar venda', rows, onSave: save, saveTestid: 'venda-add' });
+}
+
+// ── Encomendas (Rev 04 — the order = the sale; mutable, editable) ────────────────
+
+function encomendasPanel(ctx) {
+  const { store } = ctx;
+  const products = store.state.products;
+  const all = store.state.encomendas.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1));
+  const ul = el('ul', { class: 'pa-list pa-rows' }, all.map((e) => encomendaRow(ctx, e)));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Encomendas' }),
+      products.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'enc-new', onclick: () => ctx.actions.openModal({ kind: 'encomenda-add' }) }, '+ Nova'),
+    ].filter(Boolean)),
+    products.length === 0 && el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' }),
+    all.length === 0
+      ? products.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma encomenda. Toque em “+ Nova”.' })
+      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque numa encomenda para editar.' }), searchInput('Buscar cliente ou produto…', ul, 'enc-search'), ul]),
+  ].filter(Boolean));
+}
+
+function encomendaItemsResumo(store, e) {
+  return (e.itens || []).map((it) => { const p = store.get('products', it.productId); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}`; }).join(', ');
+}
+
+function encomendaRow(ctx, e) {
+  const { store } = ctx;
+  const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
+  const resumo = encomendaItemsResumo(store, e);
+  return el('li', { class: 'pa-row-item', 'data-search': `${cli ? cli.name : ''} ${resumo}`, onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: e.id }) }, [
+    el('div', { class: 'pa-grow' }, [
+      el('div', {}, [el('strong', { text: cli ? cli.name : 'Sem cliente' }), e.paid ? el('span', { class: 'pa-badge pa-ok', text: 'pago' }) : el('span', { class: 'pa-badge pa-warn', text: 'não pago' })]),
+      el('span', { class: 'pa-muted', text: `${fmtDate(e.deliveryDate)} · ${resumo}` }),
+    ]),
+    el('span', { class: 'pa-num', text: brl(e.total) }),
+    el('span', { class: 'pa-chev', text: '›' }),
+  ]);
+}
+
+MODALS['encomenda-add'] = (ctx) => encomendaSheet(ctx, null);
+MODALS['encomenda-edit'] = (ctx, m) => encomendaSheet(ctx, ctx.store.get('encomendas', m.id) || null);
+
+function encomendaSheet(ctx, enc) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const es = store.toEngineStore();
+  const lens = estimateLens(config);
+  const suggested = (pid) => { try { return productPrice(es, pid, config, lens).price; } catch { return 0; } };
+  const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
+
+  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice })) : [];
+
+  const cliSel = el('select', { class: 'pa-input', 'data-testid': 'enc-cliente' }, [
+    el('option', { value: '', text: '— sem cliente —' }),
+    ...store.state.clients.map((c) => el('option', { value: c.id, text: c.name, ...(enc && enc.clienteId === c.id ? { selected: 'selected' } : {}) })),
+  ]);
+  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
+  const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
+  const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
+  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observações (opcional)' });
+  notes.value = enc ? (enc.notes || '') : '';
+  const paid = el('input', { type: 'checkbox', 'data-testid': 'enc-paid' });
+  paid.checked = !!(enc && enc.paid);
+
+  const totalEl = el('strong', { 'data-testid': 'enc-total' });
+  const grandTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
+  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); };
+
+  const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  function renderItems() {
+    itemsList.replaceChildren(...(items.length ? items.map((it, idx) => {
+      const p = store.get('products', it.productId);
+      const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(it.qty), 'aria-label': 'quantidade' });
+      const price = el('input', { class: 'pa-input pa-unit', type: 'text', inputmode: 'decimal', value: fmtMoneyInput(it.unitPrice), 'aria-label': 'preço' });
+      const lineTot = el('span', { class: 'pa-muted pa-linetot' });
+      const renderLine = () => { lineTot.textContent = brl((Number(it.qty) || 0) * (Number(it.unitPrice) || 0)); };
+      qty.addEventListener('input', () => { it.qty = parseNum(qty.value) || 0; renderLine(); renderTotal(); });
+      price.addEventListener('input', () => { it.unitPrice = parseNum(price.value) || 0; renderLine(); renderTotal(); });
+      renderLine();
+      return el('li', { class: 'pa-list-item pa-encitem' }, [
+        qty,
+        el('div', { class: 'pa-grow' }, [el('div', { text: p ? p.name : '(produto removido)' }), lineTot]),
+        el('span', { class: 'pa-lab', text: 'R$' }), price,
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { items.splice(idx, 1); renderItems(); renderTotal(); } }, '✕'),
+      ]);
+    }) : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda — busque um produto abaixo.' })]));
+  }
+  renderItems();
+
+  // Product search-to-add (scales to her ~76 products better than a dropdown).
+  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'enc-prodsearch', type: 'search', placeholder: 'Buscar produto para adicionar…' });
+  const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+  function renderResults() {
+    const q = norm(search.value);
+    if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
+    const matches = store.state.products.filter((p) => norm(p.name).includes(q)).slice(0, 6);
+    results.style.display = matches.length ? '' : 'none';
+    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
+      el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' }),
+    ])));
+  }
+  search.addEventListener('input', renderResults);
+  frete.input.addEventListener('input', renderTotal);
+  renderTotal();
+
+  function save() {
+    if (!items.length) { search.focus(); return; }
+    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * unitCost(it.productId), 0);
+    const fr = parseNum(frete.input.value);
+    const ob = notes.value.trim();
+    ctx.actions.mutate((s) => s.upsertEncomenda({
+      ...(enc || { at: nowIso() }),
+      id: enc ? enc.id : uuid(),
+      deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
+      clienteId: cliSel.value || undefined,
+      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0 })),
+      total: grandTotal(),
+      costSnapshot: cost,
+      deliveryMethod: entrega.value,
+      frete: fr == null ? undefined : fr,
+      notes: ob || undefined,
+      paid: paid.checked,
+    }));
+  }
+
+  const rows = [
+    field('Cliente', cliSel),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Entrega' }), date, entrega]),
+    el('h3', { class: 'pa-h3', text: 'Itens' }),
+    itemsList,
+    search, results,
+    el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Total ' }), totalEl])]),
+    field('Frete (opcional)', frete),
+    field('Observações (opcional)', notes),
+    el('label', { class: 'pa-check' }, [paid, el('span', { text: 'Pago' })]),
+  ];
+
+  const cliName = enc && enc.clienteId ? (store.get('clients', enc.clienteId)?.name || 'cliente') : 'sem cliente';
+  return sheet({
+    title: enc ? 'Editar encomenda' : 'Nova encomenda',
+    rows,
+    onSave: save,
+    saveTestid: 'enc-save',
+    danger: enc ? { label: '🗑 Excluir encomenda', testid: 'enc-delete', onClick: () => confirmRemove(ctx, `a encomenda de ${cliName}`, (s) => s.removeEncomenda(enc.id)) } : null,
+  });
 }
 
 // ── Custos variáveis (Rev 03 #4 — dated expense ledger) ──────────────────────────

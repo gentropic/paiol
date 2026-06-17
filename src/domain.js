@@ -97,6 +97,32 @@
  * @property {string} [address]    // endereço
  */
 
+/**
+ * A line in an {@link Encomenda} — a product, the quantity, and the sale price charged.
+ * @typedef {object} EncomendaItem
+ * @property {string} productId
+ * @property {number} qty
+ * @property {number} unitPrice    // sale price charged per unit (defaults to the suggested price)
+ */
+
+/**
+ * Encomenda — a customer order, which IS the sale (Rev 04). MUTABLE (she edits it freely). Generates
+ * the client's histórico and feeds the day's comanda. Payments against it are append-only events
+ * (saldo derived) — the `paid` flag here is an interim status until that slice lands.
+ * @typedef {object} Encomenda
+ * @property {string}  id
+ * @property {string}  at             // ISO — when it was lançada
+ * @property {string}  deliveryDate   // ISO — data de entrega
+ * @property {string} [clienteId]     // optional (avulso / balcão)
+ * @property {EncomendaItem[]} itens
+ * @property {number}  total          // Σ itens + frete
+ * @property {number}  costSnapshot   // Σ (qty × product unit cost) at save time
+ * @property {'retirada'|'motoboy'} [deliveryMethod]
+ * @property {number} [frete]
+ * @property {string} [notes]
+ * @property {boolean}[paid]          // interim; replaced by derived-from-payments next slice
+ */
+
 // ── Events (append-only, immutable; §2.2) ──
 
 /**
