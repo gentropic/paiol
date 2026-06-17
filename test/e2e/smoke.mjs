@@ -8,6 +8,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 
 const PORT = 8080;
 const BASE = `http://localhost:${PORT}/`;
@@ -721,6 +722,33 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Encomendas');
     await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Dona Márcia/, 'encomenda did not persist');
+    await page.close();
+  });
+
+  test('Rev 04: gerar fichas baixa um PDF válido (lazy pdf-lib)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await goto(page, 'Clientes');
+    await page.click('[data-testid="cli-new"]');
+    await page.waitForSelector('[data-testid="cli-save"]');
+    await page.fill('[data-testid="cli-name"]', 'Dona Márcia');
+    await page.click('[data-testid="cli-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.waitForSelector('[data-testid="enc-save"]');
+    await page.selectOption('[data-testid="enc-cliente"]', { label: 'Dona Márcia' });
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão');
+    await page.click('[data-testid="enc-prodresult"]');
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await goto(page, 'Fiado');
+    await page.waitForSelector('[data-testid="gerar-fichas"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-fichas"]')]);
+    assert.match(dl.suggestedFilename(), /\.pdf$/);
+    const buf = await readFile(await dl.path());
+    assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'not a valid PDF');
     await page.close();
   });
 

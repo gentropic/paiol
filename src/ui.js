@@ -11,6 +11,7 @@ import {
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
+import { generateFichasPdf, savePdf } from './pdf.js';
 import { monthSummary, productSummary, profitTrend } from './reports.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
@@ -848,9 +849,15 @@ function clienteSheet(ctx, cli) {
     ctx.actions.mutate((s) => s.upsertClient({ ...(cli || {}), id: cli ? cli.id : uuid(), name: nm, phone: ph || undefined, address: ad || undefined }));
   }
 
+  const rows = [field('Nome', name), field('Telefone (opcional)', phone), field('Endereço (opcional)', address)];
+  if (cli) {
+    rows.push(el('div', { class: 'pa-row pa-cardfoot' }, [
+      fichasButton(ctx, '🖨 Gerar ficha (PDF)', () => buildFichas(ctx.store, ctx.store.state.encomendas.filter((e) => e.clienteId === cli.id)), `ficha-${cli.name}.pdf`),
+    ]));
+  }
   return sheet({
     title: cli ? 'Editar cliente' : 'Novo cliente',
-    rows: [field('Nome', name), field('Telefone (opcional)', phone), field('Endereço (opcional)', address)],
+    rows,
     onSave: save,
     saveTestid: 'cli-save',
     danger: cli ? { label: '🗑 Excluir cliente', testid: 'cli-delete', onClick: () => confirmRemove(ctx, `o cliente "${cli.name}"`, (s) => s.removeClient(cli.id)) } : null,
@@ -1325,6 +1332,40 @@ function pagamentoSheet(ctx, encomendaId) {
   });
 }
 
+// ── Fichas (Rev 04 — printable client folders, 3 per A4, via lazy pdf-lib) ───────
+
+/** Group encomendas by client into ficha specs (orders + saldo) for the PDF generator. */
+function buildFichas(store, encomendas) {
+  const groups = new Map();
+  for (const e of encomendas) {
+    const key = e.clienteId || '__none__';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+  return [...groups.entries()].map(([key, ords]) => {
+    const client = key === '__none__' ? null : store.get('clients', key);
+    const orders = ords.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1)).map((e) => ({
+      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: (e.total || 0) - store.paidFor(e.id),
+    }));
+    return { client, orders, saldoTotal: orders.reduce((s, o) => s + Math.max(0, o.saldo), 0) };
+  });
+}
+
+/** A button that generates + saves a fichas PDF, with inline "Gerando…" feedback. */
+function fichasButton(ctx, label, getFichas, filename) {
+  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'gerar-fichas' }, label);
+  btn.addEventListener('click', async () => {
+    const fichas = getFichas();
+    if (!fichas.length) return;
+    const orig = btn.textContent;
+    btn.textContent = 'Gerando…'; btn.disabled = true;
+    try { await savePdf(await generateFichasPdf(fichas), filename); }
+    catch (e) { window.alert('Não foi possível gerar o PDF: ' + (e && e.message ? e.message : e)); }
+    finally { btn.textContent = orig; btn.disabled = false; }
+  });
+  return btn;
+}
+
 // ── Fiado / Quem me deve (Rev 04 — outstanding order balances) ───────────────────
 
 function fiadoPanel(ctx) {
@@ -1335,8 +1376,11 @@ function fiadoPanel(ctx) {
     .sort((a, b) => (a.e.deliveryDate < b.e.deliveryDate ? 1 : -1));
   const total = pend.reduce((s, x) => s + x.saldo, 0);
   return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Fiado' })]),
-    el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento.' }),
+    el('div', { class: 'pa-cardhead' }, [
+      el('h2', { class: 'pa-grow', text: 'Fiado' }),
+      pend.length > 0 && fichasButton(ctx, '🖨 Fichas', () => buildFichas(store, pend.map((x) => x.e)), 'fichas-pendentes.pdf'),
+    ].filter(Boolean)),
+    el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento. “Fichas” gera um PDF (3 por folha) pra imprimir e arquivar.' }),
     pend.length === 0
       ? el('p', { class: 'pa-empty', text: 'Ninguém devendo. 🎉' })
       : el('div', {}, [
