@@ -121,6 +121,7 @@
     .pa-grow { flex: 1 1 auto; min-width: 0; }
     .pa-muted { color: var(--au-fg-soft); font-size: 0.86rem; }
     .pa-narrow { flex: 0 0 auto; width: 7.5em; }
+    input[type="date"].pa-narrow { width: 9.5em; }  /* native date control needs more room — pa-narrow clips the year */
     .pa-hint { color: var(--au-fg-soft); font-size: 0.8rem; margin: 8px 0 0; }
     .pa-h3 { font-size: 1rem; margin: 18px 0 8px; color: var(--au-fg-soft); }
     .pa-lab { color: var(--au-fg-soft); font-size: 0.88rem; }
@@ -174,7 +175,6 @@
     .pa-comanda tr.pa-done td:first-child div:first-child { color: var(--au-fg-soft); }
     .pa-exced { display: block; font-size: 0.74rem; color: var(--au-fg-soft); }
     .pa-comanda-ind { margin-top: 10px; }
-    .pa-cardhead [data-testid="cmd-date"] { width: 9.5em; }  /* fit the full date (pa-narrow clips the year) */
 
     /* Lote 1: search, edit, history, observação */
     .pa-search { width: 100%; margin: 0 0 10px; }
