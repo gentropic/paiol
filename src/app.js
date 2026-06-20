@@ -13,7 +13,7 @@ import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro', logMonth: null, comandaDate: null, encSort: 'entrega', encStatus: 'todas', encMonth: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
+  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro', logMonth: null, comandaDate: null, encSort: 'entrega', encStatus: 'todas', encMonth: null, fiadoMonth: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
@@ -80,6 +80,7 @@ export async function boot(root) {
     setEncSort(key) { view.encSort = key; rerender(); },
     setEncStatus(key) { view.encStatus = key; rerender(); },
     setEncMonth(month) { view.encMonth = month; rerender(); },
+    setFiadoMonth(month) { view.fiadoMonth = month; rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
     setComandaDate(date) { view.comandaDate = date; rerender(); },
     // Modal/bottom-sheet (add/edit forms, confirmations).

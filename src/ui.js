@@ -56,7 +56,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'clientes', icon: '👥', label: 'Clientes', paras: [
     'Seus clientes — nome, telefone e endereço. Como a maioria é recorrente, cadastrar uma vez agiliza lançar os pedidos e montar a ficha (histórico de compras) de cada um.',
-    'No fim da tela você gera as fichas em PDF (3 por folha, pra imprimir e arquivar): todas as vendas, só as em aberto (com saldo) ou só as pagas.',
+    'Ao abrir um cliente, você vê o histórico dele: total comprado, total pago, saldo pendente, as compras e os pagamentos. No fim da tela você gera as fichas em PDF (3 por folha, pra imprimir e arquivar): todas as vendas, só as em aberto (com saldo) ou só as pagas — sempre com uma prévia pra conferir antes.',
   ] },
   { id: 'precos', icon: '💰', label: 'Preços', paras: [
     'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
@@ -848,6 +848,43 @@ function clienteRow(ctx, c) {
 MODALS['cliente-add'] = (ctx) => clienteSheet(ctx, null);
 MODALS['cliente-edit'] = (ctx, m) => clienteSheet(ctx, ctx.store.get('clients', m.id) || null);
 
+// Client financial + commercial history (Rev 07 #6): compras/encomendas, pagamentos, saldo pendente.
+function clienteHistorico(store, cli) {
+  const orders = store.state.encomendas.filter((e) => e.clienteId === cli.id).sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1));
+  if (!orders.length) return el('p', { class: 'pa-hint', 'data-testid': 'cli-hist', text: 'Ainda sem compras registradas.' });
+  const totalComprado = orders.reduce((s, e) => s + (e.total || 0), 0);
+  const totalPago = orders.reduce((s, e) => s + store.paidFor(e.id), 0);
+  const saldo = totalComprado - totalPago;
+  const pays = [];
+  for (const e of orders) for (const pg of store.state.payments) if (pg.encomendaId === e.id && !store.isReversed('payment', pg.id)) pays.push(pg);
+  pays.sort((a, b) => (a.at < b.at ? 1 : -1));
+  const kv = (label, value, bad) => el('tr', bad ? { class: 'pa-kv-total' } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (bad ? ' pa-bad' : ''), text: value })]);
+  return el('div', { 'data-testid': 'cli-hist' }, [
+    el('table', { class: 'pa-kv' }, [
+      kv('Total comprado', brl(totalComprado)),
+      kv('Total pago', brl(totalPago)),
+      kv('Saldo pendente', brl(saldo), saldo > 0.005),
+    ]),
+    el('h3', { class: 'pa-h3', text: `Compras (${orders.length})` }),
+    el('ul', { class: 'pa-list pa-tight' }, orders.map((e) => {
+      const st = paymentStatus(store, e);
+      return el('li', { class: 'pa-list-item' }, [
+        el('div', { class: 'pa-grow' }, [
+          el('div', {}, el('strong', { text: encomendaItemsResumo(store, e) })),
+          el('span', { class: 'pa-muted', text: `${fmtDate(e.deliveryDate)}${e.entregue ? ' · entregue' : ''}` }),
+        ]),
+        el('span', { class: 'pa-num', text: brl(e.total) }),
+        el('span', { class: `pa-badge ${st.cls}`, text: st.label }),
+      ]);
+    })),
+    pays.length > 0 && el('h3', { class: 'pa-h3', text: `Pagamentos (${pays.length})` }),
+    pays.length > 0 && el('ul', { class: 'pa-list pa-tight' }, pays.map((pg) => el('li', { class: 'pa-list-item' }, [
+      el('span', { class: 'pa-grow pa-muted', text: `${fmtDate(pg.at)}${pg.forma ? ` · ${pg.forma}` : ''}` }),
+      el('span', { class: 'pa-num', text: brl(pg.valor) }),
+    ]))),
+  ].filter(Boolean));
+}
+
 function clienteSheet(ctx, cli) {
   const name = el('input', { class: 'pa-input', 'data-testid': 'cli-name', type: 'text', placeholder: 'Nome do cliente', value: cli ? cli.name : '' });
   const phone = el('input', { class: 'pa-input', 'data-testid': 'cli-phone', type: 'tel', inputmode: 'tel', placeholder: 'Telefone', value: cli ? (cli.phone || '') : '' });
@@ -863,6 +900,7 @@ function clienteSheet(ctx, cli) {
 
   const rows = [field('Nome', name), field('Telefone (opcional)', phone), field('Endereço (opcional)', address)];
   if (cli) {
+    rows.push(el('h3', { class: 'pa-h3', text: 'Histórico' }), clienteHistorico(ctx.store, cli));
     rows.push(el('div', { class: 'pa-row pa-cardfoot' }, [
       fichasButton(ctx, '🖨 Gerar ficha (PDF)', () => buildFichas(ctx.store, ctx.store.state.encomendas.filter((e) => e.clienteId === cli.id)), `ficha-${cli.name}.pdf`),
     ]));
@@ -1431,6 +1469,8 @@ MODALS['pagamento-add'] = (ctx, m) => pagamentoSheet(ctx, m.encomendaId);
 function pagamentoSheet(ctx, encomendaId) {
   const { store } = ctx;
   const enc = store.get('encomendas', encomendaId);
+  const cli = enc && enc.clienteId ? store.get('clients', enc.clienteId) : null;
+  const cliName = cli ? cli.name : 'Sem cliente';
   const saldo = enc ? Math.max(0, (enc.total || 0) - store.paidFor(encomendaId)) : 0;
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'pag-date', type: 'date', value: todayInput() });
   const valor = moneyField(saldo > 0 ? saldo : null, 'pag-valor');
@@ -1445,6 +1485,12 @@ function pagamentoSheet(ctx, encomendaId) {
   return sheet({
     title: 'Registrar pagamento',
     rows: [
+      // Client name in destaque so she confirms WHO before giving baixa (reduces operational errors).
+      el('div', { class: 'pa-pag-cli', 'data-testid': 'pag-cliente' }, [
+        el('span', { class: 'pa-muted', text: 'Pagamento de' }),
+        el('strong', { text: cliName }),
+        el('span', { class: 'pa-muted', text: enc ? `${encomendaItemsResumo(store, enc)} · entrega ${fmtDate(enc.deliveryDate)}` : '' }),
+      ]),
       el('p', { class: 'pa-hint', text: `Saldo a receber: ${brl(saldo)}` }),
       field('Data', date),
       field('Valor', valor),
@@ -1487,16 +1533,44 @@ function encomendasByMode(store, mode) {
 /** A button that generates + saves a fichas PDF, with inline "Gerando…" feedback. */
 function fichasButton(ctx, label, getFichas, filename, testid = 'gerar-fichas') {
   const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': testid }, label);
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     const fichas = getFichas();
-    if (!fichas.length) return;
-    const orig = btn.textContent;
-    btn.textContent = 'Gerando…'; btn.disabled = true;
-    try { await savePdf(await generateFichasPdf(fichas), filename); }
-    catch (e) { window.alert('Não foi possível gerar o PDF: ' + (e && e.message ? e.message : e)); }
-    finally { btn.textContent = orig; btn.disabled = false; }
+    if (!fichas.length) { window.alert('Nenhuma ficha para gerar com esse filtro.'); return; }
+    ctx.actions.openModal({ kind: 'ficha-preview', fichas, filename });
   });
   return btn;
+}
+
+MODALS['ficha-preview'] = (ctx, m) => fichaPreviewSheet(ctx, m);
+
+// Preview-before-print (Rev 07 #5): show the fichas' data for conferência, then "Gerar PDF".
+function fichaPreviewSheet(ctx, m) {
+  const { fichas, filename } = m;
+  const preview = el('div', { class: 'pa-ficha-prev', 'data-testid': 'ficha-preview' }, fichas.map((f) => el('div', { class: 'pa-ficha-card' }, [
+    el('div', {}, el('strong', { text: (f.client && f.client.name) || 'Sem cliente' })),
+    f.client && (f.client.phone || f.client.address) && el('div', { class: 'pa-muted', text: [f.client.phone, f.client.address].filter(Boolean).join(' · ') }),
+    el('ul', { class: 'pa-list pa-tight' }, f.orders.slice(0, 6).map((o) => el('li', { class: 'pa-list-item' }, [
+      el('span', { class: 'pa-grow pa-muted', text: `${o.date} · ${o.resumo}` }),
+      el('span', { class: 'pa-num', text: brl(o.total) }),
+      el('span', { class: o.saldo > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: o.saldo > 0.005 ? `deve ${brl(o.saldo)}` : 'pago' }),
+    ]))),
+    f.orders.length > 6 && el('p', { class: 'pa-hint', text: `+ ${f.orders.length - 6} pedido(s)…` }),
+    el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Saldo devedor ' }), el('strong', { class: f.saldoTotal > 0.005 ? 'pa-bad' : '', text: brl(f.saldoTotal) })])]),
+  ].filter(Boolean))));
+  const genBtn = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'ficha-gerar' }, '🖨 Gerar PDF para imprimir');
+  genBtn.addEventListener('click', async () => {
+    const orig = genBtn.textContent; genBtn.textContent = 'Gerando…'; genBtn.disabled = true;
+    try { await savePdf(await generateFichasPdf(fichas), filename); ctx.actions.closeModal(); }
+    catch (e) { window.alert('Não foi possível gerar o PDF: ' + (e && e.message ? e.message : e)); genBtn.textContent = orig; genBtn.disabled = false; }
+  });
+  return sheet({
+    title: `Fichas — prévia (${fichas.length})`,
+    rows: [
+      el('p', { class: 'pa-hint', text: 'Confira os dados antes de imprimir. O PDF sai com 3 fichas por folha, pra recortar e arquivar.' }),
+      preview,
+      el('div', { class: 'pa-row pa-form' }, [genBtn]),
+    ],
+  });
 }
 
 /** Assemble a recibo (payment proof) object from an encomenda + its derived payment state. */
@@ -1541,32 +1615,42 @@ function reciboButton(ctx, enc) {
 
 function fiadoPanel(ctx) {
   const { store } = ctx;
-  const pend = store.state.encomendas
+  const month = ctx.view.fiadoMonth;
+  let pend = store.state.encomendas
     .map((e) => ({ e, saldo: (e.total || 0) - store.paidFor(e.id) }))
-    .filter((x) => x.saldo > 0.005)
-    .sort((a, b) => (a.e.deliveryDate < b.e.deliveryDate ? 1 : -1));
+    .filter((x) => x.saldo > 0.005);
+  if (month) pend = pend.filter((x) => monthOf(x.e.deliveryDate) === month);
+  pend.sort((a, b) => (a.e.deliveryDate < b.e.deliveryDate ? 1 : -1));
   const total = pend.reduce((s, x) => s + x.saldo, 0);
+
+  const ul = el('ul', { class: 'pa-list pa-rows' }, pend.map(({ e, saldo }) => {
+    const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
+    return el('li', { class: 'pa-row-item', 'data-testid': 'fiado-row', 'data-search': cli ? cli.name : 'sem cliente', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: e.id }) }, [
+      el('div', { class: 'pa-grow' }, [
+        el('div', {}, el('strong', { text: cli ? cli.name : 'Sem cliente' })),
+        el('span', { class: 'pa-muted', text: `${encomendaItemsResumo(store, e)} · entrega ${fmtDate(e.deliveryDate)}` }),
+      ]),
+      el('span', { class: 'pa-num pa-bad', text: brl(saldo) }),
+      el('span', { class: 'pa-chev', text: '›' }),
+    ]);
+  }));
+  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'fiado-month', type: 'month', value: month || '' });
+  monthInput.addEventListener('change', () => ctx.actions.setFiadoMonth(monthInput.value || null));
+
+  const hasAny = store.state.encomendas.some((e) => (e.total || 0) - store.paidFor(e.id) > 0.005);
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'A Receber' }),
-      pend.length > 0 && fichasButton(ctx, '🖨 Fichas', () => buildFichas(store, pend.map((x) => x.e)), 'fichas-pendentes.pdf'),
+      pend.length > 0 && fichasButton(ctx, '🖨 Fichas', () => buildFichas(store, pend.map((x) => x.e)), 'fichas-a-receber.pdf'),
     ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento. “Fichas” gera um PDF (3 por folha) pra imprimir e arquivar.' }),
-    pend.length === 0
+    el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento. “Fichas” gera um PDF (3 por folha) das que estão na lista.' }),
+    !hasAny
       ? el('p', { class: 'pa-empty', text: 'Ninguém devendo. 🎉' })
       : el('div', {}, [
+          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Mês' }), monthInput, month && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.setFiadoMonth(null) }, 'limpar')].filter(Boolean)),
+          searchInput('Buscar cliente…', ul, 'fiado-search'),
           el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'A receber ' }), brl(total)])]),
-          el('ul', { class: 'pa-list pa-rows' }, pend.map(({ e, saldo }) => {
-            const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
-            return el('li', { class: 'pa-row-item', 'data-testid': 'fiado-row', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: e.id }) }, [
-              el('div', { class: 'pa-grow' }, [
-                el('div', {}, el('strong', { text: cli ? cli.name : 'Sem cliente' })),
-                el('span', { class: 'pa-muted', text: `${encomendaItemsResumo(store, e)} · entrega ${fmtDate(e.deliveryDate)}` }),
-              ]),
-              el('span', { class: 'pa-num pa-bad', text: brl(saldo) }),
-              el('span', { class: 'pa-chev', text: '›' }),
-            ]);
-          })),
+          pend.length ? ul : el('p', { class: 'pa-empty', text: 'Nada a receber nesse mês.' }),
         ]),
   ]);
 }

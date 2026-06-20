@@ -897,17 +897,22 @@ describe('paiol UI smoke', () => {
     await page.click('[data-testid="enc-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
+    // Rev 07 #5: Fichas now open a PREVIEW first, then "Gerar PDF" downloads.
     await goto(page, 'Fiado');
     await page.waitForSelector('[data-testid="gerar-fichas"]');
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-fichas"]')]);
+    await page.click('[data-testid="gerar-fichas"]');
+    await page.waitForSelector('[data-testid="ficha-preview"]');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="ficha-gerar"]')]);
     assert.match(dl.suggestedFilename(), /\.pdf$/);
-    const buf = await readFile(await dl.path());
-    assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'not a valid PDF');
+    assert.equal((await readFile(await dl.path())).slice(0, 5).toString(), '%PDF-', 'not a valid PDF');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
-    // Rev 06 slice 4: the three ficha modes on Clientes (todas / em aberto / pagas).
+    // Rev 06 slice 4: the three ficha modes on Clientes (todas / em aberto / pagas), via the preview.
     await goto(page, 'Clientes');
     await page.waitForSelector('[data-testid="fichas-todas"]');
-    const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="fichas-todas"]')]);
+    await page.click('[data-testid="fichas-todas"]');
+    await page.waitForSelector('[data-testid="ficha-preview"]');
+    const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="ficha-gerar"]')]);
     assert.match(dl2.suggestedFilename(), /^fichas-todas\.pdf$/);
     assert.equal((await readFile(await dl2.path())).slice(0, 5).toString(), '%PDF-', 'fichas-todas not a valid PDF');
     await page.close();
@@ -992,6 +997,40 @@ describe('paiol UI smoke', () => {
     assert.match(dl.suggestedFilename(), /^recibo-.*\.pdf$/);
     const buf = await readFile(await dl.path());
     assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'recibo is not a valid PDF');
+    await page.close();
+  });
+
+  test('Rev 07 #5/#6: pagamento mostra o cliente; histórico no cadastro do cliente', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await goto(page, 'Clientes');
+    await page.click('[data-testid="cli-new"]'); await page.waitForSelector('[data-testid="cli-save"]');
+    await page.fill('[data-testid="cli-name"]', 'Dona Márcia'); await page.click('[data-testid="cli-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]'); await page.waitForSelector('[data-testid="enc-save"]');
+    await page.fill('[data-testid="enc-cliente-search"]', 'Márcia'); await page.click('[data-testid="enc-cliente-result"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'pão'); await page.click('[data-testid="enc-prodresult"]');
+    await page.click('[data-testid="enc-save"]'); await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    // A Receber → tap the row → the payment sheet shows the client in destaque.
+    await goto(page, 'Fiado');
+    await page.waitForSelector('[data-testid="fiado-search"]');     // #5 A-receber filter present
+    await page.click('[data-testid="fiado-row"]');
+    await page.waitForSelector('[data-testid="pag-cliente"]');
+    assert.match(await page.textContent('[data-testid="pag-cliente"]'), /Dona Márcia/);
+    await page.fill('[data-testid="pag-valor"]', '5');
+    await page.click('[data-testid="pag-add"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    // #6: the client's cadastro shows the financial/commercial history.
+    await goto(page, 'Clientes');
+    await page.click('.pa-row-item');
+    await page.waitForSelector('[data-testid="cli-hist"]');
+    const hist = await page.textContent('[data-testid="cli-hist"]');
+    assert.match(hist, /Total comprado/);
+    assert.match(hist, /Compras \(1\)/);
+    assert.match(hist, /Pagamentos \(1\)/);
     await page.close();
   });
 
