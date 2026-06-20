@@ -129,7 +129,8 @@
  * Keyed by date (id = the YYYY-MM-DD).
  * @typedef {object} ComandaItem
  * @property {string} productId
- * @property {number} realizado
+ * @property {number} [prevista]   // manual/avulso prevista (Rev 07); order products fall back to the day's order sum
+ * @property {number} realizado    // produzido/estoque — independent of prevista
  * @property {boolean} feito
  *
  * @typedef {object} Comanda

@@ -29,7 +29,7 @@ function unitsInDimension(u) {
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '🏠', screens: [['inicio', 'Início']] },
   { id: 'cadastros', label: 'Cadastro', icon: '📚', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['comanda', 'Comanda'], ['fiado', 'Fiado'], ['vendas', 'Vendas'], ['despesas', 'Despesas'], ['perdas', 'Perdas']] },
+  { id: 'operacao', label: 'Operação', icon: '🧾', screens: [['encomendas', 'Encomendas'], ['comanda', 'Comanda'], ['fiado', 'A Receber'], ['vendas', 'Vendas'], ['despesas', 'Despesas'], ['perdas', 'Perdas']] },
   { id: 'analise', label: 'Análise', icon: '📊', screens: [['precos', 'Preços'], ['relatorios', 'Relatórios'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙️', screens: [['ajustes', 'Ajustes']] },
 ];
@@ -67,10 +67,10 @@ const HELP_SCREENS = [
     'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar. Depois de um pagamento, dá pra gerar um recibo (PDF) ali mesmo — é um comprovante, não substitui nota fiscal.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
-    'A lista do que produzir num dia. O previsto vem sozinho das encomendas com entrega nessa data; você marca o que já fez (✓) e anota quanto PRODUZIU (“Produzi”) — não o que vendeu.',
-    'O que você produziu além do previsto fica “disponível para venda” (pra vender avulso). No fim aparecem o total disponível e o custo de produção do dia. O lucro do mês fica nos Relatórios.',
+    'A lista do que produzir num dia. A Quantidade Prevista vem sozinha das encomendas com entrega nessa data (e dá pra ajustar). Em Produzidos/Estoque você anota quanto PRODUZIU de verdade — não o que vendeu; vale pra estoque ou produção extra. Marque ✓ quando terminar.',
+    'Dá pra adicionar produtos avulsos (estoque, pronta entrega) mesmo sem encomenda, e excluir (✕) os que não quiser. O que passar do previsto fica “disponível para venda”. No fim aparecem o total disponível e o custo de produção; o dinheiro e o lucro ficam em A Receber / Relatórios.',
   ] },
-  { id: 'fiado', icon: '💳', label: 'Fiado', paras: [
+  { id: 'fiado', icon: '💳', label: 'A Receber', paras: [
     'Quem ainda tem valor a pagar das encomendas — o total a receber e cada pendência. Toque numa para registrar um pagamento (total ou parcial); o saldo é recalculado sozinho.',
     'Para corrigir um pagamento lançado errado, use o estorno (↩) na encomenda — ele cancela sem apagar o histórico.',
   ] },
@@ -956,11 +956,12 @@ function friendlyError(e) {
   return String(e && e.message ? e.message : e);
 }
 
-// ── Comanda do dia (Rev 04 — the day's production list) ──────────────────────────
-// Previsto is DERIVED live from that day's encomendas; only realizado + the "feito" check are
-// stored (per product) in a Comanda record keyed by date. Avulso items (made to sell, not ordered)
-// appear with previsto 0. Edits persist WITHOUT re-render (ctx.actions.persist) so the inputs keep
-// focus while she fills the table; indicators recompute in place.
+// ── Comanda do dia (production list; Rev 07 rework) ──────────────────────────────
+// Each product is a card: "Quantidade Prevista" (seeded from the day's orders, but EDITABLE and
+// STORED — so avulso/manual prevista persists), "Produzidos/Estoque" (produced, independent of
+// previsto — for stock, extras, or unplanned runs), a feito ✓, and a delete ✕ on avulso items.
+// Stored per date in a Comanda record: { productId, prevista?, realizado, feito }. Edits persist
+// WITHOUT a re-render (ctx.actions.persist) so inputs keep focus; indicators recompute in place.
 function comandaPanel(ctx) {
   const { store } = ctx;
   const config = store.getConfig();
@@ -972,40 +973,44 @@ function comandaPanel(ctx) {
   const dateInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-date', type: 'date', value: date });
   dateInput.addEventListener('change', () => ctx.actions.setComandaDate(dateInput.value || todayInput()));
 
-  // Previsto: sum the day's orders by product.
-  const prev = new Map();
+  // Previsto seeded from the day's orders (per product).
+  const ordered = new Map();
   for (const e of store.state.encomendas) {
     if ((e.deliveryDate || '').slice(0, 10) !== date) continue;
-    for (const it of (e.itens || [])) prev.set(it.productId, (prev.get(it.productId) || 0) + (Number(it.qty) || 0));
+    for (const it of (e.itens || [])) ordered.set(it.productId, (ordered.get(it.productId) || 0) + (Number(it.qty) || 0));
   }
-  // Realizado/feito: local working copy of the stored comanda for this date.
+  // Working copy of the stored comanda: productId → { prevista|undefined, realizado, feito }.
   const stored = store.get('comandas', date);
-  const real = new Map(); // productId → { realizado, feito }
-  for (const it of (stored?.itens || [])) real.set(it.productId, { realizado: Number(it.realizado) || 0, feito: !!it.feito });
+  const items = new Map();
+  for (const it of (stored?.itens || [])) items.set(it.productId, { prevista: it.prevista == null ? undefined : Number(it.prevista), realizado: Number(it.realizado) || 0, feito: !!it.feito });
 
-  // Products to show = order products ∪ stored (avulso) products, ordered by product name.
-  const pids = [...new Set([...prev.keys(), ...real.keys()])]
+  // Order products ∪ stored (avulso) products, by name. Mutable so add/remove avulso re-render rows.
+  let pids = [...new Set([...ordered.keys(), ...items.keys()])]
     .sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
 
+  const ensure = (pid) => { let v = items.get(pid); if (!v) { v = { prevista: undefined, realizado: 0, feito: false }; items.set(pid, v); } return v; };
+  const previstaOf = (pid) => { const v = items.get(pid); return v && v.prevista != null ? v.prevista : (ordered.get(pid) || 0); };
+  const isAvulso = (pid) => !ordered.has(pid);
+
   function persistComanda() {
-    const itens = [...real.entries()]
-      .filter(([, v]) => (v.realizado || 0) > 0 || v.feito)
-      .map(([productId, v]) => ({ productId, realizado: v.realizado || 0, feito: !!v.feito }));
-    ctx.actions.persist((s) => {
-      if (itens.length) s.upsertComanda({ id: date, date, itens });
-      else if (s.get('comandas', date)) s.removeComanda(date);
-    });
+    const itens = [];
+    for (const [pid, v] of items) {
+      if ((v.prevista != null && v.prevista > 0) || (v.realizado || 0) > 0 || v.feito) {
+        itens.push({ productId: pid, ...(v.prevista != null ? { prevista: v.prevista } : {}), realizado: v.realizado || 0, feito: !!v.feito });
+      }
+    }
+    ctx.actions.persist((s) => { if (itens.length) s.upsertComanda({ id: date, date, itens }); else if (s.get('comandas', date)) s.removeComanda(date); });
   }
 
   const indEl = el('div', { class: 'pa-comanda-ind', 'data-testid': 'cmd-indicadores' });
   function recompute() {
     let custo = 0, totalPrev = 0, totalProd = 0, disponivel = 0;
     for (const pid of pids) {
-      const prod = real.get(pid)?.realizado || 0;
-      const previsto = prev.get(pid) || 0;
+      const prod = items.get(pid)?.realizado || 0;
+      const prevista = previstaOf(pid);
       custo += prod * unitCost(pid);
-      totalPrev += previsto; totalProd += prod;
-      disponivel += Math.max(0, prod - previsto);  // produced beyond what was ordered → free to sell
+      totalPrev += prevista; totalProd += prod;
+      disponivel += Math.max(0, prod - prevista); // produced beyond the prevista → free to sell
     }
     indEl.replaceChildren(
       el('table', { class: 'pa-kv' }, [
@@ -1013,71 +1018,69 @@ function comandaPanel(ctx) {
         el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Disponível para venda' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-disponivel', text: `${fmtNum(disponivel)} un` })]),
         el('tr', {}, [el('td', { text: 'Custo de produção' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-custo', text: brl(custo) })]),
       ]),
-      el('p', { class: 'pa-hint', text: 'Produzido = o que você FEZ (não o que vendeu). O que passou do previsto fica disponível para vender avulso. O dinheiro recebido e o lucro do mês ficam no Fiado/Relatórios.' }),
+      el('p', { class: 'pa-hint', text: 'Produzido/estoque = o que você FEZ (não o que vendeu) — vale pra estoque ou produção extra. O que passar do previsto fica disponível pra vender avulso. O dinheiro recebido e o lucro ficam em A Receber / Relatórios.' }),
     );
   }
 
-  const body = el('tbody');
-  function renderRows() {
-    body.replaceChildren(...(pids.length ? pids.map((pid) => {
-      const p = store.get('products', pid);
-      const previsto = prev.get(pid) || 0;
-      const cur = real.get(pid) || { realizado: 0, feito: false };
-      const rInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: cur.realizado ? fmtNum(cur.realizado) : '', 'aria-label': 'realizado' });
-      const chk = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); chk.checked = cur.feito;
-      const exced = el('span', { class: 'pa-muted pa-exced' });
-      const updExced = () => { const r = real.get(pid)?.realizado || 0; const d = r - previsto; exced.textContent = d > 0 ? `disponível: ${fmtNum(d)}` : (r > 0 && d < 0 ? `faltam ${fmtNum(-d)}` : ''); };
-      rInput.addEventListener('input', () => {
-        const v = parseNum(rInput.value) || 0;
-        real.set(pid, { realizado: v, feito: real.get(pid)?.feito || false });
-        updExced(); recompute(); persistComanda();
-      });
-      chk.addEventListener('change', () => {
-        real.set(pid, { realizado: real.get(pid)?.realizado || 0, feito: chk.checked });
-        persistComanda();
-      });
-      updExced();
-      return el('tr', { class: chk.checked ? 'pa-done' : '' }, [
-        el('td', {}, [el('div', { text: p ? p.name : '(produto removido)' + (previsto ? '' : ' · avulso') }), previsto ? null : el('span', { class: 'pa-muted pa-exced', text: 'avulso' }), exced].filter(Boolean)),
-        el('td', { class: 'pa-num pa-prev', text: previsto ? fmtNum(previsto) : '—' }),
-        el('td', {}, rInput),
-        el('td', { class: 'pa-center' }, chk),
-      ]);
-    }) : [el('tr', {}, el('td', { colspan: '4' }, el('p', { class: 'pa-empty', text: 'Nada para este dia. Faça uma encomenda com entrega nesta data, ou adicione um item avulso abaixo.' })))]));
+  const list = el('div', { class: 'pa-cmd-list' });
+  function itemCard(pid) {
+    const p = store.get('products', pid);
+    const v = items.get(pid) || { prevista: undefined, realizado: 0, feito: false };
+    const avulso = isAvulso(pid);
+    const prevInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-prevista', type: 'text', inputmode: 'decimal', value: v.prevista != null ? fmtNum(v.prevista) : (ordered.get(pid) ? fmtNum(ordered.get(pid)) : ''), 'aria-label': 'quantidade prevista' });
+    const prodInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: v.realizado ? fmtNum(v.realizado) : '', 'aria-label': 'produzidos/estoque' });
+    const chk = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); chk.checked = v.feito;
+    const saldo = el('span', { class: 'pa-muted pa-exced' });
+    const updSaldo = () => { const prod = items.get(pid)?.realizado || 0; const d = prod - previstaOf(pid); saldo.textContent = d > 0 ? `disponível para venda: ${fmtNum(d)}` : (prod > 0 && d < 0 ? `saldo a produzir: ${fmtNum(-d)}` : ''); };
+    prevInput.addEventListener('input', () => { const n = parseNum(prevInput.value); ensure(pid).prevista = n == null ? undefined : n; updSaldo(); recompute(); persistComanda(); });
+    prodInput.addEventListener('input', () => { ensure(pid).realizado = parseNum(prodInput.value) || 0; updSaldo(); recompute(); persistComanda(); });
+    const card = el('div', { class: 'pa-cmd-item' + (v.feito ? ' pa-done' : '') });
+    chk.addEventListener('change', () => { ensure(pid).feito = chk.checked; card.classList.toggle('pa-done', chk.checked); persistComanda(); });
+    updSaldo();
+    const del = avulso ? el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cmd-del', title: 'Excluir da comanda', onclick: () => { items.delete(pid); pids = pids.filter((x) => x !== pid); card.remove(); recompute(); persistComanda(); } }, '✕') : null;
+    card.append(
+      el('div', { class: 'pa-cmd-head' }, [
+        el('strong', { class: 'pa-grow', text: p ? p.name : '(produto removido)' }),
+        avulso && el('span', { class: 'pa-badge', text: 'avulso' }),
+        del,
+      ].filter(Boolean)),
+      el('div', { class: 'pa-cmd-fields' }, [
+        el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Quantidade Prevista' }), prevInput]),
+        el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Produzidos/Estoque' }), prodInput]),
+        el('label', { class: 'pa-cmd-feito' }, [chk, el('span', { text: 'Feito' })]),
+      ]),
+      saldo,
+    );
+    return card;
   }
-  renderRows();
+  function renderList() {
+    list.replaceChildren(...(pids.length ? pids.map(itemCard)
+      : [el('p', { class: 'pa-empty', text: 'Nada para este dia. Faça uma encomenda com entrega nesta data, ou adicione um produto avulso abaixo.' })]));
+  }
+  renderList();
   recompute();
 
-  // Add an avulso product (made to sell, not ordered). Uses mutate (re-render) — a discrete action,
-  // not per-keystroke — which re-reads the stored comanda so the new row appears.
-  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'cmd-prodsearch', type: 'search', placeholder: 'Adicionar item avulso…' });
+  // Add an avulso product (stock / pronta-entrega — not from an order). Appended in place (no full
+  // re-render), so an unfilled row survives; it persists as soon as she types a prevista/produzido.
+  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'cmd-prodsearch', type: 'search', placeholder: 'Adicionar produto avulso (estoque, pronta entrega)…' });
   const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
   function renderResults() {
     const q = norm(search.value);
     if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
-    const matches = store.state.products.filter((p) => norm(p.name).includes(q) && !real.has(p.id) && !prev.has(p.id)).slice(0, 6);
+    const matches = store.state.products.filter((p) => norm(p.name).includes(q) && !items.has(p.id) && !ordered.has(p.id)).slice(0, 6);
     results.style.display = matches.length ? '' : 'none';
     results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-prodresult', onclick: () => {
-      real.set(p.id, { realizado: 0, feito: false });
-      const itens = [...real.entries()].map(([productId, v]) => ({ productId, realizado: v.realizado || 0, feito: !!v.feito }));
-      // realizado 0 wouldn't persist on its own, so add the row to the live table now and seed storage.
-      ctx.actions.mutate((s) => s.upsertComanda({ id: date, date, itens }));
+      items.set(p.id, { prevista: undefined, realizado: 0, feito: false });
+      pids = [...new Set([...pids, p.id])].sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
+      search.value = ''; renderResults(); renderList();
     } }, [el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' })])));
   }
   search.addEventListener('input', renderResults);
 
   return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Comanda do dia' }),
-      dateInput,
-    ]),
-    el('p', { class: 'pa-hint', text: 'O que produzir hoje. Previsto vem das encomendas do dia; marque ✓ e anote quanto você PRODUZIU — o que passar do previsto fica disponível para vender avulso.' }),
-    el('table', { class: 'pa-comanda' }, [
-      el('thead', {}, el('tr', {}, [
-        el('th', { text: 'Produto' }), el('th', { class: 'pa-num', text: 'Prev.' }), el('th', { class: 'pa-num', text: 'Produzi' }), el('th', { class: 'pa-center', text: '✓' }),
-      ])),
-      body,
-    ]),
+    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Comanda do dia' }), dateInput]),
+    el('p', { class: 'pa-hint', text: 'O que produzir hoje. A Quantidade Prevista vem das encomendas do dia (dá pra ajustar), e você anota o que PRODUZIU em Produzidos/Estoque. Pode adicionar produtos avulsos pra estoque ou pronta entrega.' }),
+    list,
     search, results,
     indEl,
   ]);
@@ -1487,7 +1490,7 @@ function fiadoPanel(ctx) {
   const total = pend.reduce((s, x) => s + x.saldo, 0);
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Fiado' }),
+      el('h2', { class: 'pa-grow', text: 'A Receber' }),
       pend.length > 0 && fichasButton(ctx, '🖨 Fichas', () => buildFichas(store, pend.map((x) => x.e)), 'fichas-pendentes.pdf'),
     ].filter(Boolean)),
     el('p', { class: 'pa-hint', text: 'Quem ainda tem valor a pagar das encomendas. Toque para registrar um pagamento. “Fichas” gera um PDF (3 por folha) pra imprimir e arquivar.' }),
@@ -1653,14 +1656,22 @@ function perdasPanel(ctx) {
   const month = ctx.view.logMonth;
   const items = month ? all.filter((p) => monthOf(p.at) === month) : all;
   const total = items.reduce((s, p) => (store.isReversed('perda', p.id) ? s : s + (p.amount || 0)), 0);
-  const list = logList(items, (p) => el('li', { class: 'pa-list-item' + (store.isReversed('perda', p.id) ? ' pa-reversed' : ''), 'data-search': p.note || '' }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', {}, el('strong', { text: p.note || (PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1]) || 'Perda' })),
-      el('span', { class: 'pa-muted', text: PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1] || 'Outro' }),
-    ]),
-    el('span', { class: 'pa-num pa-bad', text: `− ${brl(p.amount)}` }),
-    estornoControl(ctx, 'perda', p.id),
-  ]));
+  const list = logList(items, (p) => {
+    const kindLabel = PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1] || 'Outro';
+    const resolved = (p.refKind === 'insumo' && p.refId && store.get('ingredients', p.refId)?.name)
+      || (p.refKind === 'produto' && p.refId && store.get('products', p.refId)?.name) || null;
+    // Title = the lost item (Insumo/Produto) in bold; observação (note) below in smaller type.
+    const title = resolved ? (p.qty ? `${resolved} · ${fmtNum(p.qty)}` : resolved) : (p.note || kindLabel);
+    const subtitle = resolved ? (p.note || kindLabel) : (p.note ? kindLabel : '');
+    return el('li', { class: 'pa-list-item' + (store.isReversed('perda', p.id) ? ' pa-reversed' : ''), 'data-search': `${resolved || ''} ${p.note || ''}` }, [
+      el('div', { class: 'pa-grow' }, [
+        el('div', {}, el('strong', { text: title })),
+        subtitle && el('span', { class: 'pa-muted', text: subtitle }),
+      ].filter(Boolean)),
+      el('span', { class: 'pa-num pa-bad', text: `− ${brl(p.amount)}` }),
+      estornoControl(ctx, 'perda', p.id),
+    ]);
+  });
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Perdas' }),
@@ -1763,7 +1774,7 @@ function relatoriosPanel(ctx) {
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Entrou' })]),
     kv('Recebido', brl(sum.recebido)),
     sum.faturado !== sum.recebidoVendas && kv('Faturado (entregue)', brl(sum.faturado)),
-    sum.aReceber > 0 && kv('A receber (fiado)', brl(sum.aReceber)),
+    sum.aReceber > 0 && kv('A receber', brl(sum.aReceber)),
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Saiu' })]),
     kv('Despesas variáveis', brl(sum.despVar)),
     kv('Despesas fixas', brl(sum.despFix)),
@@ -1856,7 +1867,7 @@ function reportCsv(month, sum, despCat, byProduct, byClient) {
     ['Relatório', month], [],
     ['Recebido', n2(sum.recebido)],
     ['Faturado (entregue)', n2(sum.faturado)],
-    ['A receber (fiado)', n2(sum.aReceber)],
+    ['A receber', n2(sum.aReceber)],
     ['Despesas variáveis', n2(sum.despVar)],
     ['Despesas fixas', n2(sum.despFix)],
     ['Perdas', n2(sum.perdas)],

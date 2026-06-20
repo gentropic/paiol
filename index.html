@@ -185,6 +185,17 @@
     .pa-comanda tr.pa-done td:first-child div:first-child { color: var(--au-fg-soft); }
     .pa-exced { display: block; font-size: 0.74rem; color: var(--au-fg-soft); }
     .pa-comanda-ind { margin-top: 10px; }
+    /* Rev 07: comanda as a card per product (full labels, aligned fields) */
+    .pa-cmd-list { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 4px; }
+    .pa-cmd-item { border: 1px solid var(--au-border); border-radius: 12px; padding: 10px 12px; background: #fff; }
+    .pa-cmd-item.pa-done { background: #f6faf4; }
+    .pa-cmd-head { display: flex; align-items: center; gap: 8px; }
+    .pa-cmd-fields { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 8px 0 2px; }
+    .pa-cmd-field { display: flex; flex-direction: column; gap: 3px; }
+    .pa-cmd-field > span { font-size: 0.7rem; color: var(--au-fg-soft); }
+    .pa-cmd-field .pa-qty { width: 92px; text-align: center; }
+    .pa-cmd-feito { display: flex; align-items: center; gap: 6px; align-self: flex-end; padding-bottom: 7px; }
+    .pa-cmd-feito input { width: 22px; height: 22px; }
 
     /* Lote 1: search, edit, history, observação */
     .pa-search { width: 100%; margin: 0 0 10px; }

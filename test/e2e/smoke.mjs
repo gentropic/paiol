@@ -330,8 +330,8 @@ describe('paiol UI smoke', () => {
 
     // Comanda for today picks up the order as previsto.
     await goto(page, 'Comanda');
-    await page.waitForSelector('.pa-comanda tbody tr');
-    assert.match(await page.textContent('.pa-comanda'), /Pãozinho/, 'comanda did not derive previsto from the order');
+    await page.waitForSelector('.pa-cmd-item');
+    assert.match(await page.textContent('.pa-cmd-list'), /Pãozinho/, 'comanda did not derive previsto from the order');
 
     // Produced 2 against a previsto of 1 → 1 unit available to sell; production cost > 0.
     await page.fill('[data-testid="cmd-realizado"]', '2');
@@ -350,6 +350,37 @@ describe('paiol UI smoke', () => {
     assert.equal(await page.inputValue('[data-testid="cmd-realizado"]'), '2', 'realizado did not persist');
 
     assert.deepEqual(errors, [], `errors in comanda flow: ${errors.join(' | ')}`);
+    await page.close();
+  });
+
+  test('Rev 07: comanda — avulso product with a Quantidade Prevista that PERSISTS, + delete', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page); // product "Pãozinho", no orders today
+
+    await goto(page, 'Comanda');
+    // add an avulso product (no encomenda backing it)
+    await page.fill('[data-testid="cmd-prodsearch"]', 'pão');
+    await page.click('[data-testid="cmd-prodresult"]');
+    await page.waitForSelector('[data-testid="cmd-prevista"]');
+    // set a manual Quantidade Prevista + a produced amount (independent)
+    await page.fill('[data-testid="cmd-prevista"]', '10');
+    await page.fill('[data-testid="cmd-realizado"]', '8');
+    assert.match(await page.textContent('.pa-cmd-item'), /saldo a produzir/); // 10 prevista − 8 produzido
+
+    // THE BUG FIX: the avulso prevista survives a reload (was lost before Rev 07)
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Comanda');
+    await page.waitForSelector('[data-testid="cmd-prevista"]');
+    assert.equal(await page.inputValue('[data-testid="cmd-prevista"]'), '10', 'avulso prevista did not persist');
+    assert.equal(await page.inputValue('[data-testid="cmd-realizado"]'), '8', 'produzido did not persist');
+
+    // delete removes it
+    await page.click('[data-testid="cmd-del"]');
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Comanda');
+    assert.equal(await page.locator('[data-testid="cmd-prevista"]').count(), 0, 'deleted avulso came back');
     await page.close();
   });
 
