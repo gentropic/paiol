@@ -120,6 +120,8 @@
  * @property {'retirada'|'motoboy'} [deliveryMethod]
  * @property {number} [frete]
  * @property {string} [notes]
+ * @property {boolean} [entregue]    // delivered (Rev 07) — operational flag, SEPARATE from paid
+ * @property {boolean} [urgente]     // priority (Rev 07) — pinned to the top of the list + highlighted
  */
 
 /**

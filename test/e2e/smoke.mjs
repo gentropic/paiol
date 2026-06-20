@@ -815,7 +815,8 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Encomendas');
     await page.click('[data-testid="enc-new"]');
     await page.waitForSelector('[data-testid="enc-save"]');
-    await page.selectOption('[data-testid="enc-cliente"]', { label: 'Dona Márcia' });
+    await page.fill('[data-testid="enc-cliente-search"]', 'Márcia');
+    await page.click('[data-testid="enc-cliente-result"]');
     // search-to-add a product
     await page.fill('[data-testid="enc-prodsearch"]', 'pão');
     await page.click('[data-testid="enc-prodresult"]');
@@ -835,6 +836,48 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('Rev 07: encomendas — Urgente no topo, Entregue persiste, filtro de status (Lote B)', async () => {
+    const page = await context.newPage();
+    await seedBusiness(page);
+    await goto(page, 'Clientes');
+    for (const nm of ['Ana', 'Bruno']) {
+      await page.click('[data-testid="cli-new"]'); await page.waitForSelector('[data-testid="cli-save"]');
+      await page.fill('[data-testid="cli-name"]', nm); await page.click('[data-testid="cli-save"]');
+      await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    }
+    await goto(page, 'Encomendas');
+    const addOrder = async (cli, urgent) => {
+      await page.click('[data-testid="enc-new"]'); await page.waitForSelector('[data-testid="enc-save"]');
+      await page.fill('[data-testid="enc-cliente-search"]', cli); await page.click('[data-testid="enc-cliente-result"]');
+      if (urgent) await page.check('[data-testid="enc-urgente"]');
+      await page.fill('[data-testid="enc-prodsearch"]', 'pão'); await page.click('[data-testid="enc-prodresult"]');
+      await page.click('[data-testid="enc-save"]'); await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    };
+    await addOrder('Ana', false);
+    await addOrder('Bruno', true);
+
+    // Bruno (urgente) pinned to the top regardless of order/date.
+    const names = () => page.locator('.pa-row-item .pa-enc-title strong').allTextContents();
+    assert.equal((await names())[0], 'Bruno', 'urgente should be first');
+
+    // Mark Ana's order (2nd row) as entregue.
+    await page.locator('[data-testid="enc-entregue"]').nth(1).click();
+    await page.waitForTimeout(300);
+    // Filter "Não entregues" → only Bruno remains.
+    await page.click('[data-testid="enc-f-naoentregue"]');
+    await page.waitForTimeout(200);
+    assert.deepEqual(await names(), ['Bruno'], 'entregue order should drop out of "não entregues"');
+
+    // urgente + entregue persist across reload.
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Encomendas');
+    await page.waitForSelector('.pa-row-item');
+    assert.equal((await names())[0], 'Bruno', 'urgente did not persist');
+    assert.match(await page.textContent('.pa-list'), /Entregue/, 'entregue did not persist');
+    await page.close();
+  });
+
   test('Rev 04: gerar fichas baixa um PDF válido (lazy pdf-lib)', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
@@ -847,7 +890,8 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Encomendas');
     await page.click('[data-testid="enc-new"]');
     await page.waitForSelector('[data-testid="enc-save"]');
-    await page.selectOption('[data-testid="enc-cliente"]', { label: 'Dona Márcia' });
+    await page.fill('[data-testid="enc-cliente-search"]', 'Márcia');
+    await page.click('[data-testid="enc-cliente-result"]');
     await page.fill('[data-testid="enc-prodsearch"]', 'pão');
     await page.click('[data-testid="enc-prodresult"]');
     await page.click('[data-testid="enc-save"]');

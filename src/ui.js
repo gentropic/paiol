@@ -63,8 +63,8 @@ const HELP_SCREENS = [
     'Se aparecer “sem preço”, é porque falta cadastrar o preço de algum insumo usado.',
   ] },
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
-    'Os pedidos com data de entrega. Escolha o cliente, a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
-    'Tudo é editável. Toque em “+ Nova” para criar, ou numa encomenda para editar. Depois de um pagamento, dá pra gerar um recibo (PDF) ali mesmo — é um comprovante, não substitui nota fiscal.',
+    'Os pedidos com data de entrega. Busque o cliente pelo nome, escolha a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
+    'Na lista dá pra ordenar (entrega/cliente/pedido), filtrar (não entregues, a receber, pagas, urgentes) e buscar por cliente ou produto. Marque ⭐ pra deixar uma encomenda URGENTE (vai pro topo) e “Entregar” quando sair. Depois de um pagamento, gera um recibo (PDF) ali mesmo — é um comprovante, não substitui nota fiscal.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
     'A lista do que produzir num dia. A Quantidade Prevista vem sozinha das encomendas com entrega nessa data (e dá pra ajustar). Em Produzidos/Estoque você anota quanto PRODUZIU de verdade — não o que vendeu; vale pra estoque ou produção extra. Marque ✓ quando terminar.',
@@ -1191,20 +1191,76 @@ function vendaSheet(ctx) {
 
 // ── Encomendas (Rev 04 — the order = the sale; mutable, editable) ────────────────
 
+/** A search-to-select client picker (Rev 07) — scales past a dropdown when there are many clients.
+ *  `.value()` → the selected client id (or '' for sem cliente). */
+function clientePicker(store, initialId) {
+  let selected = initialId || '';
+  const container = el('div', { class: 'pa-cli-picker' });
+  function render() {
+    const cli = selected ? store.get('clients', selected) : null;
+    if (cli) {
+      container.replaceChildren(el('div', { class: 'pa-cli-chip', 'data-testid': 'enc-cliente-chip' }, [
+        el('span', { class: 'pa-grow', text: cli.name }),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { selected = ''; render(); } }, '✕'),
+      ]));
+      return;
+    }
+    const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'enc-cliente-search', type: 'search', placeholder: 'Buscar cliente (ou deixe sem cliente)…' });
+    const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+    search.addEventListener('input', () => {
+      const q = norm(search.value);
+      if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
+      const matches = store.state.clients.filter((c) => norm(c.name).includes(q)).slice(0, 6);
+      results.style.display = matches.length ? '' : 'none';
+      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-cliente-result', onclick: () => { selected = c.id; render(); } }, [el('div', { class: 'pa-grow' }, el('strong', { text: c.name })), el('span', { class: 'pa-add', text: '+' })])));
+    });
+    container.replaceChildren(search, results);
+  }
+  render();
+  return { el: container, value: () => selected };
+}
+
 function encomendasPanel(ctx) {
   const { store } = ctx;
   const products = store.state.products;
-  const all = store.state.encomendas.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1));
-  const ul = el('ul', { class: 'pa-list pa-rows' }, all.map((e) => encomendaRow(ctx, e)));
+  const { encSort: sort, encStatus: status, encMonth: month } = ctx.view;
+  const cliName = (e) => norm(store.get('clients', e.clienteId)?.name || 'zzz');
+
+  let list = store.state.encomendas.slice();
+  if (month) list = list.filter((e) => monthOf(e.deliveryDate) === month);
+  if (status === 'naoentregue') list = list.filter((e) => !e.entregue);
+  else if (status === 'entregues') list = list.filter((e) => e.entregue);
+  else if (status === 'areceber') list = list.filter((e) => (e.total || 0) - store.paidFor(e.id) > 0.005);
+  else if (status === 'pagas') list = list.filter((e) => (e.total || 0) - store.paidFor(e.id) <= 0.005);
+  else if (status === 'urgentes') list = list.filter((e) => e.urgente);
+  list.sort((a, b) => {
+    if (!!a.urgente !== !!b.urgente) return a.urgente ? -1 : 1; // urgentes pinned to the top
+    if (sort === 'cliente') return cliName(a).localeCompare(cliName(b));
+    if (sort === 'pedido') return (a.at < b.at ? 1 : -1);        // most recently lançada first
+    return (a.deliveryDate < b.deliveryDate ? 1 : -1);           // by delivery date
+  });
+  const ul = el('ul', { class: 'pa-list pa-rows' }, list.map((e) => encomendaRow(ctx, e)));
+
+  const chip = (k, label) => el('button', { class: 'pa-chip' + (status === k ? ' pa-chip-on' : ''), 'data-testid': `enc-f-${k}`, onclick: () => ctx.actions.setEncStatus(k) }, label);
+  const sortSel = el('select', { class: 'pa-input pa-narrow', 'data-testid': 'enc-sort' }, [['entrega', 'Entrega'], ['cliente', 'Cliente'], ['pedido', 'Pedido']].map(([v, t]) => el('option', { value: v, text: t, ...(sort === v ? { selected: 'selected' } : {}) })));
+  sortSel.addEventListener('change', () => ctx.actions.setEncSort(sortSel.value));
+  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-month', type: 'month', value: month || '' });
+  monthInput.addEventListener('change', () => ctx.actions.setEncMonth(monthInput.value || null));
+
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Encomendas' }),
       products.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'enc-new', onclick: () => ctx.actions.openModal({ kind: 'encomenda-add' }) }, '+ Nova'),
     ].filter(Boolean)),
     products.length === 0 && el('p', { class: 'pa-hint', text: 'Crie um produto primeiro.' }),
-    all.length === 0
+    store.state.encomendas.length === 0
       ? products.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma encomenda. Toque em “+ Nova”.' })
-      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque numa encomenda para editar.' }), searchInput('Buscar cliente ou produto…', ul, 'enc-search'), ul]),
+      : el('div', {}, [
+          el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Ordenar' }), sortSel, el('span', { class: 'pa-lab', text: 'Mês' }), monthInput, month && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.setEncMonth(null) }, 'limpar')].filter(Boolean)),
+          el('div', { class: 'pa-chiprow' }, [chip('todas', 'Todas'), chip('naoentregue', 'Não entregues'), chip('areceber', 'A receber'), chip('pagas', 'Pagas'), chip('urgentes', 'Urgentes')]),
+          searchInput('Buscar cliente ou produto…', ul, 'enc-search'),
+          list.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhuma encomenda com esse filtro.' }),
+        ].filter(Boolean)),
   ].filter(Boolean));
 }
 
@@ -1226,13 +1282,15 @@ function encomendaRow(ctx, e) {
   const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
   const resumo = encomendaItemsResumo(store, e);
   const st = paymentStatus(store, e);
-  return el('li', { class: 'pa-row-item', 'data-search': `${cli ? cli.name : ''} ${resumo}`, onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: e.id }) }, [
+  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
+  const urg = el('button', { class: 'pa-btn pa-ghost pa-sm pa-urg-btn', title: e.urgente ? 'Tirar urgência' : 'Marcar urgente', onclick: stop(() => ctx.actions.mutate((s) => s.upsertEncomenda({ ...e, urgente: !e.urgente }))) }, e.urgente ? '⭐' : '☆');
+  const ent = el('button', { class: 'pa-ent' + (e.entregue ? ' pa-ent-on' : ''), 'data-testid': 'enc-entregue', title: e.entregue ? 'Entregue' : 'Marcar como entregue', onclick: stop(() => ctx.actions.mutate((s) => s.upsertEncomenda({ ...e, entregue: !e.entregue }))) }, e.entregue ? '✓ Entregue' : 'Entregar');
+  return el('li', { class: 'pa-row-item' + (e.urgente ? ' pa-urgente' : '') + (e.entregue ? ' pa-row-done' : ''), 'data-search': `${cli ? cli.name : ''} ${resumo}`, onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: e.id }) }, [
     el('div', { class: 'pa-grow' }, [
-      el('div', {}, [el('strong', { text: cli ? cli.name : 'Sem cliente' }), el('span', { class: `pa-badge ${st.cls}`, text: st.label })]),
+      el('div', { class: 'pa-enc-title' }, [e.urgente && el('span', { class: 'pa-badge pa-urg', text: 'URGENTE' }), el('strong', { text: cli ? cli.name : 'Sem cliente' }), el('span', { class: `pa-badge ${st.cls}`, text: st.label })].filter(Boolean)),
       el('span', { class: 'pa-muted', text: `${fmtDate(e.deliveryDate)} · ${resumo}` }),
+      el('div', { class: 'pa-enc-actions' }, [el('span', { class: 'pa-num pa-grow', text: brl(e.total) }), urg, ent]),
     ]),
-    el('span', { class: 'pa-num', text: brl(e.total) }),
-    el('span', { class: 'pa-chev', text: '›' }),
   ]);
 }
 
@@ -1249,10 +1307,8 @@ function encomendaSheet(ctx, enc) {
 
   const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice })) : [];
 
-  const cliSel = el('select', { class: 'pa-input', 'data-testid': 'enc-cliente' }, [
-    el('option', { value: '', text: '— sem cliente —' }),
-    ...store.state.clients.map((c) => el('option', { value: c.id, text: c.name, ...(enc && enc.clienteId === c.id ? { selected: 'selected' } : {}) })),
-  ]);
+  const cliPicker = clientePicker(store, enc ? enc.clienteId : '');
+  const urgenteChk = el('input', { type: 'checkbox', 'data-testid': 'enc-urgente' }); urgenteChk.checked = !!(enc && enc.urgente);
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
   const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
   const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
@@ -1309,13 +1365,14 @@ function encomendaSheet(ctx, enc) {
       ...(enc || { at: nowIso() }),
       id: enc ? enc.id : uuid(),
       deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
-      clienteId: cliSel.value || undefined,
+      clienteId: cliPicker.value() || undefined,
       itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0 })),
       total: grandTotal(),
       costSnapshot: cost,
       deliveryMethod: entrega.value,
       frete: fr == null ? undefined : fr,
       notes: ob || undefined,
+      urgente: urgenteChk.checked || undefined,
     }));
   }
 
@@ -1345,8 +1402,9 @@ function encomendaSheet(ctx, enc) {
   }
 
   const rows = [
-    field('Cliente', cliSel),
+    field('Cliente', cliPicker.el),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Entrega' }), date, entrega]),
+    el('label', { class: 'pa-check' }, [urgenteChk, el('span', { text: 'Marcar como URGENTE (vai pro topo da lista)' })]),
     el('h3', { class: 'pa-h3', text: 'Itens' }),
     itemsList,
     search, results,
