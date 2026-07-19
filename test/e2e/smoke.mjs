@@ -26,20 +26,24 @@ async function waitForServer(url, timeoutMs = 10_000) {
 
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
-  Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Comanda: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Despesas: 'operacao', Perdas: 'operacao',
-  Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
+  Insumos: 'cadastro', Receitas: 'cadastro', Produtos: 'cadastro', Clientes: 'cadastro',
+  Comanda: 'producao', Vendas: 'pedidos', Encomendas: 'pedidos', Fiado: 'pedidos', Despesas: 'financeiro', Perdas: 'producao',
+  Preços: 'financeiro', Relatórios: 'financeiro', Simulador: 'financeiro',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Comanda: 'comanda',
-  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'despesas', Perdas: 'perdas',
+  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'financeiro', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
   await page.locator(`.pa-navbtn[data-section="${SCREEN_SECTION[screen]}"]`).click();
-  const seg = page.locator(`.pa-segbtn[data-screen="${SCREEN_ID[screen]}"]`);
+  const seg = page.locator(`.pa-modulebtn[data-screen="${SCREEN_ID[screen]}"]`);
   if (await seg.count()) await seg.click();
+  else {
+    const quickLabel = { 'Preços': 'Preços e custos', 'Relatórios': 'Relatório gerencial', 'Simulador': 'Simular preço' }[screen];
+    if (quickLabel) await page.getByRole('button', { name: quickLabel, exact: true }).click();
+  }
 }
 
 // Add an insumo via the "+ Novo" bottom sheet. (Must be on the Insumos screen.)
@@ -297,7 +301,7 @@ describe('paiol UI smoke', () => {
     await addVenda(page, { product: 'Pãozinho', qty: 3 });
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Pãozinho/);
-    assert.match(await page.textContent('.pa-card'), /lucro/); // running profit total
+    assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
 
     // Survives reload (events persisted to IndexedDB).
     await page.waitForTimeout(1200);
@@ -554,31 +558,26 @@ describe('paiol UI smoke', () => {
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-05-15', qty: 1 });
+    await page.fill('[data-testid="venda-start"]', '2026-05-15');
+    await page.fill('[data-testid="venda-end"]', '2026-05-15');
     await page.waitForSelector('.pa-list-item');
-    // The chosen day surfaces as the log's date header (not "Hoje"/"Ontem").
+    // The chosen day appears on the row inside the filtered period report.
     assert.match(await page.textContent('.pa-list'), /15\/05\/2026/);
     await page.close();
   });
 
-  test('Lote 3: Vendas search + month scope narrow the log (and the total)', async () => {
+  test('Vendas gerencial: período narrows the report and totals', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-04-10', qty: 1 });
     await addVenda(page, { date: '2026-05-20', qty: 2 });
-    await page.waitForSelector('.pa-list-item');
-    assert.equal(await page.locator('.pa-list-item').count(), 2, 'both sales listed with no filter');
-
-    // Month scope → only May rows survive, and the total label reflects the scope.
-    await page.fill('[data-testid="venda-month"]', '2026-05');
-    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item').length === 1);
-    assert.match(await page.textContent('.pa-totals'), /05\/26/);
-
-    // Search within the scope: a miss hides every row, a hit brings rows back (pure DOM, no re-render).
-    await page.fill('[data-testid="venda-search"]', 'zzz');
-    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].every((li) => li.style.display === 'none'));
-    await page.fill('[data-testid="venda-search"]', 'Pãozinho');
-    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].some((li) => li.style.display !== 'none'));
+    await page.fill('[data-testid="venda-start"]', '2026-04-01');
+    await page.fill('[data-testid="venda-end"]', '2026-05-31');
+    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 2);
+    await page.fill('[data-testid="venda-start"]', '2026-05-01');
+    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 1);
+    assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
     await page.close();
   });
 
@@ -630,11 +629,11 @@ describe('paiol UI smoke', () => {
     assert.match(await page.textContent('.pa-card'), /Este mês/);        // lands on Início dashboard
 
     await page.click('[data-testid="home-encomenda"]');                   // quick action → Operação/Encomendas
-    await page.waitForSelector('.pa-navbtn[data-section="operacao"].active');
+    await page.waitForSelector('.pa-navbtn[data-section="pedidos"].active');
 
-    await page.click('.pa-navbtn[data-section="cadastros"]');             // bottom nav → Cadastro
+    await goto(page, 'Insumos');
     await page.waitForSelector('[data-testid="ins-new"]');
-    assert.equal(await page.locator('.pa-segbtn[data-screen="receitas"]').count(), 1); // segmented sub-nav
+    assert.equal(await page.locator('.pa-modulebtn[data-screen="receitas"]').count(), 1); // module sub-nav
 
     // Add an insumo with NO price → "sem preço" (guards the parseNum '' → null fix), then the
     // dashboard surfaces the alert.
@@ -720,19 +719,21 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Lote 3: estorno cancels a sale — it greys out and leaves the running total', async () => {
+  test('Lote 3: estorno preserves a sale in the desistências report', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { qty: 3 });
     await page.waitForSelector('.pa-list-item');
-    const totalBefore = await page.textContent('.pa-totals');
+    const totalBefore = await page.textContent('.pa-statgrid');
     await page.click('[data-testid="estornar"]');       // ↩ on the row
     await page.click('[data-testid="confirm-yes"]');     // confirm sheet
-    await page.waitForSelector('.pa-reversed');          // row now struck-through
-    assert.match(await page.textContent('.pa-list'), /estornado/);
-    // Revenue total drops to zero (the only sale was reversed) → totals row gone or zeroed.
-    const totalAfter = await page.locator('.pa-totals').count() ? await page.textContent('.pa-totals') : 'R$ 0,00';
+    await page.click('[data-testid="venda-f-desistencias"]');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-card'), /Total de desistências/);
+    // Revenue total drops to zero in the regular report; cancellation remains auditable.
+    await page.click('[data-testid="venda-f-todos"]');
+    const totalAfter = await page.textContent('.pa-statgrid');
     assert.notEqual(totalAfter, totalBefore);
     await page.close();
   });
@@ -978,13 +979,14 @@ describe('paiol UI smoke', () => {
     // Fiado: R$20 to receive → register a R$8 partial.
     await goto(page, 'Fiado');
     await page.waitForSelector('[data-testid="fiado-row"]');
-    assert.match(await page.textContent('.pa-totals'), /20,00/);
+    assert.match(await page.textContent('.pa-statgrid'), /20,00/);
     await page.click('[data-testid="fiado-row"]');
+    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
     await page.waitForSelector('[data-testid="pag-add"]');
     await page.fill('[data-testid="pag-valor"]', '8');
     await page.click('[data-testid="pag-add"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-totals'), /12,00/, 'saldo not reduced by the payment');
+    assert.match(await page.textContent('.pa-statgrid'), /12,00/, 'saldo not reduced by the payment');
 
     // The order's derived status is now "parcial".
     await goto(page, 'Encomendas');
@@ -1017,6 +1019,7 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Fiado');
     await page.waitForSelector('[data-testid="fiado-search"]');     // #5 A-receber filter present
     await page.click('[data-testid="fiado-row"]');
+    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
     await page.waitForSelector('[data-testid="pag-cliente"]');
     assert.match(await page.textContent('[data-testid="pag-cliente"]'), /Dona Márcia/);
     await page.fill('[data-testid="pag-valor"]', '5');

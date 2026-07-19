@@ -35,6 +35,7 @@ src/
   units.js         unit conversions + per-ingredient override graph (§3)
   cost-engine.js   cost engine: DAG roll-up, estimate/actual lens, MEI markup (§4)
   store.js         append-only event store, union-by-id merge, canonical YAML
+  finance.js       receivables/payables, settlements, chart of accounts, cash flow
   yaml-bridge.js   JS value <-> @gcu/yaml
   persist.js       backend-agnostic persistence over @gcu/vfs (§5)
   dropbox-auth.js  PKCE OAuth (no secret) + token manager
@@ -47,6 +48,18 @@ build.js              single-file builder
 ```
 
 Code identifiers are English; every label the user sees is Portuguese.
+
+## Finance ERP
+
+The Financeiro module centralizes the financial dashboard, accounts receivable and
+payable, partial settlements, chronological entries, actual/projected cash flow,
+purchases, suppliers, cash accounts, chart of accounts and management reports.
+Operational orders remain authoritative: an encomenda creates one linked receivable,
+its existing payment history is reused, and desistências are cancelled without deleting
+their history. Purchases update the ingredient price and create one linked payable.
+
+The migration to schema version 2 is additive. Existing recipes, products, comandas,
+orders, payments, losses and pricing simulations are preserved.
 
 ## License
 

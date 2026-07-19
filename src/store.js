@@ -8,12 +8,13 @@
 import { indexStore } from './cost-engine.js';
 import { toYaml, fromYaml } from './yaml-bridge.js';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 3;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'reversals'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals'];
 /** Mutable master-data collections (§2.1). */
-const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas', 'categories'];
+const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases'];
+const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
 
 /**
  * Seed financial categories (Rev 06) — the user reshapes them freely afterwards. `{name, kind}`
@@ -22,6 +23,7 @@ const MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'en
  */
 export const DEFAULT_CATEGORIES = [
   { name: 'Vendas', kind: 'receita' },
+  { name: 'Outras receitas', kind: 'receita' },
   { name: 'Aluguel', kind: 'despesaFixa' },
   { name: 'Energia elétrica', kind: 'despesaFixa' },
   { name: 'Água', kind: 'despesaFixa' },
@@ -33,6 +35,7 @@ export const DEFAULT_CATEGORIES = [
   { name: 'Frete', kind: 'despesaVariavel' },
   { name: 'Salários', kind: 'despesaVariavel' },
   { name: 'Outras', kind: 'despesaVariavel' },
+  { name: 'Custos de produção', kind: 'custo' },
 ];
 const ALL = [...MASTER_COLLECTIONS, ...EVENT_COLLECTIONS];
 
@@ -73,7 +76,8 @@ export function emptyState() {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
     ingredients: [], recipes: [], products: [], clients: [], encomendas: [], comandas: [], categories: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], reversals: [],
+    suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], trashItems: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [],
   };
 }
 
@@ -84,7 +88,7 @@ export class PaiolStore {
     this.state = { ...emptyState(), ...(state || {}) };
     // Normalize: ensure every collection exists and is an array.
     for (const c of ALL) if (!Array.isArray(this.state[c])) this.state[c] = [];
-    this.state.version = this.state.version || SCHEMA_VERSION;
+    this.state.version = Math.max(Number(this.state.version) || 1, SCHEMA_VERSION);
     // Backfill config defaults for any missing key (forward-compatible loads).
     this.state.config = { ...DEFAULT_CONFIG, ...(this.state.config || {}) };
     // Migrate legacy products (recipeId + portion) to the component-list shape.
@@ -101,6 +105,7 @@ export class PaiolStore {
     this._rev = 0;
     this._index = null; this._indexRev = -1;
     this._engineStore = null; this._engineRev = -1;
+    this._applyTrashSuppression();
   }
 
   /** Lazily-built lookup maps (by-id per master collection + latest price per ingredient). */
@@ -172,14 +177,58 @@ export class PaiolStore {
   upsertComanda(x) { return this._upsert('comandas', x); }
   /** @param {import('./domain.js').Category} x */
   upsertCategory(x) { return this._upsert('categories', x); }
+  /** @param {object} x */
+  upsertSupplier(x) { return this._upsert('suppliers', x); }
+  /** @param {object} x */
+  upsertCashAccount(x) { return this._upsert('cashAccounts', x); }
+  /** @param {object} x */
+  upsertFinanceTitle(x) { return this._upsert('financeTitles', x); }
+  /** @param {object} x */
+  upsertPurchase(x) { return this._upsert('purchases', x); }
 
-  removeIngredient(id) { return this._remove('ingredients', id); }
-  removeRecipe(id) { return this._remove('recipes', id); }
-  removeProduct(id) { return this._remove('products', id); }
-  removeClient(id) { return this._remove('clients', id); }
-  removeEncomenda(id) { return this._remove('encomendas', id); }
-  removeComanda(id) { return this._remove('comandas', id); }
-  removeCategory(id) { return this._remove('categories', id); }
+  removeIngredient(id, at) { return this._trash('ingredients', id, at); }
+  removeRecipe(id, at) { return this._trash('recipes', id, at); }
+  removeProduct(id, at) { return this._trash('products', id, at); }
+  removeClient(id, at) { return this._trash('clients', id, at); }
+  removeEncomenda(id, at) { return this._trash('encomendas', id, at); }
+  removeComanda(id, at) { return this._trash('comandas', id, at); }
+  removeCategory(id, at) { return this._trash('categories', id, at); }
+  /** @param {string} id */
+  removeSupplier(id, at) { return this._trash('suppliers', id, at); }
+  /** @param {string} id */
+  removeCashAccount(id, at) { return this._trash('cashAccounts', id, at); }
+
+  /** Deleted master records retained for 30 days, newest first. */
+  activeTrash() {
+    return this.state.trashItems
+      .filter((item) => item.status === 'deleted' && item.record)
+      .slice()
+      .sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)));
+  }
+
+  /** Restore a deleted record and keep a small sync marker so an older Dropbox copy cannot delete it again. */
+  restoreTrash(itemId, at) {
+    const item = this.get('trashItems', itemId);
+    if (!item || item.status !== 'deleted' || !item.record || !BUSINESS_MASTER_COLLECTIONS.includes(item.collection)) return false;
+    const restored = trashCloneRecord(item.record);
+    const changedAt = trashNormalizeDate(at);
+    this._upsert('trashItems', { ...item, status: 'restored', record: null, updatedAt: changedAt });
+    this._upsert(item.collection, restored);
+    return true;
+  }
+
+  /** Remove expired payloads while retaining only the tombstone required for safe Dropbox sync. */
+  purgeExpiredTrash(now) {
+    const cutoff = trashNormalizeDate(now);
+    let purged = 0;
+    for (const item of this.state.trashItems.slice()) {
+      if (item.status !== 'deleted' || !item.expiresAt || item.expiresAt > cutoff) continue;
+      this._upsert('trashItems', { ...item, status: 'purged', record: null, updatedAt: cutoff });
+      this._hardRemove(item.collection, item.recordId);
+      purged++;
+    }
+    return purged;
+  }
 
   // ── Events (append-only) ─────────────────────────────────────────────────────
 
@@ -197,6 +246,12 @@ export class PaiolStore {
   addPayment(ev) { return this._append('payments', ev); }
   /** @param {import('./domain.js').Despesa} ev — a dated cash expense (fixa/variável via its category). */
   addDespesa(ev) { return this._append('despesas', ev); }
+  /** Another dated cash income outside order payments. */
+  addIncome(ev) { return this._append('incomes', ev); }
+  /** @param {object} ev */
+  addFinanceSettlement(ev) { return this._append('financeSettlements', ev); }
+  /** @param {object} ev */
+  addCashAdjustment(ev) { return this._append('cashAdjustments', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
 
@@ -207,6 +262,39 @@ export class PaiolStore {
       if (pg.encomendaId === encomendaId && !this.isReversed('payment', pg.id)) sum += pg.valor || 0;
     }
     return sum;
+  }
+
+  /** Sum valid generic settlements for a financial title. */
+  settledFor(titleId) {
+    let sum = 0;
+    for (const st of this.state.financeSettlements) {
+      if (st.titleId === titleId && !this.isReversed('financeSettlement', st.id)) sum += Number(st.amount) || 0;
+    }
+    return sum;
+  }
+
+  /**
+   * Mark an order as a desistência without deleting it. If the day's stored comanda has an explicit
+   * planned quantity, release this order's products from that quantity so already-produced items
+   * immediately become available for sale. Delivery and payment facts remain untouched.
+   */
+  markEncomendaDesistencia(encomendaId, at) {
+    const enc = this.get('encomendas', encomendaId);
+    if (!enc || enc.desistenciaAt) return enc;
+    this.upsertEncomenda({ ...enc, desistenciaAt: at });
+
+    const date = String(enc.deliveryDate || '').slice(0, 10);
+    const comanda = date ? this.get('comandas', date) : null;
+    if (comanda) {
+      const cancelled = new Map();
+      for (const it of enc.itens || []) cancelled.set(it.productId, (cancelled.get(it.productId) || 0) + (Number(it.qty) || 0));
+      const itens = (comanda.itens || []).map((it) => {
+        if (it.prevista == null || !cancelled.has(it.productId)) return it;
+        return { ...it, prevista: Math.max(0, Number(it.prevista) - cancelled.get(it.productId)) };
+      });
+      this.upsertComanda({ ...comanda, itens });
+    }
+    return this.get('encomendas', encomendaId);
   }
 
   // ── Read model ───────────────────────────────────────────────────────────────
@@ -248,12 +336,22 @@ export class PaiolStore {
         eventsAdded++;
       }
     }
-    for (const c of MASTER_COLLECTIONS) {
+    // Trash markers merge by their own timestamp. This must happen before the business records,
+    // otherwise an old Dropbox copy could resurrect something that was deleted on this device.
+    for (const rec of o.trashItems || []) {
+      const local = this.state.trashItems.find((item) => item.id === rec.id);
+      const incomingAt = String(rec.updatedAt || rec.deletedAt || '');
+      const localAt = String((local && (local.updatedAt || local.deletedAt)) || '');
+      if (!local || incomingAt > localAt) { this._upsert('trashItems', rec); masterUpserted++; }
+    }
+    for (const c of BUSINESS_MASTER_COLLECTIONS) {
       for (const rec of o[c] || []) {
+        if (this._trashBlocks(c, rec.id)) continue;
         this._upsert(c, rec);
         masterUpserted++;
       }
     }
+    this._applyTrashSuppression();
     // Config is a singleton: incoming wins (last-writer; v0.1 single-user, no vector clocks).
     if (o.config) this.setConfig(o.config);
     return { eventsAdded, masterUpserted };
@@ -302,8 +400,43 @@ export class PaiolStore {
     return rec;
   }
 
-  _remove(collection, id) {
+  _trash(collection, id, at) {
+    if (!BUSINESS_MASTER_COLLECTIONS.includes(collection)) return false;
     const arr = this.state[collection];
+    const i = arr.findIndex((x) => x.id === id);
+    if (i < 0) return false;
+    const deletedAt = trashNormalizeDate(at);
+    const record = trashCloneRecord(arr[i]);
+    const trashId = `${collection}:${id}`;
+    this._upsert('trashItems', {
+      id: trashId,
+      collection,
+      recordId: id,
+      label: trashRecordLabel(record),
+      record,
+      deletedAt,
+      expiresAt: trashAddDays(deletedAt, 30),
+      status: 'deleted',
+      updatedAt: deletedAt,
+    });
+    this._hardRemove(collection, id);
+    return true;
+  }
+
+  _trashBlocks(collection, id) {
+    const item = this.state.trashItems.find((entry) => entry.id === `${collection}:${id}`);
+    return !!item && (item.status === 'deleted' || item.status === 'purged');
+  }
+
+  _applyTrashSuppression() {
+    for (const item of this.state.trashItems) {
+      if (item.status === 'deleted' || item.status === 'purged') this._hardRemove(item.collection, item.recordId);
+    }
+  }
+
+  _hardRemove(collection, id) {
+    const arr = this.state[collection];
+    if (!Array.isArray(arr)) return false;
     const i = arr.findIndex((x) => x.id === id);
     if (i >= 0) { arr.splice(i, 1); this._rev++; return true; }
     return false;
@@ -323,6 +456,26 @@ export class PaiolStore {
     this._rev++;
     return ev;
   }
+}
+
+function trashNormalizeDate(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) throw new StoreError('data inválida para a lixeira');
+  return date.toISOString();
+}
+
+function trashAddDays(iso, days) {
+  const date = new Date(iso);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString();
+}
+
+function trashCloneRecord(record) {
+  return JSON.parse(JSON.stringify(record));
+}
+
+function trashRecordLabel(record) {
+  return String(record.name || record.description || record.nome || record.date || record.deliveryDate || record.id || 'Registro excluído');
 }
 
 // Deterministic ordering for serialization (does not mutate the live arrays).

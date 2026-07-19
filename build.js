@@ -19,6 +19,7 @@ import { makeSw } from './vendor/@gcu/sw/make.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(HERE, 'src/main.js');
 const TEMPLATE = resolve(HERE, 'index.html');
+const BRAND_LOGO = resolve(HERE, 'brand-logo.png');
 const OUT = resolve(HERE, 'paiol.html');
 const SW_OUT = resolve(HERE, 'sw.js');
 
@@ -91,7 +92,8 @@ async function main() {
   const banner = '/* paiol — generated single-file build. Source: github → src/. Do not edit. */';
   const bundle = [banner, ...modules.map(({ file, src }) => `// ── ${rel(file)} ──\n${strip(src).trim()}`)].join('\n\n');
 
-  const template = await readFile(TEMPLATE, 'utf8');
+  const logoData = `data:image/png;base64,${(await readFile(BRAND_LOGO)).toString('base64')}`;
+  const template = (await readFile(TEMPLATE, 'utf8')).replaceAll('./brand-logo.png', logoData);
   const marker = /<script\s+type="module"\s+src="\.\/src\/main\.js"\s*>\s*<\/script>/;
   if (!marker.test(template)) throw new Error('index.html: could not find the module <script> to inline');
   // NB: function replacement — a string replacement would interpret `$` sequences in the

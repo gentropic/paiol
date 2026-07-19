@@ -19,7 +19,10 @@ test('empty state has all collections', () => {
   const st = emptyState();
   assert.deepEqual(st.ingredients, []);
   assert.deepEqual(st.sales, []);
-  assert.equal(st.version, 1);
+  assert.equal(st.version, 3);
+  assert.deepEqual(st.financeTitles, []);
+  assert.deepEqual(st.financeSettlements, []);
+  assert.deepEqual(st.trashItems, []);
 });
 
 test('upsert replaces by id; remove deletes', () => {
@@ -30,6 +33,51 @@ test('upsert replaces by id; remove deletes', () => {
   assert.equal(s.get('ingredients', 'a').name, 'A2');
   assert.equal(s.removeIngredient('a'), true);
   assert.equal(s.state.ingredients.length, 0);
+});
+
+test('deleted master data stays in the trash for 30 days and can be restored', () => {
+  const s = new PaiolStore();
+  s.upsertIngredient({ id: 'a', name: 'Farinha', stockUnit: 'kg' });
+  assert.equal(s.removeIngredient('a', '2026-07-01T12:00:00.000Z'), true);
+  assert.equal(s.get('ingredients', 'a'), undefined);
+  assert.equal(s.activeTrash().length, 1);
+  assert.equal(s.activeTrash()[0].label, 'Farinha');
+  assert.equal(s.activeTrash()[0].expiresAt, '2026-07-31T12:00:00.000Z');
+
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.equal(back.get('ingredients', 'a'), undefined);
+  assert.equal(back.restoreTrash('ingredients:a', '2026-07-02T12:00:00.000Z'), true);
+  assert.equal(back.get('ingredients', 'a').name, 'Farinha');
+  assert.equal(back.activeTrash().length, 0);
+});
+
+test('expired trash payload is purged and can no longer be restored', () => {
+  const s = new PaiolStore();
+  s.upsertClient({ id: 'c1', name: 'Cliente teste' });
+  s.removeClient('c1', '2026-07-01T00:00:00.000Z');
+  assert.equal(s.purgeExpiredTrash('2026-07-30T23:59:59.000Z'), 0);
+  assert.equal(s.purgeExpiredTrash('2026-07-31T00:00:00.000Z'), 1);
+  const marker = s.get('trashItems', 'clients:c1');
+  assert.equal(marker.status, 'purged');
+  assert.equal(marker.record, null);
+  assert.equal(s.restoreTrash('clients:c1', '2026-08-01T00:00:00.000Z'), false);
+});
+
+test('trash marker prevents an older Dropbox copy from resurrecting a deleted record', () => {
+  const local = new PaiolStore();
+  local.upsertProduct({ id: 'p1', name: 'Bolo', components: [], packagingCost: 0 });
+  const oldRemote = local.clone();
+  local.removeProduct('p1', '2026-07-02T00:00:00.000Z');
+
+  local.merge(oldRemote);
+  assert.equal(local.get('products', 'p1'), undefined);
+  assert.equal(local.activeTrash().length, 1);
+
+  const deletedRemote = local.clone();
+  local.restoreTrash('products:p1', '2026-07-03T00:00:00.000Z');
+  local.merge(deletedRemote);
+  assert.equal(local.get('products', 'p1').name, 'Bolo');
+  assert.equal(local.activeTrash().length, 0);
 });
 
 test('events are append-only: duplicate id rejected', () => {
@@ -171,7 +219,7 @@ test('DEFAULT_CATEGORIES seed: covers the four buckets, valid kinds (Rev 06)', (
   assert.ok(kinds.has('despesaFixa') && kinds.has('despesaVariavel') && kinds.has('receita'));
   assert.ok(DEFAULT_CATEGORIES.some((c) => c.name === 'Pró-labore' && c.kind === 'despesaFixa'));
   assert.ok(DEFAULT_CATEGORIES.some((c) => c.name === 'Gás' && c.kind === 'despesaVariavel'));
-  for (const c of DEFAULT_CATEGORIES) assert.match(c.kind, /^(receita|despesaFixa|despesaVariavel|perda)$/);
+  for (const c of DEFAULT_CATEGORIES) assert.match(c.kind, /^(receita|despesaFixa|despesaVariavel|custo|perda)$/);
 });
 
 test('config.empresa: patches independently of engine settings, round-trips (Rev 06)', () => {
@@ -257,4 +305,21 @@ test('merge is idempotent (re-merging adds no events)', () => {
   a.merge(b);
   const second = a.merge(b);
   assert.equal(second.eventsAdded, 0);
+});
+
+test('desistência preserves the order and releases explicit comanda quantities', () => {
+  const s = new PaiolStore();
+  s.upsertEncomenda({ id: 'e1', at: '2026-07-01T12:00:00Z', deliveryDate: '2026-07-20T12:00:00Z', itens: [{ productId: 'p1', qty: 3, unitPrice: 10 }], total: 30, entregue: true });
+  s.upsertComanda({ id: '2026-07-20', date: '2026-07-20', itens: [{ productId: 'p1', prevista: 5, realizado: 5, feito: true }] });
+  s.markEncomendaDesistencia('e1', '2026-07-19T12:00:00Z');
+  assert.equal(s.get('encomendas', 'e1').desistenciaAt, '2026-07-19T12:00:00Z');
+  assert.equal(s.get('encomendas', 'e1').entregue, true); // independent fact is not rewritten
+  assert.equal(s.get('comandas', '2026-07-20').itens[0].prevista, 2);
+});
+
+test('other incomes are append-only and round-trip', () => {
+  const s = new PaiolStore();
+  s.addIncome({ id: 'i1', at: '2026-07-19T12:00:00Z', valor: 80, description: 'Oficina' });
+  assert.throws(() => s.addIncome({ id: 'i1', at: '2026-07-20T12:00:00Z', valor: 90 }), /duplicado/);
+  assert.deepEqual(PaiolStore.fromYaml(s.toYaml()).state.incomes, s.state.incomes);
 });

@@ -28,6 +28,9 @@ export async function syncOnce(localStore, vfs, opts = {}) {
   const remote = remoteText == null ? new PaiolStore() : PaiolStore.fromYaml(remoteText);
 
   const pulled = localStore.merge(remote);
+  // An expired item may have arrived from another device. Purge its payload before comparing or
+  // pushing, while keeping the small tombstone that prevents an old copy from resurrecting it.
+  localStore.purgeExpiredTrash(new Date().toISOString());
 
   const localText = localStore.toYaml();
   let pushed = false;
