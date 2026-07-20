@@ -2,18 +2,35 @@
 // behind the UI. Local-first: IndexedDB is the source of truth; Dropbox is opt-in sync on top.
 
 import { VFS } from '../vendor/@gcu/vfs/index.js';
-import { loadStore, createDebouncedSaver } from './persist.js';
+import { loadStore, createDebouncedSaver, snapshotStore } from './persist.js';
 import { createSyncController, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp, renderModal } from './ui.js';
 import { setupPwa } from './pwa.js';
 import { importYaml, applyExchange } from './exchange.js';
 import { DEFAULT_CATEGORIES } from './store.js';
+import { ensureFinanceFoundation } from './finance.js';
 import { LOCAL_DB_NAME, REMOTE_BUSINESS_PATH } from './config.js';
 
 export async function boot(root) {
   // UI-level state (not part of the business; lives only for this session).
-  const view = { tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro', logMonth: null, comandaDate: null, encSort: 'entrega', encStatus: 'todas', encMonth: null, fiadoMonth: null, modal: null, updateReady: false, lastSyncAt: null, syncError: null };
+  const today = new Date();
+  const initialEnd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const initialStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`;
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  const initialMonthEnd = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
+  const view = {
+    tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro',
+    logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: null, encSort: 'entrega', encStatus: 'todas',
+    encStart: '', encEnd: '', encClientId: '', encProductId: '', encDeliveryMethod: '',
+    vendaStart: initialStart, vendaEnd: initialEnd, vendaStatus: 'todos', vendaProductId: '', vendaClientId: '',
+    dashboardPreset: 'mes', dashboardStart: initialStart, dashboardEnd: initialMonthEnd,
+    fiadoStart: initialStart, fiadoEnd: initialEnd, fiadoStatus: 'aberto',
+    finStart: initialStart, finEnd: initialMonthEnd, finStatus: 'aberto', finProjected: true,
+    finDirection: 'receber', finAccountId: '', finCategoryId: '', finFlowPreset: 'mes',
+    finPartyId: '', finMethod: '', finTitleCategory: '',
+    modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
+  };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
   const redirect = await handleRedirectIfPresent();
@@ -32,6 +49,17 @@ export async function boot(root) {
     for (const c of DEFAULT_CATEGORIES) store.upsertCategory({ id: crypto.randomUUID(), ...c });
     saver.schedule();
   }
+  // Forward-compatible financial groups for stores created before the Financeiro module.
+  if (!store.state.categories.some((c) => c.kind === 'receita')) {
+    store.upsertCategory({ id: crypto.randomUUID(), name: 'Outras receitas', kind: 'receita' });
+    saver.schedule();
+  }
+  if (!store.state.categories.some((c) => c.kind === 'custo')) {
+    store.upsertCategory({ id: crypto.randomUUID(), name: 'Custos de produção', kind: 'custo' });
+    saver.schedule();
+  }
+  if (ensureFinanceFoundation(store) > 0) saver.schedule();
+  if (store.purgeExpiredTrash(new Date().toISOString()) > 0) saver.schedule();
 
   const ctx = { store, view, actions: {} };
   const rerender = () => renderApp(root, ctx);
@@ -64,6 +92,7 @@ export async function boot(root) {
   // Pull on every boot when already linked — keeps a device fresh and shrinks the conflict window.
   const autoSync = () => { if (view.linked) void sync.runNow(); };
   const scheduleSync = () => { if (view.linked) sync.schedule(); };
+  const maintainStore = () => { store.purgeExpiredTrash(new Date().toISOString()); ensureFinanceFoundation(store); };
   autoSync();
 
   // Page-hide is the last reliable moment on mobile: flush local FIRST (so a change made seconds
@@ -74,26 +103,42 @@ export async function boot(root) {
   window.addEventListener('online', autoSync);
 
   ctx.actions = {
-    setTab(tab) { view.tab = tab; view.status = null; view.modal = null; view.logMonth = null; rerender(); },
+    setTab(tab) { view.tab = tab; view.status = null; view.modal = null; view.logMonth = null; rerender(); requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' })); },
     setReportMonth(month) { view.reportMonth = month; rerender(); },
     setProdSort(key) { view.prodSort = key; rerender(); },
     setEncSort(key) { view.encSort = key; rerender(); },
     setEncStatus(key) { view.encStatus = key; rerender(); },
-    setEncMonth(month) { view.encMonth = month; rerender(); },
-    setFiadoMonth(month) { view.fiadoMonth = month; rerender(); },
+    setEncPeriod(partial) { Object.assign(view, partial); rerender(); },
+    setVendaPeriod(partial) { Object.assign(view, partial); rerender(); },
+    setFiadoPeriod(partial) { Object.assign(view, partial); rerender(); },
+    setFinanceMonth(month) { view.financeMonth = month; rerender(); },
+    setFinanceType(type) { view.financeType = type; rerender(); },
+    setFinanceView(partial) { Object.assign(view, partial); rerender(); },
+    setDashboardView(partial) { Object.assign(view, partial); rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
     setComandaDate(date) { view.comandaDate = date; rerender(); },
     // Modal/bottom-sheet (add/edit forms, confirmations).
     openModal(modal) { view.modal = modal; rerenderModal(); },
     closeModal() { view.modal = null; rerenderModal(); },
     // Generic business mutation: run fn(store), persist locally (debounced) + sync (debounced), re-render.
-    mutate(fn) { fn(store); view.modal = null; saver.schedule(); scheduleSync(); rerender(); },
+    mutate(fn) { fn(store); maintainStore(); view.modal = null; saver.schedule(); scheduleSync(); rerender(); },
     // Mutate but KEEP the modal open, re-rendering only the overlay — for in-place CRUD inside a
     // sheet (managing categorias) where each add/archive/delete should update the list, not close it.
-    mutateModal(fn) { fn(store); saver.schedule(); scheduleSync(); rerenderModal(); },
+    mutateModal(fn) { fn(store); maintainStore(); saver.schedule(); scheduleSync(); rerenderModal(); },
     // Like mutate but WITHOUT a re-render — for in-place edits (the comanda's realizado/feito inputs)
     // that update their own DOM, so the panel must not rebuild under them (keeps input focus).
-    persist(fn) { fn(store); saver.schedule(); scheduleSync(); },
+    persist(fn) { fn(store); maintainStore(); saver.schedule(); scheduleSync(); },
+    restoreTrash(itemId) {
+      const item = store.get('trashItems', itemId);
+      const label = item && (item.label || item.recordId);
+      const restored = store.restoreTrash(itemId, new Date().toISOString());
+      maintainStore();
+      if (restored) {
+        saver.schedule(); scheduleSync();
+        view.status = `${label || 'Registro'} restaurado com sucesso.`;
+      } else view.status = 'Este registro não está mais disponível para restauração.';
+      rerender();
+    },
     setConfig(partial) { store.setConfig(partial); saver.schedule(); scheduleSync(); view.status = 'Ajustes salvos.'; rerender(); },
     importData(text) {
       const r = importYaml(store, text);
@@ -138,6 +183,29 @@ export async function boot(root) {
       await sync.runNow({ manual: true });
       view.busy = false; rerender();
     },
+    async backupExtra() {
+      if (view.backupBusy) return;
+      view.backupBusy = true; view.status = null; rerender();
+      try {
+        maintainStore();
+        saver.schedule();
+        await saver.flushNow();
+        if (view.linked) {
+          const remote = await openDropboxVfs(() => dropboxTokenManager().getToken());
+          const dir = REMOTE_BUSINESS_PATH.slice(0, REMOTE_BUSINESS_PATH.lastIndexOf('/'));
+          await snapshotStore(remote, store, manualBackupLabel(), `${dir}/snapshots`);
+          view.lastBackupAt = new Date().toISOString();
+          view.status = 'Backup extra baixado e também salvo no Dropbox.';
+        } else {
+          view.lastBackupAt = new Date().toISOString();
+          view.status = 'Backup extra baixado neste aparelho. Conecte o Dropbox para guardar uma segunda cópia na nuvem.';
+        }
+      } catch (e) {
+        view.status = `O arquivo foi baixado, mas não foi possível criar a cópia no Dropbox: ${String((e && e.message) || e)}.`;
+      } finally {
+        view.backupBusy = false; rerender();
+      }
+    },
   };
 
   rerender();
@@ -147,4 +215,11 @@ export async function boot(root) {
 function snapshotMonthLabel() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function manualBackupLabel() {
+  const d = new Date();
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const time = `${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+  return `manual-${date}-${time}`;
 }
