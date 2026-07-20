@@ -93,12 +93,16 @@ async function main() {
   const bundle = [banner, ...modules.map(({ file, src }) => `// ── ${rel(file)} ──\n${strip(src).trim()}`)].join('\n\n');
 
   const logoData = `data:image/png;base64,${(await readFile(BRAND_LOGO)).toString('base64')}`;
-  const template = (await readFile(TEMPLATE, 'utf8')).replaceAll('./brand-logo.png', logoData);
+  const template = await readFile(TEMPLATE, 'utf8');
   const marker = /<script\s+type="module"\s+src="\.\/src\/main\.js"\s*>\s*<\/script>/;
   if (!marker.test(template)) throw new Error('index.html: could not find the module <script> to inline');
   // NB: function replacement — a string replacement would interpret `$` sequences in the
   // bundle (e.g. `'$'` inside a regex literal becomes `$'` = "match suffix"), corrupting output.
-  const html = template.replace(marker, () => `<script type="module">\n${bundle}\n</script>`);
+  // Replace the logo after inlining the JavaScript bundle. The logo reference lives in
+  // src/ui.js, so replacing it in the HTML template beforehand leaves the bundled URL intact.
+  const html = template
+    .replace(marker, () => `<script type="module">\n${bundle}\n</script>`)
+    .replaceAll('./brand-logo.png', logoData);
 
   await writeFile(OUT, html);
   const kb = (Buffer.byteLength(html) / 1024).toFixed(0);
