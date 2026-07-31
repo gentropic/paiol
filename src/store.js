@@ -51,6 +51,15 @@ export const DEFAULT_CONFIG = {
   expectedActiveMinutesMonth: 2400, // ~40h/month (pricing-lens rateio denominator; §8.3)
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
+  paymentMethods: [
+    { id: 'pix', name: 'Pix' },
+    { id: 'dinheiro', name: 'Dinheiro' },
+    { id: 'cartao-debito', name: 'Cartão de débito' },
+    { id: 'cartao-credito', name: 'Cartão de crédito' },
+    { id: 'transferencia', name: 'Transferência bancária' },
+    { id: 'boleto', name: 'Boleto' },
+    { id: 'outro', name: 'Outro' },
+  ],
   rateioBase: 'active-time',
   // Dados da empresa (Rev 06) — she fills these in Ajustes; they appear on the recibo header. Empty
   // by default (never hardcode real CNPJ/owner). `logo` is a data: URL (PNG/JPG) stored with the data.

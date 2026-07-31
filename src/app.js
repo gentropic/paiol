@@ -17,11 +17,14 @@ export async function boot(root) {
   const today = new Date();
   const initialEnd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const initialStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`;
+  const weekStartDate = new Date(today); weekStartDate.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  const weekEndDate = new Date(weekStartDate); weekEndDate.setDate(weekStartDate.getDate() + 6);
+  const localDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
   const initialMonthEnd = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
   const view = {
     tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro',
-    logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: null, encSort: 'entrega', encStatus: 'todas',
+    logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: initialEnd, comandaStart: localDate(weekStartDate), comandaEnd: localDate(weekEndDate), encSort: 'entrega', encStatus: 'todas',
     encStart: '', encEnd: '', encClientId: '', encProductId: '', encDeliveryMethod: '',
     vendaStart: initialStart, vendaEnd: initialEnd, vendaStatus: 'todos', vendaProductId: '', vendaClientId: '',
     dashboardPreset: 'mes', dashboardStart: initialStart, dashboardEnd: initialMonthEnd,
@@ -117,6 +120,7 @@ export async function boot(root) {
     setDashboardView(partial) { Object.assign(view, partial); rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
     setComandaDate(date) { view.comandaDate = date; rerender(); },
+    setComandaRange(partial) { Object.assign(view, partial); rerender(); },
     // Modal/bottom-sheet (add/edit forms, confirmations).
     openModal(modal) { view.modal = modal; rerenderModal(); },
     closeModal() { view.modal = null; rerenderModal(); },

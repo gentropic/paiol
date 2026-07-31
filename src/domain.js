@@ -97,8 +97,10 @@
  * @typedef {object} Cliente
  * @property {string}  id
  * @property {string}  name        // nome
+ * @property {string} [code]       // código manual definido pela usuária
  * @property {string} [phone]      // telefone
  * @property {string} [address]    // endereço
+ * @property {string[]} [tags]     // etiquetas e alertas do cliente
  * @property {boolean} [inactive]  // kept for history, hidden from new-order suggestions
  */
 
