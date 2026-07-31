@@ -43,6 +43,8 @@
       background: var(--au-surface); color: var(--au-action); font-size: 1.15rem; font-weight: 700; cursor: pointer;
       box-shadow: var(--au-shadow); line-height: 1; }
     .pa-help-btn:active { transform: translateY(1px); }
+    .pa-help-area { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .pa-version { color: var(--au-fg-soft); font-size: .58rem; font-weight: 700; letter-spacing: .02em; line-height: 1; }
     /* Help sheet content */
     .pa-help-det { border-bottom: 1px solid var(--au-border); padding: 6px 0; }
     .pa-help-det > summary { cursor: pointer; font-weight: 600; padding: 6px 2px; list-style: none;
@@ -356,6 +358,18 @@
     .pa-preview-line { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-bottom: 1px solid #e8ebec; }
     .pa-preview-line:last-child { border-bottom: 0; }
     .pa-list-value { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+    .pa-home-agenda { background: linear-gradient(145deg, #fffaf0, #ffffff); border-color: #ead8b6; }
+    .pa-agenda-payable { width: 100%; display: flex; align-items: center; gap: 12px; padding: 14px;
+      border: 1px solid #dfe5e6; border-radius: 14px; background: #f7f9f9; color: var(--au-fg);
+      font: inherit; text-align: left; cursor: pointer; }
+    .pa-agenda-payable:hover, .pa-agenda-payable:focus-visible { background: #f0f5f4; border-color: var(--pa-teal); outline: none; }
+    .pa-agenda-payable-due { background: #fff5df; border-color: #e7c982; }
+    .pa-agenda-payable-due:hover, .pa-agenda-payable-due:focus-visible { background: #ffefcb; border-color: #c79132; }
+    .pa-agenda-payable .pa-grow { display: flex; flex-direction: column; gap: 3px; }
+    .pa-agenda-payable .pa-grow > strong { color: var(--pa-navy); }
+    .pa-agenda-value { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; white-space: nowrap; }
+    .pa-agenda-value strong { color: #9a6820; font-size: 1.12rem; font-variant-numeric: tabular-nums; }
+    .pa-agenda-value span { color: var(--au-action); font-size: .78rem; font-weight: 700; }
 
     .pa-callout { padding: 12px 14px; border-radius: 13px; margin-bottom: 14px; }
     .pa-callout-danger { color: #8c3327; background: #fff0ed; border: 1px solid #edc6bd; }
@@ -411,7 +425,7 @@
       .pa-brand { flex-direction: column; align-items: flex-start; }
       .pa-brand-logo { width: 182px; height: 116px; }
       .pa-brand-copy { display: block; }
-      .pa-help-btn { position: absolute; top: 28px; right: 16px; }
+      .pa-help-area { position: absolute; top: 28px; right: 16px; }
       .pa-header h1 { font-size: 1.16rem; }
       .pa-sub { font-size: .78rem; }
       .pa-bottomnav { grid-column: 1; grid-row: 2; position: sticky; top: 0; left: auto; bottom: auto; transform: none; width: auto; height: calc(100vh - 205px); align-self: start; flex-direction: column; align-items: stretch; gap: 5px; padding: 8px 16px 20px 18px; border: 0; box-shadow: none; background: #fff; }
