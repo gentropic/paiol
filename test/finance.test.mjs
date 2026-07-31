@@ -64,6 +64,19 @@ test('legacy data is upgraded without deleting existing operational collections'
   assert.ok(s.state.categories.some((c) => c.systemKey === 'vendas'));
 });
 
+test('default chart covers the main accounting groups of a bakery', () => {
+  const s = new PaiolStore(); ensureFinanceFoundation(s, ids());
+  const requiredKeys = [
+    'vendas', 'vendas-encomendas', 'insumos', 'embalagens', 'mao-obra-direta',
+    'gas-producao', 'taxas-venda', 'perdas-producao', 'aluguel',
+    'pro-labore', 'impostos', 'marketing', 'manutencao', 'investimentos',
+    'aportes', 'retiradas',
+  ];
+  for (const systemKey of requiredKeys) {
+    assert.ok(categoryByKey(s, systemKey), `missing category ${systemKey}`);
+  }
+});
+
 test('transfers affect each account but not consolidated cash inflow and outflow', () => {
   const s = new PaiolStore(); ensureFinanceFoundation(s, ids());
   const [cash, bank] = s.state.cashAccounts;

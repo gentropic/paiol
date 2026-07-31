@@ -23,6 +23,7 @@ test('empty state has all collections', () => {
   assert.deepEqual(st.financeTitles, []);
   assert.deepEqual(st.financeSettlements, []);
   assert.deepEqual(st.trashItems, []);
+  assert.ok(st.config.paymentMethods.some((method) => method.name === 'Pix' && method.active !== false));
 });
 
 test('upsert replaces by id; remove deletes', () => {
@@ -159,6 +160,14 @@ test('clients are master data: upsert, index lookup, YAML round-trip (Rev 04)', 
   assert.equal(back.get('clients', 'c1').phone, '11999990000');
   s.removeClient('c1');
   assert.equal(s.get('clients', 'c1'), undefined);
+});
+
+test('client manual code and tags survive YAML round-trip', () => {
+  const s = new PaiolStore();
+  s.upsertClient({ id: 'c-code', code: 'C-025', name: 'Cliente com código', tags: ['Não vender', 'Não come doce'] });
+  const back = PaiolStore.fromYaml(s.toYaml());
+  assert.equal(back.get('clients', 'c-code').code, 'C-025');
+  assert.deepEqual(back.get('clients', 'c-code').tags, ['Não vender', 'Não come doce']);
 });
 
 test('encomendas are mutable master data that round-trip (Rev 04)', () => {
