@@ -9,6 +9,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 
 const PORT = 8080;
 const BASE = `http://localhost:${PORT}/`;
@@ -26,20 +27,24 @@ async function waitForServer(url, timeoutMs = 10_000) {
 
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
-  Insumos: 'cadastros', Receitas: 'cadastros', Produtos: 'cadastros', Clientes: 'cadastros',
-  Comanda: 'operacao', Vendas: 'operacao', Encomendas: 'operacao', Fiado: 'operacao', Despesas: 'operacao', Perdas: 'operacao',
-  Preços: 'analise', Relatórios: 'analise', Simulador: 'analise',
+  Insumos: 'cadastro', Receitas: 'cadastro', Produtos: 'cadastro', Clientes: 'cadastro',
+  Comanda: 'producao', Vendas: 'pedidos', Encomendas: 'pedidos', Fiado: 'pedidos', Despesas: 'financeiro', Perdas: 'producao',
+  Preços: 'financeiro', Relatórios: 'financeiro', Simulador: 'financeiro',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Comanda: 'comanda',
-  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'despesas', Perdas: 'perdas',
+  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'financeiro', Perdas: 'perdas',
   Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
   await page.locator(`.pa-navbtn[data-section="${SCREEN_SECTION[screen]}"]`).click();
-  const seg = page.locator(`.pa-segbtn[data-screen="${SCREEN_ID[screen]}"]`);
+  const seg = page.locator(`.pa-modulebtn[data-screen="${SCREEN_ID[screen]}"]`);
   if (await seg.count()) await seg.click();
+  else {
+    const quickLabel = { 'Preços': 'Preços e custos', 'Relatórios': 'Relatório gerencial', 'Simulador': 'Simular preço' }[screen];
+    if (quickLabel) await page.getByRole('button', { name: quickLabel, exact: true }).click();
+  }
 }
 
 // Add an insumo via the "+ Novo" bottom sheet. (Must be on the Insumos screen.)
@@ -129,7 +134,8 @@ describe('paiol UI smoke', () => {
       env: { ...process.env, PORT: String(PORT) }, stdio: 'ignore',
     });
     await waitForServer(BASE);
-    browser = await chromium.launch();
+    const systemChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    browser = await chromium.launch(existsSync(systemChrome) ? { executablePath: systemChrome } : {});
     context = await browser.newContext();
   });
 
@@ -297,7 +303,7 @@ describe('paiol UI smoke', () => {
     await addVenda(page, { product: 'Pãozinho', qty: 3 });
     await page.waitForSelector('.pa-list-item');
     assert.match(await page.textContent('.pa-list'), /Pãozinho/);
-    assert.match(await page.textContent('.pa-card'), /lucro/); // running profit total
+    assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
 
     // Survives reload (events persisted to IndexedDB).
     await page.waitForTimeout(1200);
@@ -381,6 +387,95 @@ describe('paiol UI smoke', () => {
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Comanda');
     assert.equal(await page.locator('[data-testid="cmd-prevista"]').count(), 0, 'deleted avulso came back');
+    await page.close();
+  });
+
+  test('v0.3.2: comanda uses one selected period on screen and PDF preview', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase('paiol');
+      request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Produtos');
+    await page.click('[data-testid="prod-new"]');
+    await page.fill('[data-testid="prod-name"]', 'Bolo de teste');
+    await page.fill('[data-testid="prod-sale-price"]', '25');
+    await page.click('[data-testid="prod-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await goto(page, 'Encomendas');
+    await page.click('[data-testid="enc-new"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'bolo');
+    await page.click('[data-testid="enc-prodresult"]');
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.click('[data-testid="enc-new"]');
+    await page.fill('[data-testid="enc-prodsearch"]', 'bolo');
+    await page.click('[data-testid="enc-prodresult"]');
+    await page.click('[data-testid="enc-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await goto(page, 'Comanda');
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    await page.fill('[data-testid="cmd-week-start"]', iso);
+    await page.dispatchEvent('[data-testid="cmd-week-start"]', 'change');
+    await page.fill('[data-testid="cmd-week-end"]', iso);
+    await page.dispatchEvent('[data-testid="cmd-week-end"]', 'change');
+    await page.waitForSelector('[data-testid="cmd-period-day"]');
+    assert.equal(await page.locator('[data-testid="cmd-date"]').count(), 0, 'single-day selector should be removed');
+    assert.match(await page.textContent('[data-testid="cmd-period-day"]'), /Bolo de teste/);
+    await page.click('[data-testid="cmd-preview"]');
+    await page.waitForSelector('[data-testid="cmd-print-preview"]');
+    const preview = await page.textContent('[data-testid="cmd-print-preview"]');
+    assert.match(preview, /Comanda de produção/);
+    assert.match(preview, /Comanda gerada em/);
+    assert.match(preview, /Bolo de teste/);
+    assert.equal(await page.locator('[data-testid="cmd-preview-item"]').count(), 1, 'repeated products should be consolidated');
+    assert.match(await page.textContent('[data-testid="cmd-preview-item"]'), /2 previsto/);
+    await page.evaluate(() => Object.defineProperty(navigator, 'canShare', { value: undefined, configurable: true }));
+    let pdfError = '';
+    page.once('dialog', async (dialog) => { pdfError = dialog.message(); await dialog.dismiss(); });
+    const downloadPromise = page.waitForEvent('download', { timeout: 30000 }).catch(() => null);
+    await page.click('[data-testid="cmd-pdf"]');
+    const download = await downloadPromise;
+    assert.equal(pdfError, '', pdfError);
+    assert.ok(download, 'comanda PDF did not download');
+    const pdfBytes = await readFile(await download.path());
+    assert.equal(pdfBytes.subarray(0, 4).toString(), '%PDF');
+    await page.close();
+  });
+
+  test('v0.3.2: recipe production time, simulator totals and commission are editable', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase('paiol');
+      request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Receitas');
+    await page.click('[data-testid="rec-new"]');
+    await page.fill('[data-testid="rec-name"]', 'Receita teste');
+    await page.fill('[data-testid="rec-yield"]', '10');
+    await page.fill('[data-testid="rec-production"]', '90');
+    await page.fill('[data-testid="rec-active"]', '30');
+    await page.fill('[data-testid="rec-oven"]', '40');
+    await page.click('[data-testid="rec-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.click('[data-testid="rec-simulator"]');
+    await page.waitForSelector('[data-testid="sim-production"]');
+    assert.equal(await page.inputValue('[data-testid="sim-production"]'), '90');
+    const results = await page.textContent('[data-testid="sim-results"]');
+    assert.match(results, /Custo total da receita/);
+    assert.match(results, /Lucro total da receita/);
+    assert.match(results, /Lucro por hora de produção/);
+    await goto(page, 'Ajustes');
+    const commissionLabel = page.locator('.pa-field').filter({ hasText: 'Comissão sobre vendas' });
+    await commissionLabel.locator('input').fill('7,5');
+    await page.getByRole('button', { name: 'Salvar valores manuais' }).click();
+    await goto(page, 'Ajustes');
+    assert.equal(await page.locator('.pa-field').filter({ hasText: 'Comissão sobre vendas' }).locator('input').inputValue(), '7,5');
     await page.close();
   });
 
@@ -554,31 +649,26 @@ describe('paiol UI smoke', () => {
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-05-15', qty: 1 });
+    await page.fill('[data-testid="venda-start"]', '2026-05-15');
+    await page.fill('[data-testid="venda-end"]', '2026-05-15');
     await page.waitForSelector('.pa-list-item');
-    // The chosen day surfaces as the log's date header (not "Hoje"/"Ontem").
+    // The chosen day appears on the row inside the filtered period report.
     assert.match(await page.textContent('.pa-list'), /15\/05\/2026/);
     await page.close();
   });
 
-  test('Lote 3: Vendas search + month scope narrow the log (and the total)', async () => {
+  test('Vendas gerencial: período narrows the report and totals', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-04-10', qty: 1 });
     await addVenda(page, { date: '2026-05-20', qty: 2 });
-    await page.waitForSelector('.pa-list-item');
-    assert.equal(await page.locator('.pa-list-item').count(), 2, 'both sales listed with no filter');
-
-    // Month scope → only May rows survive, and the total label reflects the scope.
-    await page.fill('[data-testid="venda-month"]', '2026-05');
-    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item').length === 1);
-    assert.match(await page.textContent('.pa-totals'), /05\/26/);
-
-    // Search within the scope: a miss hides every row, a hit brings rows back (pure DOM, no re-render).
-    await page.fill('[data-testid="venda-search"]', 'zzz');
-    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].every((li) => li.style.display === 'none'));
-    await page.fill('[data-testid="venda-search"]', 'Pãozinho');
-    await page.waitForFunction(() => [...document.querySelectorAll('.pa-list-item')].some((li) => li.style.display !== 'none'));
+    await page.fill('[data-testid="venda-start"]', '2026-04-01');
+    await page.fill('[data-testid="venda-end"]', '2026-05-31');
+    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 2);
+    await page.fill('[data-testid="venda-start"]', '2026-05-01');
+    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 1);
+    assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
     await page.close();
   });
 
@@ -630,11 +720,11 @@ describe('paiol UI smoke', () => {
     assert.match(await page.textContent('.pa-card'), /Este mês/);        // lands on Início dashboard
 
     await page.click('[data-testid="home-encomenda"]');                   // quick action → Operação/Encomendas
-    await page.waitForSelector('.pa-navbtn[data-section="operacao"].active');
+    await page.waitForSelector('.pa-navbtn[data-section="pedidos"].active');
 
-    await page.click('.pa-navbtn[data-section="cadastros"]');             // bottom nav → Cadastro
+    await goto(page, 'Insumos');
     await page.waitForSelector('[data-testid="ins-new"]');
-    assert.equal(await page.locator('.pa-segbtn[data-screen="receitas"]').count(), 1); // segmented sub-nav
+    assert.equal(await page.locator('.pa-modulebtn[data-screen="receitas"]').count(), 1); // module sub-nav
 
     // Add an insumo with NO price → "sem preço" (guards the parseNum '' → null fix), then the
     // dashboard surfaces the alert.
@@ -720,19 +810,21 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Lote 3: estorno cancels a sale — it greys out and leaves the running total', async () => {
+  test('Lote 3: estorno preserves a sale in the desistências report', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { qty: 3 });
     await page.waitForSelector('.pa-list-item');
-    const totalBefore = await page.textContent('.pa-totals');
+    const totalBefore = await page.textContent('.pa-statgrid');
     await page.click('[data-testid="estornar"]');       // ↩ on the row
     await page.click('[data-testid="confirm-yes"]');     // confirm sheet
-    await page.waitForSelector('.pa-reversed');          // row now struck-through
-    assert.match(await page.textContent('.pa-list'), /estornado/);
-    // Revenue total drops to zero (the only sale was reversed) → totals row gone or zeroed.
-    const totalAfter = await page.locator('.pa-totals').count() ? await page.textContent('.pa-totals') : 'R$ 0,00';
+    await page.click('[data-testid="venda-f-desistencias"]');
+    await page.waitForSelector('.pa-list-item');
+    assert.match(await page.textContent('.pa-card'), /Total de desistências/);
+    // Revenue total drops to zero in the regular report; cancellation remains auditable.
+    await page.click('[data-testid="venda-f-todos"]');
+    const totalAfter = await page.textContent('.pa-statgrid');
     assert.notEqual(totalAfter, totalBefore);
     await page.close();
   });
@@ -978,13 +1070,14 @@ describe('paiol UI smoke', () => {
     // Fiado: R$20 to receive → register a R$8 partial.
     await goto(page, 'Fiado');
     await page.waitForSelector('[data-testid="fiado-row"]');
-    assert.match(await page.textContent('.pa-totals'), /20,00/);
+    assert.match(await page.textContent('.pa-statgrid'), /20,00/);
     await page.click('[data-testid="fiado-row"]');
+    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
     await page.waitForSelector('[data-testid="pag-add"]');
     await page.fill('[data-testid="pag-valor"]', '8');
     await page.click('[data-testid="pag-add"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-totals'), /12,00/, 'saldo not reduced by the payment');
+    assert.match(await page.textContent('.pa-statgrid'), /12,00/, 'saldo not reduced by the payment');
 
     // The order's derived status is now "parcial".
     await goto(page, 'Encomendas');
@@ -1017,6 +1110,7 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Fiado');
     await page.waitForSelector('[data-testid="fiado-search"]');     // #5 A-receber filter present
     await page.click('[data-testid="fiado-row"]');
+    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
     await page.waitForSelector('[data-testid="pag-cliente"]');
     assert.match(await page.textContent('[data-testid="pag-cliente"]'), /Dona Márcia/);
     await page.fill('[data-testid="pag-valor"]', '5');
@@ -1055,6 +1149,104 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Clientes');
     await page.waitForSelector('.pa-row-item');
     assert.match(await page.textContent('.pa-list'), /Dona Márcia/, 'cliente did not persist');
+    await page.close();
+  });
+
+  test('v0.3.3: agenda, aniversários, funcionários e estoque mínimo', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase('paiol');
+      request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+    const today = await page.evaluate(() => {
+      const date = new Date();
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    });
+
+    await goto(page, 'Insumos');
+    await page.click('[data-testid="ins-new"]');
+    await page.fill('[data-testid="ins-name"]', 'Farinha para estoque');
+    await page.selectOption('[data-testid="ins-unit"]', 'kg');
+    await page.fill('[data-testid="ins-stock"]', '1');
+    await page.fill('[data-testid="ins-min-stock"]', '2');
+    await page.click('[data-testid="ins-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await page.click('.pa-navbtn[data-section="cadastro"]');
+    await page.click('.pa-modulebtn[data-screen="funcionarios"]');
+    await page.click('[data-testid="employee-new"]');
+    await page.fill('[data-testid="employee-name"]', 'Ana Produção');
+    await page.fill('[data-testid="employee-birthday"]', today);
+    await page.click('[data-testid="employee-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await goto(page, 'Ajustes');
+    await page.click('[data-testid="notification-new"]');
+    await page.fill('[data-testid="notification-date"]', today);
+    await page.fill('[data-testid="notification-title"]', 'Separar embalagens');
+    await page.click('[data-testid="notification-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await page.fill('[data-testid="shopping-name"]', 'Papel manteiga');
+    await page.click('[data-testid="shopping-add"]');
+
+    await goto(page, 'Início');
+    const agenda = page.locator('[data-testid="home-notifications"]');
+    await agenda.waitFor();
+    const text = await agenda.textContent();
+    assert.match(text, /Separar embalagens/);
+    assert.match(text, /Ana Produção/);
+    assert.match(text, /Farinha para estoque/);
+    assert.match(text, /Papel manteiga/);
+    await page.click('[data-testid="notification-done"]');
+    await page.waitForSelector('[data-testid="home-notification"]', { state: 'detached' });
+
+    await goto(page, 'Ajustes');
+    const history = page.locator('[data-testid="notification-history-item"]');
+    assert.match(await history.textContent(), /Separar embalagens/);
+    assert.match(await history.textContent(), /Feito/);
+    await page.close();
+  });
+
+  test('v0.3.3: dashboard graphs and stock-only purchase without Accounts Payable', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((resolve) => {
+      const request = indexedDB.deleteDatabase('paiol');
+      request.onsuccess = request.onerror = request.onblocked = () => resolve();
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await addInsumo(page, 'Açúcar para compra', 'kg');
+
+    await page.click('.pa-navbtn[data-section="financeiro"]');
+    await page.click('.pa-modulebtn[data-screen="fin-dashboard"]');
+    assert.equal(await page.locator('[data-testid="dashboard-profit-chart"]').count(), 1);
+    assert.equal(await page.locator('[data-testid="dashboard-volume-chart"]').count(), 1);
+    await page.getByRole('button', { name: 'Plano de Contas', exact: true }).click();
+    await page.getByRole('button', { name: 'Fornecedores', exact: true }).click();
+    await page.fill('[data-testid="supplier-name"]', 'Mercado Teste');
+    await page.click('[data-testid="supplier-add"]');
+    await page.locator('.pa-backdrop').click({ position: { x: 4, y: 4 } });
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await page.click('.pa-navbtn[data-section="financeiro"]');
+    await page.click('.pa-modulebtn[data-screen="fin-dashboard"]');
+    await page.getByRole('button', { name: 'Compras', exact: true }).click();
+    await page.click('[data-testid="purchase-new"]');
+    await page.selectOption('[data-testid="purchase-finance"]', 'nao');
+    await page.fill('[data-testid="purchase-qty-0"]', '2');
+    await page.fill('[data-testid="purchase-price-0"]', '6');
+    await page.click('[data-testid="purchase-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.textContent('.pa-list'), /Somente estoque/);
+
+    await page.click('.pa-navbtn[data-section="financeiro"]');
+    await page.click('.pa-modulebtn[data-screen="fin-pagar"]');
+    assert.match(await page.textContent('main'), /Nenhum título com este filtro/);
+    await goto(page, 'Insumos');
+    assert.match(await page.textContent('.pa-list'), /Estoque: 2 kg/);
     await page.close();
   });
 

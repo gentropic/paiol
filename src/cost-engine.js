@@ -103,8 +103,9 @@ export function priceOf(store, ingredientId, atMs = null) {
  * @typedef {object} Lens
  * @property {number|null} priceAt                         // null = latest price
  * @property {(r: import('./domain.js').Recipe) => number} yieldOf
- * @property {(r: import('./domain.js').Recipe) => { active: number, oven: number }} timesOf
+ * @property {(r: import('./domain.js').Recipe) => { active: number, oven: number, production: number }} timesOf
  * @property {number} totalActiveMinutesMonth              // fixed-rateio denominator
+ * @property {number} [totalProductionMinutesMonth]        // preferred fixed-rateio denominator
  */
 
 /**
@@ -117,8 +118,13 @@ export function estimateLens(config) {
   return {
     priceAt: null,
     yieldOf: (r) => r.yieldNominal,
-    timesOf: (r) => ({ active: r.activeMinutes, oven: r.ovenMinutes }),
+    timesOf: (r) => ({
+      active: Number(r.activeMinutes) || 0,
+      oven: Number(r.ovenMinutes) || 0,
+      production: Number(r.productionMinutes) || (Number(r.activeMinutes) || 0) + (Number(r.ovenMinutes) || 0),
+    }),
     totalActiveMinutesMonth: config.expectedActiveMinutesMonth,
+    totalProductionMinutesMonth: config.expectedProductionMinutesMonth || config.expectedActiveMinutesMonth,
   };
 }
 
@@ -146,12 +152,14 @@ export function actualLens(store, config, opts = {}) {
 
   // Month's actual active minutes, summed from batches in [monthStart, monthEnd).
   let totalActive = 0;
+  let totalProduction = 0;
   if (opts.monthStartMs != null && opts.monthEndMs != null) {
     for (const b of store.batches) {
       const t = ms(b.at);
       if (t < opts.monthStartMs || t >= opts.monthEndMs) continue;
       const r = store.recipes.get(b.recipeId);
       totalActive += b.activeMinutes ?? r?.activeMinutes ?? 0;
+      totalProduction += b.productionMinutes ?? r?.productionMinutes ?? ((b.activeMinutes ?? r?.activeMinutes ?? 0) + (b.ovenMinutes ?? r?.ovenMinutes ?? 0));
     }
   }
 
@@ -163,9 +171,11 @@ export function actualLens(store, config, opts = {}) {
       return {
         active: b?.activeMinutes ?? r.activeMinutes,
         oven: b?.ovenMinutes ?? r.ovenMinutes,
+        production: b?.productionMinutes ?? r.productionMinutes ?? ((b?.activeMinutes ?? r.activeMinutes ?? 0) + (b?.ovenMinutes ?? r.ovenMinutes ?? 0)),
       };
     },
     totalActiveMinutesMonth: totalActive || config.expectedActiveMinutesMonth,
+    totalProductionMinutesMonth: totalProduction || config.expectedProductionMinutesMonth || config.expectedActiveMinutesMonth,
   };
 }
 
@@ -212,14 +222,14 @@ export function costBreakdown(store, recipeId, config, lens, stack = new Set()) 
   stack.add(recipeId);
 
   const yield_ = yieldOrThrow(recipe, lens);
-  const { active, oven } = lens.timesOf(recipe);
+  const { active, oven, production = active + oven } = lens.timesOf(recipe);
 
   // The recipe's own (non-component) costs.
   const out = {
     ingredients: 0,
     labor: (config.valorHora * (active / 60)) / yield_,
     gas: (config.taxaGas * oven) / yield_,
-    fixed: fixedShare(config, lens, active, oven) / yield_,
+    fixed: fixedShare(config, lens, production) / yield_,
   };
 
   for (const c of recipe.components) {
@@ -251,19 +261,17 @@ export function costBreakdown(store, recipeId, config, lens, stack = new Set()) 
  * the monthly pool already absorbs the DAS (a fixed amount, not a percentage), so it never
  * enters the markup divisor (§4.3).
  *
- * Default base 'active-time' — her hands are the scarce capacity:
- *   share = custosFixosMes * activeMinutes / totalActiveMinutesMonth
- * 'total-time' uses active+oven (constraint is space/equipment). The base is engine config;
- * switching is a pure recompute since phase times are captured granularly.
+ * Fixed costs are allocated by the recipe's total production/preparation time. Active minutes
+ * remain a separate labor-effort diagnostic and do not drive this share.
  *
  * @param {import('./domain.js').Config} config @param {Lens} lens
- * @param {number} active @param {number} oven
+ * @param {number} production
  * @returns {number}
  */
-function fixedShare(config, lens, active, oven) {
-  if (lens.totalActiveMinutesMonth <= 0) return 0;
-  const minutes = (config.rateioBase || 'active-time') === 'total-time' ? active + oven : active;
-  return (config.custosFixosMes * minutes) / lens.totalActiveMinutesMonth;
+function fixedShare(config, lens, production) {
+  const denominator = lens.totalProductionMinutesMonth || lens.totalActiveMinutesMonth;
+  if (denominator <= 0) return 0;
+  return (config.custosFixosMes * production) / denominator;
 }
 
 /**
@@ -278,14 +286,15 @@ export function cmvPerUnit(store, recipeId, config, lens) {
 }
 
 /**
- * Full unit cost of a recipe's yield-unit: ingredients + labor + gas + fixed.
+ * Full unit cost of a recipe's yield-unit: ingredients + gas + fixed. Labor remains visible in
+ * the breakdown as a diagnostic, but payroll is already part of the fixed-cost pool.
  * @param {Store} store @param {string} recipeId
  * @param {import('./domain.js').Config} config @param {Lens} lens
  * @returns {number}
  */
 export function recipeUnitCost(store, recipeId, config, lens) {
   const d = costBreakdown(store, recipeId, config, lens);
-  return d.ingredients + d.labor + d.gas + d.fixed;
+  return d.ingredients + d.gas + d.fixed;
 }
 
 /**
@@ -360,22 +369,23 @@ export function productUnitCost(store, productId, config, lens) {
   const product = store.products.get(productId);
   if (!product) throw new RefError('product', productId);
   const b = productBreakdown(store, productId, config, lens);
-  return b.ingredients + b.labor + b.gas + b.fixed + b.packaging + (Number(product.packagingCost) || 0);
+  return b.ingredients + b.gas + b.fixed + b.packaging + (Number(product.packagingCost) || 0);
 }
 
 /**
  * Suggested price from a unit cost (§4.4):
- *   price = unitCost / (1 - paymentFeePct - targetMarginPct)
- * Only the payment fee and target margin go in the divisor — the MEI tax is already a
+ *   price = unitCost / (1 - paymentFeePct - commissionPct - targetMarginPct)
+ * Payment fee, sales commission and target margin go in the divisor — the MEI tax is already a
  * fixed cost. (Simples Nacional, by contrast, would put a tax % back in the divisor.)
  *
  * @param {number} unitCost
- * @param {{ paymentFeePct: number, targetMarginPct: number }} config
+ * @param {{ paymentFeePct: number, targetMarginPct: number, commissionPct?: number }} config
  * @returns {number}
  */
 export function priceFromCost(unitCost, config) {
-  const divisor = 1 - config.paymentFeePct - config.targetMarginPct;
-  if (divisor <= 0) throw new MarkupError(config.paymentFeePct, config.targetMarginPct);
+  const commission = Number(config.commissionPct) || 0;
+  const divisor = 1 - config.paymentFeePct - commission - config.targetMarginPct;
+  if (divisor <= 0) throw new MarkupError(config.paymentFeePct, config.targetMarginPct, commission);
   return unitCost / divisor;
 }
 
@@ -447,14 +457,15 @@ export class YieldError extends Error {
 }
 
 export class MarkupError extends Error {
-  /** @param {number} fee @param {number} margin */
-  constructor(fee, margin) {
+  /** @param {number} fee @param {number} margin @param {number} [commission] */
+  constructor(fee, margin, commission = 0) {
     super(
-      `Taxa (${fee}) + margem (${margin}) >= 100% — preco impossivel. ` +
-      `Reduza a margem ou a taxa.`,
+      `Taxa (${fee}) + comissao (${commission}) + margem (${margin}) >= 100% — preco impossivel. ` +
+      `Reduza a margem, a taxa ou a comissao.`,
     );
     this.name = 'MarkupError';
     this.fee = fee;
     this.margin = margin;
+    this.commission = commission;
   }
 }

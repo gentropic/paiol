@@ -34,6 +34,9 @@
  * @property {Conversion[]} [conversions]  // cross-dimension / count→mass overrides
  * @property {string}       [lastSupplier] // fornecedor da última compra (free text)
  * @property {string[]}     [tags]         // etiquetas (ex.: "revenda", "festa") — busca/filtro
+ * @property {number}       [stockQty]     // saldo inicial/base na unidade de estoque
+ * @property {number}       [minStockQty]  // nível que aciona a lista de compras
+ * @property {boolean}      [shoppingHidden] // dispensa temporariamente o aviso automático
  */
 
 /**
@@ -54,6 +57,7 @@
  * @property {Unit}        yieldUnit      // "un" | "g" | ...
  * @property {Component[]} components
  * @property {number}      activeMinutes  // hands-on  → labor (mao de obra)
+ * @property {number}     [productionMinutes] // total preparation time → fixed-cost allocation
  * @property {number}      ovenMinutes    // oven on   → gas
  * @property {number}      fermentMinutes // passive rest/proof (captured, not a cost driver by default)
  * @property {string}     [notes]         // observacao / modo de preparo (free text, not costed)
@@ -83,6 +87,10 @@
  * @property {number}             packagingCost // BRL per unit (embalagem)
  * @property {string}            [packagingDesc] // ex.: boleira, pacote, tubo, lata
  * @property {number}            [targetMarginPct] // optional per-product margin override (0..1); falls back to Config
+ * @property {number}            [saleQty]        // quantity/weight sold as one catalog item
+ * @property {Unit}              [saleUnit]       // unit shown in catalog/comanda
+ * @property {number}            [salePrice]      // default price filled into sales and orders
+ * @property {boolean}           [active]         // available for new sales; omitted means active (legacy compatible)
  * @property {string[]}          [tags]          // etiquetas
  * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
@@ -93,8 +101,12 @@
  * @typedef {object} Cliente
  * @property {string}  id
  * @property {string}  name        // nome
+ * @property {string} [code]       // código manual definido pela usuária
  * @property {string} [phone]      // telefone
  * @property {string} [address]    // endereço
+ * @property {string} [birthday]   // YYYY-MM-DD; o ano pode ser histórico
+ * @property {string[]} [tags]     // etiquetas e alertas do cliente
+ * @property {boolean} [inactive]  // kept for history, hidden from new-order suggestions
  */
 
 /**
@@ -122,6 +134,7 @@
  * @property {string} [notes]
  * @property {boolean} [entregue]    // delivered (Rev 07) — operational flag, SEPARATE from paid
  * @property {boolean} [urgente]     // priority (Rev 07) — pinned to the top of the list + highlighted
+ * @property {string} [desistenciaAt] // ISO — cancelled by customer; record stays in history
  */
 
 /**
@@ -149,7 +162,7 @@
  * @typedef {object} Category
  * @property {string} id
  * @property {string} name
- * @property {'receita'|'despesaFixa'|'despesaVariavel'|'perda'} kind
+ * @property {'receita'|'despesaFixa'|'despesaVariavel'|'custo'|'perda'} kind
  * @property {string}  [parentId]   // subcategory → its parent category (same kind)
  * @property {boolean} [archived]   // hidden from pickers; kept so old lançamentos stay labeled
  */
@@ -173,6 +186,7 @@
  * @property {string}  at             // ISO date
  * @property {string}  recipeId
  * @property {number}  yieldActual    // units that actually came out (<> nominal when something fails)
+ * @property {number} [productionMinutes] // logged total production time; defaults to recipe estimate
  * @property {number} [activeMinutes] // logged actual; defaults to recipe estimate if omitted
  * @property {number} [ovenMinutes]   // logged actual; defaults to recipe estimate if omitted
  */
@@ -186,6 +200,7 @@
  * @property {number}  qty
  * @property {number}  unitPrice       // price actually charged
  * @property {number}  paymentFeePct   // snapshotted at time of sale
+ * @property {number} [commissionPct]  // snapshotted sales commission
  * @property {number}  costSnapshot    // unit cost at time of sale
  * @property {string} [channel]        // single optional tag in v0.1
  */
@@ -230,6 +245,16 @@
  */
 
 /**
+ * Outra receita — money received outside sales/order payments. Append-only and manually recorded.
+ * @typedef {object} Income
+ * @property {string} id
+ * @property {string} at
+ * @property {number} valor
+ * @property {string} [categoryId]
+ * @property {string} [description]
+ */
+
+/**
  * Pagamento — a (partial) payment toward an {@link Encomenda} (Rev 04). Append-only, immutable; a
  * correction is an estorno (Reversal kind 'payment'). The order's pago/saldo are DERIVED from the
  * sum of payments, never stored — so they can't drift.
@@ -242,13 +267,117 @@
  */
 
 /**
+ * Fornecedor — cadastro simples para compras e contas a pagar.
+ * @typedef {object} Supplier
+ * @property {string} id
+ * @property {string} name
+ * @property {string} [document]
+ * @property {string} [phone]
+ * @property {string} [birthday]
+ * @property {string} [notes]
+ * @property {boolean} [archived]
+ */
+
+/**
+ * Funcionário — cadastro operacional usado também na agenda de aniversários.
+ * @typedef {object} Employee
+ * @property {string} id
+ * @property {string} name
+ * @property {string} [role]
+ * @property {string} [phone]
+ * @property {string} [birthday]
+ * @property {boolean} [inactive]
+ */
+
+/**
+ * Lembrete datado — aparece no Início apenas no dia escolhido e permanece no histórico de Ajustes.
+ * @typedef {object} Notification
+ * @property {string} id
+ * @property {string} date
+ * @property {string} title
+ * @property {string} [notes]
+ * @property {boolean} [done]
+ * @property {string} [doneAt]
+ * @property {string} [createdAt]
+ */
+
+/**
+ * Item manual da lista de compras. Avisos automáticos de estoque baixo são derivados dos insumos.
+ * @typedef {object} ShoppingItem
+ * @property {string} id
+ * @property {string} name
+ * @property {number} [qty]
+ * @property {string} [unit]
+ * @property {boolean} [done]
+ * @property {string} [createdAt]
+ */
+
+/**
+ * Conta financeira — onde o dinheiro fica (caixa, banco, Pix etc.).
+ * @typedef {object} CashAccount
+ * @property {string} id
+ * @property {string} name
+ * @property {string} [systemKey]
+ * @property {number} [openingBalance]
+ * @property {string} [openingDate]
+ * @property {boolean} [archived]
+ */
+
+/**
+ * Título financeiro — direito a receber ou obrigação a pagar. O status e o saldo são derivados
+ * das baixas; cancelar preserva o histórico.
+ * @typedef {object} FinanceTitle
+ * @property {string} id
+ * @property {'receber'|'pagar'} direction
+ * @property {string} issuedAt
+ * @property {string} competenceDate
+ * @property {string} dueDate
+ * @property {number} amount
+ * @property {string} description
+ * @property {string} [categoryId]
+ * @property {'cliente'|'fornecedor'|'outro'} [partyType]
+ * @property {string} [partyId]
+ * @property {string} [partyName]
+ * @property {string} [expectedMethod]
+ * @property {string} [sourceType]
+ * @property {string} [sourceId]
+ * @property {string} [notes]
+ * @property {string} [cancelledAt]
+ */
+
+/**
+ * Baixa financeira — dinheiro efetivamente recebido ou pago contra um título.
+ * @typedef {object} FinanceSettlement
+ * @property {string} id
+ * @property {string} at
+ * @property {string} titleId
+ * @property {number} amount
+ * @property {string} [method]
+ * @property {string} [accountId]
+ * @property {string} [notes]
+ */
+
+/**
+ * Compra — registra insumos/embalagens adquiridos e liga a operação ao título a pagar.
+ * @typedef {object} Purchase
+ * @property {string} id
+ * @property {string} at
+ * @property {string} [supplierId]
+ * @property {Array<{ingredientId:string,qty:number,unitPrice:number}>} items
+ * @property {number} total
+ * @property {string} [titleId]
+ * @property {boolean} [financiallyTracked] // false = histórico/preço/estoque, sem Contas a Pagar/DRE
+ * @property {string} [notes]
+ */
+
+/**
  * Estorno — a reversal of a prior append-only event (Rev 03). Append-only itself, so the original
  * stays in the history (audit trail) but no longer counts. `kind` + `refId` point at the reversed
  * event.
  * @typedef {object} Reversal
  * @property {string} id
  * @property {string} at
- * @property {'sale'|'batch'|'variableCost'|'perda'|'payment'|'despesa'} kind
+ * @property {'sale'|'batch'|'variableCost'|'perda'|'payment'|'despesa'|'income'|'financeSettlement'|'cashAdjustment'} kind
  * @property {string} refId
  */
 
@@ -262,7 +391,9 @@
  * @property {number} custosFixosMes         // monthly fixed-cost pool (includes `das`)
  * @property {number} targetMarginPct        // 0..1, goes in the markup divisor
  * @property {number} paymentFeePct          // 0..1, goes in the markup divisor
+ * @property {number} commissionPct          // 0..1, goes in the markup divisor
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
+ * @property {number} expectedProductionMinutesMonth // production-time denominator for fixed costs
  * @property {'active-time'|'total-time'} [rateioBase] // default 'active-time' (§4.3; 'per-unit' deferred)
  * @property {Empresa} [empresa]             // Dados da empresa (Rev 06) — recibo header; filled in Ajustes
  */

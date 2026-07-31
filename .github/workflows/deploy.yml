@@ -42,7 +42,6 @@ jobs:
           mkdir -p _site/vendor/pdf-lib && cp vendor/pdf-lib/pdf-lib.min.js _site/vendor/pdf-lib/
           mkdir -p _site/vendor/exceljs && cp vendor/exceljs/exceljs.min.js _site/vendor/exceljs/
 
-      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

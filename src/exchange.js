@@ -49,6 +49,10 @@ export function toExchange(store) {
   const compKey = (c) => (c.kind === 'recipe' ? 'receita' : c.kind === 'product' ? 'produto' : 'insumo');
   const produtos = store.state.products.map((p) => ({
     nome: p.name,
+    quantidadeVenda: p.saleQty || 1,
+    unidadeVenda: p.saleUnit || 'un',
+    precoVenda: Number(p.salePrice) || 0,
+    ativo: p.active !== false,
     embalagem: p.packagingCost,
     ...(p.packagingDesc ? { descricaoEmbalagem: p.packagingDesc } : {}),
     componentes: (p.components || []).map((c) => ({ [compKey(c)]: compName(c), qtd: c.qty })),
@@ -157,7 +161,7 @@ export function applyExchange(store, data, opts = {}) {
     if (!p || !p.nome) { warnings.push('produto sem nome ignorado'); continue; }
     const k = norm(p.nome);
     if (!prodByName.get(k)) {
-      const shell = { id: newId(), name: String(p.nome).trim(), components: [], packagingCost: 0 };
+      const shell = { id: newId(), name: String(p.nome).trim(), components: [], packagingCost: 0, active: true };
       store.upsertProduct(shell);
       prodByName.set(k, shell);
     }
@@ -170,6 +174,10 @@ export function applyExchange(store, data, opts = {}) {
     if (!p || !p.nome) continue;
     const prod = prodByName.get(norm(p.nome));
     prod.packagingCost = num(p.embalagem, 0);
+    prod.saleQty = num(p.quantidadeVenda, prod.saleQty || 1);
+    prod.saleUnit = p.unidadeVenda || prod.saleUnit || 'un';
+    if (p.precoVenda != null) prod.salePrice = num(p.precoVenda, prod.salePrice || 0);
+    prod.active = p.ativo == null ? prod.active !== false : p.ativo !== false;
     if (p.descricaoEmbalagem) prod.packagingDesc = String(p.descricaoEmbalagem).trim();
     prod.components = [];
 

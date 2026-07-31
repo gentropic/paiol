@@ -19,6 +19,7 @@ import { makeSw } from './vendor/@gcu/sw/make.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(HERE, 'src/main.js');
 const TEMPLATE = resolve(HERE, 'index.html');
+const BRAND_LOGO = resolve(HERE, 'brand-logo.png');
 const OUT = resolve(HERE, 'paiol.html');
 const SW_OUT = resolve(HERE, 'sw.js');
 
@@ -27,7 +28,7 @@ const SW_OUT = resolve(HERE, 'sw.js');
 // by byte-diff and offers a reload. Relative URLs resolve against the SW's own /paiol/ scope.
 const SW_CONFIG = {
   app: 'paiol',
-  cache: 'paiol-shell-v1',
+  cache: 'paiol-shell-v6',
   precache: ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './vendor/pdf-lib/pdf-lib.min.js', './vendor/exceljs/exceljs.min.js'],
   navFallback: './index.html',
 };
@@ -91,12 +92,17 @@ async function main() {
   const banner = '/* paiol — generated single-file build. Source: github → src/. Do not edit. */';
   const bundle = [banner, ...modules.map(({ file, src }) => `// ── ${rel(file)} ──\n${strip(src).trim()}`)].join('\n\n');
 
+  const logoData = `data:image/png;base64,${(await readFile(BRAND_LOGO)).toString('base64')}`;
   const template = await readFile(TEMPLATE, 'utf8');
   const marker = /<script\s+type="module"\s+src="\.\/src\/main\.js"\s*>\s*<\/script>/;
   if (!marker.test(template)) throw new Error('index.html: could not find the module <script> to inline');
   // NB: function replacement — a string replacement would interpret `$` sequences in the
   // bundle (e.g. `'$'` inside a regex literal becomes `$'` = "match suffix"), corrupting output.
-  const html = template.replace(marker, () => `<script type="module">\n${bundle}\n</script>`);
+  // Replace the logo after inlining the JavaScript bundle. The logo reference lives in
+  // src/ui.js, so replacing it in the HTML template beforehand leaves the bundled URL intact.
+  const html = template
+    .replace(marker, () => `<script type="module">\n${bundle}\n</script>`)
+    .replaceAll('./brand-logo.png', logoData);
 
   await writeFile(OUT, html);
   const kb = (Buffer.byteLength(html) / 1024).toFixed(0);

@@ -11,7 +11,7 @@ function seeded() {
   s.upsertIngredient({ id: 'ovo', name: 'Ovo', stockUnit: 'un' });
   s.addPriceChange({ id: 'pc', at: '2026-01-01', ingredientId: 'far', price: 5 });
   s.upsertRecipe({ id: 'bolo', name: 'Bolo de cenoura', yieldNominal: 12, yieldUnit: 'un', activeMinutes: 40, ovenMinutes: 30, fermentMinutes: 0, components: [{ ref: { kind: 'ingredient', id: 'far' }, qty: 500, unit: 'g' }, { ref: { kind: 'ingredient', id: 'ovo' }, qty: 3, unit: 'un' }] });
-  s.upsertProduct({ id: 'p', name: 'Bolo (fatia)', components: [{ kind: 'recipe', id: 'bolo', qty: 1 }], packagingCost: 1.5, packagingDesc: 'caixinha' });
+  s.upsertProduct({ id: 'p', name: 'Bolo (fatia)', components: [{ kind: 'recipe', id: 'bolo', qty: 1 }], packagingCost: 1.5, packagingDesc: 'caixinha', saleQty: 120, saleUnit: 'g', salePrice: 9.5, active: false });
   return s;
 }
 
@@ -34,6 +34,10 @@ test('xlsx round-trip: export → parse → applyExchange preserves the catalog'
   const far = dst.state.ingredients.find((i) => i.name === 'Farinha');
   assert.equal(dst.currentPrice(far.id), 5);             // preço survived the round-trip
   assert.equal(dst.state.products[0].packagingCost, 1.5);
+  assert.equal(dst.state.products[0].saleQty, 120);
+  assert.equal(dst.state.products[0].saleUnit, 'g');
+  assert.equal(dst.state.products[0].salePrice, 9.5);
+  assert.equal(dst.state.products[0].active, false);
 });
 
 test('previewExchange: novos vs atualizados, and it never mutates the store', async () => {

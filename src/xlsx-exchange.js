@@ -102,15 +102,16 @@ export function buildWorkbook(store, X) {
   });
 
   const produtos = wb.addWorksheet('Produtos', { views: [{ state: 'frozen', ySplit: 3 }] });
-  produtos.columns = [{ width: 28 }, { width: 24 }, { width: 14 }, { width: 24 }];
-  titleCell(produtos, 'A1:D1', 'Produtos — o que você vende');
-  headerRow(produtos, 3, ['Nome', 'Receita', 'Embalagem (R$)', 'Descrição']);
-  produtos.autoFilter = 'A3:D3';
+  produtos.columns = [{ width: 28 }, { width: 12 }, { width: 12 }, { width: 16 }, { width: 24 }, { width: 14 }, { width: 24 }, { width: 18 }];
+  titleCell(produtos, 'A1:H1', 'Produtos — seu catálogo de venda');
+  headerRow(produtos, 3, ['Nome', 'Quantidade', 'Unidade', 'Valor de venda (R$)', 'Receita', 'Embalagem (R$)', 'Descrição', 'Ativo para venda']);
+  produtos.autoFilter = 'A3:H3';
   store.state.products.forEach((p, k) => {
     const c = (p.components || []).find((x) => x.kind === 'recipe');
     const r = produtos.getRow(4 + k);
-    r.getCell(1).value = p.name; r.getCell(2).value = c ? recNm(c.id) : ''; r.getCell(3).value = p.packagingCost || 0; r.getCell(4).value = p.packagingDesc || '';
-    r.getCell(3).numFmt = MONEY;
+    r.getCell(1).value = p.name; r.getCell(2).value = p.saleQty || 1; r.getCell(3).value = p.saleUnit || 'un'; r.getCell(4).value = Number(p.salePrice) || 0;
+    r.getCell(5).value = c ? recNm(c.id) : ''; r.getCell(6).value = p.packagingCost || 0; r.getCell(7).value = p.packagingDesc || ''; r.getCell(8).value = p.active !== false ? 'Sim' : 'Não';
+    unitDropdown(r.getCell(3)); r.getCell(4).numFmt = MONEY; r.getCell(6).numFmt = MONEY;
   });
 
   const used = new Set(['insumos', 'produtos', EXEMPLO.toLowerCase()]);
@@ -155,7 +156,13 @@ export async function parseInterchange(bytes, X) {
     const nm = ws.name.trim();
     if (xnorm(nm) === EXEMPLO.toLowerCase() || /^(leia-?me|instru)/i.test(nm)) return;
     if (xnorm(nm) === 'insumos') { for (let r = 4; cv(ws.getCell(r, 1)); r++) data.insumos.push({ nome: cv(ws.getCell(r, 1)), unidade: cv(ws.getCell(r, 2)), preco: cv(ws.getCell(r, 3)) }); return; }
-    if (xnorm(nm) === 'produtos') { for (let r = 4; cv(ws.getCell(r, 1)); r++) data.produtos.push({ nome: cv(ws.getCell(r, 1)), receita: cv(ws.getCell(r, 2)) || undefined, porcao: 1, embalagem: cv(ws.getCell(r, 3)), descricaoEmbalagem: cv(ws.getCell(r, 4)) || undefined }); return; }
+    if (xnorm(nm) === 'produtos') {
+      const modern = xnorm(cv(ws.getCell(3, 2))).includes('quantidade');
+      for (let r = 4; cv(ws.getCell(r, 1)); r++) data.produtos.push(modern
+        ? { nome: cv(ws.getCell(r, 1)), quantidadeVenda: cv(ws.getCell(r, 2)), unidadeVenda: cv(ws.getCell(r, 3)) || 'un', precoVenda: cv(ws.getCell(r, 4)), receita: cv(ws.getCell(r, 5)) || undefined, porcao: 1, embalagem: cv(ws.getCell(r, 6)), descricaoEmbalagem: cv(ws.getCell(r, 7)) || undefined, ativo: cv(ws.getCell(r, 8)) == null || cv(ws.getCell(r, 8)) === '' ? undefined : !['não', 'nao', 'false', '0', 'inativo'].includes(xnorm(cv(ws.getCell(r, 8)))) }
+        : { nome: cv(ws.getCell(r, 1)), receita: cv(ws.getCell(r, 2)) || undefined, porcao: 1, embalagem: cv(ws.getCell(r, 3)), descricaoEmbalagem: cv(ws.getCell(r, 4)) || undefined });
+      return;
+    }
     recipeSheets.push(ws);
   });
   const recipeNames = new Set(recipeSheets.map((ws) => xnorm(cv(ws.getCell('A1')))));

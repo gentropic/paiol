@@ -15,6 +15,7 @@ Thumbs.db
 
 # personal, untracked scratch space (notes, experiments, local files)
 personal/
+work/
 
 # Claude Code local files (keep private)
 CLAUDE.md
