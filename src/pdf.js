@@ -162,8 +162,10 @@ export async function generateReciboPdf(r) {
   page.drawLine({ start: { x: padL, y: y + 4 }, end: { x: padR, y: y + 4 }, thickness: 0.5, color: line });
   y -= 12;
   const kv = (label, val, b = false, color = fg) => { page.drawText(label, { x: padR - 200, y, size: 10, font: b ? bold : font, color }); rightText(val, padR, y, 10, b ? bold : font, color); y -= 16; };
+  if (r.desconto > 0.005) { kv('Subtotal', money(r.subtotal)); kv('Desconto da venda', `- ${money(r.desconto)}`, false, rgb(0.18, 0.45, 0.20)); }
   if (r.total && Math.abs(r.total - r.pago) > 0.005) kv('Total do pedido', money(r.total));
   kv('Valor pago' + (r.forma ? ` (${r.forma})` : ''), money(r.pago), true);
+  if (r.descontoQuitacao > 0.005) kv('Desconto na quitação', money(r.descontoQuitacao), false, rgb(0.18, 0.45, 0.20));
   if (r.saldo > 0.005) kv('Saldo restante', money(r.saldo), false, rgb(0.70, 0.15, 0.12));
   else kv('Situação', 'QUITADO', true, rgb(0.18, 0.45, 0.20));
 
@@ -395,11 +397,12 @@ export async function generateClientStatementPdf(statement) {
   page.drawText('MOVIMENTAÇÕES', { x: M, y, size: 8.5, font: bold, color: navy }); y -= 13;
 
   for (const movement of statement.movements || []) {
-    if (movement.type === 'payment') {
+    if (movement.type === 'payment' || movement.type === 'discount') {
+      const discount = movement.type === 'discount';
       ensure(38);
       page.drawLine({ start: { x: M, y: y + 5 }, end: { x: right, y: y + 5 }, thickness: 0.5, color: line });
-      page.drawText(`${ptDate(movement.at)}  PAGAMENTO`, { x: M, y: y - 8, size: 9, font: bold, color: good });
-      rightText(page, money(movement.amount), right, y - 8, 10, bold, good);
+      page.drawText(`${ptDate(movement.at)}  ${discount ? 'DESCONTO NA QUITAÇÃO' : 'PAGAMENTO'}`, { x: M, y: y - 8, size: 9, font: bold, color: discount ? navy : good });
+      rightText(page, money(movement.amount), right, y - 8, 10, bold, discount ? navy : good);
       y -= 21;
       page.drawText(trunc(`${movement.description}${movement.method ? ` - ${movement.method}` : ''}`, 82), { x: M + 12, y, size: 8.5, font, color: soft });
       y -= 17;
@@ -426,6 +429,12 @@ export async function generateClientStatementPdf(statement) {
         rightText(page, money(movement.freight), right, y, 8.5, font, navy);
         y -= 14;
       }
+      if (movement.discount > 0) {
+        ensure(16);
+        page.drawText('Desconto da venda', { x: M + 12, y, size: 8.5, font, color: good });
+        rightText(page, `- ${money(movement.discount)}`, right, y, 8.5, font, good);
+        y -= 14;
+      }
       if (movement.deliveryMethod || movement.notes) {
         ensure(16);
         const detail = [`Entrega: ${movement.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, movement.notes && `Obs.: ${movement.notes}`].filter(Boolean).join(' - ');
@@ -437,9 +446,10 @@ export async function generateClientStatementPdf(statement) {
       y -= 14;
     }
     ensure(17);
+    const discountText = movement.discounted > 0.005 ? `  -  Desconto ${money(movement.discounted)}` : '';
     const status = movement.balance > 0.005
-      ? `Recebido ${money(movement.paid)}  -  Em aberto ${money(movement.balance)}`
-      : `Recebido ${money(movement.paid)}  -  QUITADO`;
+      ? `Recebido ${money(movement.paid)}${discountText}  -  Em aberto ${money(movement.balance)}`
+      : `Recebido ${money(movement.paid)}${discountText}  -  QUITADO`;
     page.drawText(status, { x: M + 12, y, size: 8.5, font: bold, color: movement.balance > 0.005 ? bad : good });
     y -= 19;
   }

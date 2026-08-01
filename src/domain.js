@@ -91,6 +91,7 @@
  * @property {Unit}              [saleUnit]       // unit shown in catalog/comanda
  * @property {number}            [salePrice]      // default price filled into sales and orders
  * @property {boolean}           [active]         // available for new sales; omitted means active (legacy compatible)
+ * @property {'normal'|'cesta'|'kit'|'combo'} [saleKind] // explicit dashboard/order classification
  * @property {string[]}          [tags]          // etiquetas
  * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
@@ -115,6 +116,7 @@
  * @property {string} productId
  * @property {number} qty
  * @property {number} unitPrice    // sale price charged per unit (defaults to the suggested price)
+ * @property {Array<{productId:string,qty:number}>} [bundleItems] // products inside each cesta/kit/combo
  */
 
 /**
@@ -128,6 +130,7 @@
  * @property {string} [clienteId]     // optional (avulso / balcão)
  * @property {EncomendaItem[]} itens
  * @property {number}  total          // Σ itens + frete
+ * @property {number} [discount]      // desconto comercial concedido na venda
  * @property {number}  costSnapshot   // Σ (qty × product unit cost) at save time
  * @property {'retirada'|'motoboy'} [deliveryMethod]
  * @property {number} [frete]
@@ -202,6 +205,7 @@
  * @property {number}  paymentFeePct   // snapshotted at time of sale
  * @property {number} [commissionPct]  // snapshotted sales commission
  * @property {number}  costSnapshot    // unit cost at time of sale
+ * @property {number} [discount]       // total discount granted on this sale
  * @property {string} [channel]        // single optional tag in v0.1
  */
 
@@ -354,6 +358,7 @@
  * @property {number} amount
  * @property {string} [method]
  * @property {string} [accountId]
+ * @property {'payment'|'discount'} [kind] // discount settles balance but never moves cash
  * @property {string} [notes]
  */
 

@@ -19,6 +19,7 @@ import { clientFinancialStatement } from './client-statement.js';
 import { managerialDre } from './dre.js';
 import { inventorySummary, ingredientInventory } from './inventory.js';
 import { APP_VERSION } from './config.js';
+import { productSaleKind, isBundleProduct, bundleKindLabel, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -36,7 +37,7 @@ const SECTIONS = [
   { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas']] },
   { id: 'producao', label: 'Produção', icon: '◇', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
   { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['simulador', 'Simulador'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
-  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento']] },
+  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙', screens: [['ajustes', 'Ajustes']] },
 ];
 const SECTION_OF = {};
@@ -273,7 +274,7 @@ export function renderApp(root, ctx) {
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel, funcionarios: funcionariosPanel,
     precos: precosPanel, vendas: vendasPanel,
     encomendas: encomendasPanel, comanda: comandaPeriodPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
-    'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-pagar': financePayablePanel,
+    'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-pagar': financePayablePanel,
     'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
@@ -875,7 +876,7 @@ function produtoRow(ctx, product) {
   };
   return el('li', { class: 'pa-row-item' + (active ? '' : ' pa-reversed'), 'data-search': `${product.name} ${(product.tags || []).join(' ')} ${active ? 'ativo' : 'inativo'}`, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
     el('div', { class: 'pa-grow' }, [
-      el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })]),
+      el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), isBundleProduct(product) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })].filter(Boolean)),
       el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} · venda ${brl(sellingPrice(store, product.id))}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
       tagChips(product.tags),
@@ -894,26 +895,49 @@ function produtoSheet(ctx, product) {
   const saleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-sale-qty', type: 'text', inputmode: 'decimal', placeholder: '1 ou 500', value: product ? String(product.saleQty || 1).replace('.', ',') : '1' });
   const saleUnit = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-unit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...((product?.saleUnit || 'un') === u ? { selected: 'selected' } : {}) })));
   const salePrice = moneyField(product ? sellingPrice(store, product.id) : null, 'prod-sale-price');
+  const saleKind = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-kind' }, [
+    ['normal', 'Produto comum'], ['cesta', 'Cesta'], ['kit', 'Kit'], ['combo', 'Combo'],
+  ].map(([value, label]) => el('option', { value, text: label, ...(productSaleKind(product) === value ? { selected: 'selected' } : {}) })));
   const activeChk = el('input', { type: 'checkbox', 'data-testid': 'prod-active' });
   activeChk.checked = product ? productIsActive(product) : true;
   const linkedRecipe = product ? store.state.recipes.find((r) => (product.components || []).some((c) => c.kind === 'recipe' && c.id === r.id)) : null;
+  const packagingItems = product ? (product.components || []).filter((c) => c.kind === 'ingredient').map((c) => ({ id: c.id, qty: Number(c.qty) || 0 })) : [];
+  const packagingBox = el('div', { class: 'pa-detail-card' });
+  const packagingList = el('ul', { class: 'pa-list pa-tight' });
+  const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
+  const packagingQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-bundle-insumo-qty', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
+  const renderPackaging = () => packagingList.replaceChildren(...(packagingItems.length ? packagingItems.map((item, index) => {
+    const ingredient = store.get('ingredients', item.id);
+    return el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)} ${ingredient?.stockUnit || 'un'} · ${ingredient?.name || '(insumo removido)'}` }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { packagingItems.splice(index, 1); renderPackaging(); } }, '✕')]);
+  }) : [el('li', { class: 'pa-empty pa-sm', text: 'Nenhuma embalagem ou detalhe vinculado.' })]));
+  const addPackaging = () => { const q = parseNum(packagingQty.value); if (!packagingIngredient.value || !(q > 0)) { packagingQty.focus(); return; } const current = packagingItems.find((item) => item.id === packagingIngredient.value); if (current) current.qty += q; else packagingItems.push({ id: packagingIngredient.value, qty: q }); packagingQty.value = ''; renderPackaging(); };
+  packagingBox.append(el('p', { class: 'pa-hint', text: 'Opcional: informe cesta, caixa, laço, cartão ou outro insumo físico consumido em cada conjunto. O estoque baixa quando a montagem for registrada na comanda.' }), packagingList, store.state.ingredients.length ? el('div', { class: 'pa-row pa-form' }, [packagingIngredient, packagingQty, el('button', { class: 'pa-btn pa-sm', 'data-testid': 'prod-bundle-insumo-add', onclick: addPackaging }, '+ detalhe')]) : el('p', { class: 'pa-hint', text: 'Cadastre as embalagens em Insumos para vinculá-las aqui.' }));
+  renderPackaging();
+  const reconcileKind = () => { packagingBox.style.display = saleKind.value === 'normal' ? 'none' : ''; };
+  saleKind.addEventListener('change', reconcileKind); reconcileKind();
 
   function save() {
     const nm = name.value.trim();
     const q = parseNum(saleQty.value);
     const price = parseNum(salePrice.input.value);
     if (!nm || !(q > 0) || price == null || price < 0) { (nm ? saleQty : name).focus(); return; }
+    const components = saleKind.value === 'normal'
+      ? (product ? (product.components || []) : [])
+      : packagingItems.map((item) => ({ kind: 'ingredient', id: item.id, qty: item.qty }));
     ctx.actions.mutate((s) => s.upsertProduct({
       ...(product || {}), id: product ? product.id : uuid(), name: nm,
-      components: product ? (product.components || []) : [], packagingCost: product?.packagingCost || 0,
-      saleQty: q, saleUnit: saleUnit.value, salePrice: price, active: activeChk.checked,
+      components, packagingCost: product?.packagingCost || 0,
+      saleQty: q, saleUnit: saleUnit.value, salePrice: price, saleKind: saleKind.value, active: activeChk.checked,
     }));
   }
 
   const rows = [
     field('Nome', name),
+    field('Tipo para venda e Dashboard', saleKind),
+    el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para o sistema contar o conjunto no indicador correto e pedir os produtos internos ao lançar a encomenda.' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Unidade ou peso vendido' }), saleQty, saleUnit]),
     field('Valor de venda', salePrice),
+    packagingBox,
     el('label', { class: 'pa-check' }, [activeChk, el('span', { text: 'Ativo para venda' })]),
     el('p', { class: 'pa-hint', text: 'Se desativado, permanece cadastrado e ligado à receita, mas não aparece em novas vendas, encomendas, comandas avulsas ou estimativas.' }),
     linkedRecipe
@@ -998,8 +1022,9 @@ function clienteHistorico(store, cli) {
   if (!orders.length) return el('p', { class: 'pa-hint', 'data-testid': 'cli-hist', text: 'Ainda sem compras registradas.' });
   const activeOrders = orders.filter((e) => !e.desistenciaAt);
   const totalComprado = activeOrders.reduce((s, e) => s + (e.total || 0), 0);
-  const totalPago = activeOrders.reduce((s, e) => s + store.paidFor(e.id), 0);
-  const saldo = totalComprado - totalPago;
+  const totalPago = activeOrders.reduce((s, e) => s + paymentStatus(store, e).paid, 0);
+  const totalDescontado = activeOrders.reduce((s, e) => s + (paymentStatus(store, e).discounted || 0), 0);
+  const saldo = activeOrders.reduce((s, e) => s + paymentStatus(store, e).saldo, 0);
   const pays = [];
   for (const e of orders) for (const pg of store.state.payments) if (pg.encomendaId === e.id && !store.isReversed('payment', pg.id)) pays.push(pg);
   pays.sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -1008,8 +1033,9 @@ function clienteHistorico(store, cli) {
     el('table', { class: 'pa-kv' }, [
       kv('Total comprado', brl(totalComprado)),
       kv('Total pago', brl(totalPago)),
+      totalDescontado > 0.005 && kv('Descontos na quitação', brl(totalDescontado)),
       kv('Saldo pendente', brl(saldo), saldo > 0.005),
-    ]),
+    ].filter(Boolean)),
     el('h3', { class: 'pa-h3', text: `Compras (${orders.length})` }),
     el('ul', { class: 'pa-list pa-tight' }, orders.map((e) => {
       const st = paymentStatus(store, e);
@@ -1206,14 +1232,19 @@ function dateRangeDays(start, end, limit = 31) {
   return days;
 }
 
-function comandaDaySection(ctx, date, unitCost) {
-  const { store } = ctx;
-  const isToday = date === todayInput();
+function orderedProductionForDate(store, date) {
   const ordered = new Map();
   for (const order of store.state.encomendas) {
     if (order.desistenciaAt || dateOnly(order.deliveryDate) !== date) continue;
-    for (const item of order.itens || []) ordered.set(item.productId, (ordered.get(item.productId) || 0) + (Number(item.qty) || 0));
+    orderProduction(order, ordered);
   }
+  return ordered;
+}
+
+function comandaDaySection(ctx, date, unitCost) {
+  const { store } = ctx;
+  const isToday = date === todayInput();
+  const ordered = orderedProductionForDate(store, date);
   const stored = store.get('comandas', date);
   const items = new Map();
   for (const item of stored?.itens || []) items.set(item.productId, { prevista: item.prevista == null ? undefined : Number(item.prevista), realizado: Number(item.realizado) || 0, feito: !!item.feito });
@@ -1274,6 +1305,7 @@ function comandaDaySection(ctx, date, unitCost) {
     const matches = query ? store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(query) && !items.has(p.id) && !ordered.has(p.id)).slice(0, 6) : [];
     suggestions.style.display = matches.length ? '' : 'none';
     suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': isToday ? 'cmd-prodresult' : `cmd-prodresult-${date}`, onclick: () => {
+      if (isBundleProduct(product)) { ctx.actions.openModal({ kind: 'comanda-bundle-add', date, productId: product.id }); return; }
       items.set(product.id, { prevista: undefined, realizado: 0, feito: false }); productIds.push(product.id); productIds.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
       search.value = ''; suggestions.style.display = 'none'; renderList(); recompute();
     } }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
@@ -1288,6 +1320,39 @@ function comandaDaySection(ctx, date, unitCost) {
     el('div', { class: 'pa-cardhead' }, [el('h3', { class: 'pa-h3 pa-grow', text: fmtDate(`${date}T12:00:00`) }), el('span', { class: 'pa-badge', text: `${productIds.length} item(ns)` })]),
     list, search, suggestions, indicators, orders,
   ].filter(Boolean));
+}
+
+MODALS['comanda-bundle-add'] = (ctx, modal) => comandaBundleSheet(ctx, modal);
+function comandaBundleSheet(ctx, modal) {
+  const { store } = ctx; const product = store.get('products', modal.productId);
+  if (!product || !isBundleProduct(product)) return sheet({ title: 'Conjunto não encontrado', rows: [] });
+  const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
+  const children = [];
+  const itemsBox = el('div', { class: 'pa-detail-card' });
+  const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== product.id);
+  const render = () => {
+    const list = children.map((child, index) => {
+      const p = store.get('products', child.productId); const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty) });
+      qty.addEventListener('input', () => { child.qty = parseNum(qty.value) || 0; });
+      return el('li', { class: 'pa-list-item' }, [qty, el('span', { class: 'pa-grow', text: p?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { children.splice(index, 1); render(); } }, '✕')]);
+    });
+    const select = el('select', { class: 'pa-input', 'data-testid': 'cmd-bundle-product' }, candidates.map((p) => el('option', { value: p.id, text: p.name })));
+    const qty = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-bundle-child-qty', type: 'text', inputmode: 'decimal', value: '1' });
+    itemsBox.replaceChildren(el('ul', { class: 'pa-list pa-tight' }, list.length ? list : [el('li', { class: 'pa-empty pa-sm', text: 'Adicione os produtos do conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, el('button', { class: 'pa-btn pa-sm', onclick: () => { const q = parseNum(qty.value); if (!select.value || !(q > 0)) return; const current = children.find((child) => child.productId === select.value); if (current) current.qty += q; else children.push({ productId: select.value, qty: q }); render(); } }, '+ produto')]) : el('p', { class: 'pa-hint', text: 'Não há produtos comuns ativos para montar este conjunto.' }));
+  };
+  render();
+  function save() {
+    const qty = parseNum(bundleQty.value); if (!(qty > 0) || !children.some((child) => child.qty > 0)) { bundleQty.focus(); return; }
+    const required = orderProduction({ itens: [{ productId: product.id, qty, bundleItems: children }] });
+    const ordered = orderedProductionForDate(store, modal.date); const current = store.get('comandas', modal.date); const byId = new Map((current?.itens || []).map((item) => [item.productId, { ...item }]));
+    for (const [productId, extra] of required) {
+      const row = byId.get(productId) || { productId, realizado: 0, feito: false };
+      row.prevista = (row.prevista == null ? (ordered.get(productId) || 0) : Number(row.prevista) || 0) + extra;
+      byId.set(productId, row);
+    }
+    ctx.actions.mutate((s) => s.upsertComanda({ id: modal.date, date: modal.date, itens: [...byId.values()] }));
+  }
+  return sheet({ title: `Adicionar ${bundleKindLabel(product)} à comanda`, rows: [el('div', { class: 'pa-callout' }, [el('strong', { text: product.name }), el('span', { text: ` · ${fmtDate(`${modal.date}T12:00:00`)}` })]), field(`Quantidade de ${bundleKindLabel(product).toLowerCase()}s`, bundleQty), el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), itemsBox, el('p', { class: 'pa-hint', text: 'Aqui você planeja apenas a produção. Para registrar cliente, preço, desconto e valor a receber, crie uma Encomenda.' })], onSave: save, saveTestid: 'cmd-bundle-save' });
 }
 
 function comandaPeriodPanel(ctx) {
@@ -1503,15 +1568,18 @@ function comandaPanel(ctx) {
 
 function buildComandaSpec(store, date) {
   const groups = new Map();
-  const ordered = new Map();
+  const ordered = orderedProductionForDate(store, date);
   for (const enc of store.state.encomendas) {
     if (enc.desistenciaAt || dateOnly(enc.deliveryDate) !== date) continue;
     const key = enc.clienteId || '__sem__';
     const client = enc.clienteId ? store.get('clients', enc.clienteId) : null;
     const group = groups.get(key) || { clientName: client?.name || 'Sem cliente / pronta entrega', contact: [client?.phone, client?.address].filter(Boolean).join(' · '), items: new Map(), notes: [] };
     for (const it of enc.itens || []) {
-      group.items.set(it.productId, (group.items.get(it.productId) || 0) + (Number(it.qty) || 0));
-      ordered.set(it.productId, (ordered.get(it.productId) || 0) + (Number(it.qty) || 0));
+      const composition = bundleCompositionText(store, it);
+      const itemKey = `${it.productId}|${composition}`;
+      const current = group.items.get(itemKey) || { productId: it.productId, qty: 0, composition };
+      current.qty += Number(it.qty) || 0;
+      group.items.set(itemKey, current);
     }
     if (enc.notes) group.notes.push(enc.notes);
     groups.set(key, group);
@@ -1524,7 +1592,7 @@ function buildComandaSpec(store, date) {
     date: fmtDate(`${date}T12:00:00`),
     groups: [...groups.values()].map((g) => ({
       clientName: g.clientName, contact: g.contact,
-      items: [...g.items.entries()].map(([id, qty]) => ({ name: store.get('products', id)?.name || '(produto removido)', qty })),
+      items: [...g.items.values()].map((item) => ({ name: `${store.get('products', item.productId)?.name || '(produto removido)'}${item.composition ? ` (${item.composition})` : ''}`, qty: item.qty })),
       notes: g.notes.join(' · '),
     })).sort((a, b) => norm(a.clientName).localeCompare(norm(b.clientName))),
     production: productionIds.map((id) => ({
@@ -1792,7 +1860,7 @@ function saleRow(ctx, s) {
   const { store } = ctx;
   const reversed = store.isReversed('sale', s.id);
   const p = store.get('products', s.productId);
-  const rev = s.qty * s.unitPrice;
+  const rev = saleNet(s);
   return el('li', { class: 'pa-list-item' + (reversed ? ' pa-reversed' : ''), 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
@@ -1818,6 +1886,7 @@ function vendaSheet(ctx) {
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
   const price = moneyField(products[0] ? suggested(products[0].id) : null, 'venda-price');
+  const discount = moneyField(null, 'venda-discount');
   const channel = el('input', { class: 'pa-input', 'data-testid': 'venda-canal', type: 'text', placeholder: 'canal (opcional)' });
 
   prodSel.addEventListener('change', () => {
@@ -1829,12 +1898,13 @@ function vendaSheet(ctx) {
     const p = store.get('products', prodSel.value);
     const q = parseNum(qty.value);
     const up = parseNum(price.input.value);
-    if (!p || !(q > 0) || up == null) { return; }
+    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
+    if (!p || !(q > 0) || up == null || discountValue > q * up + 0.005) { discount.input.focus(); return; }
     let cost = 0;
     try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
     const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
     ctx.actions.mutate((s) => s.addSale({
-      id: uuid(), at, productId: p.id, qty: q, unitPrice: up,
+      id: uuid(), at, productId: p.id, qty: q, unitPrice: up, discount: discountValue || undefined,
       paymentFeePct: config.paymentFeePct, commissionPct: config.commissionPct || 0, costSnapshot: cost,
       ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
     }));
@@ -1844,6 +1914,7 @@ function vendaSheet(ctx) {
     field('Produto', prodSel),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Qtd' }), qty]),
     field('Preço de venda', price),
+    field('Desconto total (opcional)', discount),
     field('Canal (opcional)', channel),
     el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
   ];
@@ -1901,8 +1972,8 @@ function encomendasPanel(ctx) {
   if (status === 'desistencias') list = list.filter((e) => e.desistenciaAt);
   else if (status === 'naoentregue') list = list.filter((e) => !e.desistenciaAt && !e.entregue);
   else if (status === 'entregues') list = list.filter((e) => !e.desistenciaAt && e.entregue);
-  else if (status === 'areceber') list = list.filter((e) => !e.desistenciaAt && (e.total || 0) - store.paidFor(e.id) > 0.005);
-  else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && (e.total || 0) - store.paidFor(e.id) <= 0.005);
+  else if (status === 'areceber') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo > 0.005);
+  else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo <= 0.005);
   else if (status === 'urgentes') list = list.filter((e) => !e.desistenciaAt && e.urgente);
   list.sort((a, b) => {
     if (!!a.urgente !== !!b.urgente) return a.urgente ? -1 : 1; // urgentes pinned to the top
@@ -1955,16 +2026,19 @@ function encomendasPanel(ctx) {
 }
 
 function encomendaItemsResumo(store, e) {
-  return (e.itens || []).map((it) => { const p = store.get('products', it.productId); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}`; }).join(', ');
+  return (e.itens || []).map((it) => { const p = store.get('products', it.productId); const composition = bundleCompositionText(store, it); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}${composition ? ` (${composition})` : ''}`; }).join(', ');
 }
 
 /** Derived payment status of an order from its payments (never a stored flag). */
 function paymentStatus(store, e) {
-  const paid = store.paidFor(e.id);
-  const saldo = (e.total || 0) - paid;
-  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, saldo: 0 };
-  if (paid > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, saldo };
-  return { label: 'não pago', cls: 'pa-warn', paid, saldo };
+  const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
+  const finance = title ? titleState(store, title) : null;
+  const paid = finance ? finance.paid : store.paidFor(e.id);
+  const discounted = finance ? finance.discounted : 0;
+  const saldo = finance ? finance.balance : Math.max(0, (e.total || 0) - paid);
+  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, discounted, saldo: 0 };
+  if (paid + discounted > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, discounted, saldo };
+  return { label: 'não pago', cls: 'pa-warn', paid, discounted, saldo };
 }
 
 function encomendaRow(ctx, e) {
@@ -1998,21 +2072,41 @@ function encomendaSheet(ctx, enc) {
   const suggested = (pid) => sellingPrice(store, pid);
   const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
 
-  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice })) : [];
+  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice, ...(it.bundleItems ? { bundleItems: it.bundleItems.map((child) => ({ ...child })) } : {}) })) : [];
 
   const cliPicker = clientePicker(store, enc ? enc.clienteId : '');
   const urgenteChk = el('input', { type: 'checkbox', 'data-testid': 'enc-urgente' }); urgenteChk.checked = !!(enc && enc.urgente);
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
   const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
   const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
+  const discount = moneyField(enc ? enc.discount : null, 'enc-discount');
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observações (opcional)' });
   notes.value = enc ? (enc.notes || '') : '';
 
   const totalEl = el('strong', { 'data-testid': 'enc-total' });
-  const grandTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
-  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); };
+  const grossTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
+  const grandTotal = () => Math.max(0, grossTotal() - Math.min(grossTotal(), parseNum(discount.input.value) || 0));
+  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); discount.input.setCustomValidity(''); };
 
   const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  function bundleEditor(it, product) {
+    const box = el('div', { class: 'pa-bundle-editor', 'data-testid': 'enc-bundle-editor' });
+    const render = () => {
+      const rows = (it.bundleItems || []).map((child, childIndex) => {
+        const childProduct = store.get('products', child.productId);
+        const childQty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty), 'aria-label': 'quantidade dentro do conjunto' });
+        childQty.addEventListener('input', () => { child.qty = parseNum(childQty.value) || 0; });
+        return el('li', { class: 'pa-list-item' }, [childQty, el('span', { class: 'pa-grow', text: childProduct?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { it.bundleItems.splice(childIndex, 1); render(); } }, '✕')]);
+      });
+      const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== it.productId);
+      const select = el('select', { class: 'pa-input', 'data-testid': 'enc-bundle-product' }, candidates.map((p) => el('option', { value: p.id, text: p.name })));
+      const qty = el('input', { class: 'pa-input pa-qty', 'data-testid': 'enc-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
+      const add = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-bundle-add', onclick: () => { const q = parseNum(qty.value); if (!select.value || !(q > 0)) return; const current = it.bundleItems.find((child) => child.productId === select.value); if (current) current.qty += q; else it.bundleItems.push({ productId: select.value, qty: q }); render(); } }, '+ produto');
+      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Essas quantidades serão multiplicadas pela quantidade do conjunto e aparecerão na comanda de produção.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, add]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }));
+    };
+    render();
+    return box;
+  }
   function renderItems() {
     itemsList.replaceChildren(...(items.length ? items.map((it, idx) => {
       const p = store.get('products', it.productId);
@@ -2025,7 +2119,7 @@ function encomendaSheet(ctx, enc) {
       renderLine();
       return el('li', { class: 'pa-list-item pa-encitem' }, [
         qty,
-        el('div', { class: 'pa-grow' }, [el('div', { text: p ? p.name : '(produto removido)' }), lineTot]),
+        el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('span', { text: p ? p.name : '(produto removido)' }), p && isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(p) })].filter(Boolean)), lineTot, p && isBundleProduct(p) && bundleEditor(it, p)]),
         el('span', { class: 'pa-lab', text: 'R$' }), price,
         el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { items.splice(idx, 1); renderItems(); renderTotal(); } }, '✕'),
       ]);
@@ -2041,17 +2135,22 @@ function encomendaSheet(ctx, enc) {
     if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
     const matches = store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(q)).slice(0, 6);
     results.style.display = matches.length ? '' : 'none';
-    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
-      el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' }),
+    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id), ...(isBundleProduct(p) ? { bundleItems: [] } : {}) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
+      el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: `${bundleKindLabel(p)} · escolher composição` })].filter(Boolean)), el('span', { class: 'pa-add', text: '+' }),
     ])));
   }
   search.addEventListener('input', renderResults);
   frete.input.addEventListener('input', renderTotal);
+  discount.input.addEventListener('input', renderTotal);
   renderTotal();
 
   function save() {
     if (!items.length) { search.focus(); return; }
-    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * unitCost(it.productId), 0);
+    const incompleteBundle = items.find((it) => isBundleProduct(store.get('products', it.productId)) && !(it.bundleItems || []).some((child) => (Number(child.qty) || 0) > 0));
+    if (incompleteBundle) { window.alert('Escolha os produtos que compõem cada cesta, kit ou combo antes de salvar.'); return; }
+    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
+    if (discountValue > grossTotal() + 0.005) { discount.input.setCustomValidity('O desconto não pode ser maior que o total bruto.'); discount.input.reportValidity(); return; }
+    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * (orderItemUnitCost(store, it, unitCost) || 0), 0);
     const fr = parseNum(frete.input.value);
     const ob = notes.value.trim();
     ctx.actions.mutate((s) => s.upsertEncomenda({
@@ -2059,8 +2158,9 @@ function encomendaSheet(ctx, enc) {
       id: enc ? enc.id : uuid(),
       deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
       clienteId: cliPicker.value() || undefined,
-      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0 })),
+      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0, ...(it.bundleItems?.length ? { bundleItems: it.bundleItems.map((child) => ({ productId: child.productId, qty: Number(child.qty) || 0 })) } : {}) })),
       total: grandTotal(),
+      discount: discountValue || undefined,
       costSnapshot: cost,
       deliveryMethod: entrega.value,
       frete: fr == null ? undefined : fr,
@@ -2080,6 +2180,7 @@ function encomendaSheet(ctx, enc) {
       el('table', { class: 'pa-kv' }, [
         el('tr', {}, [el('td', { text: 'Total' }), el('td', { class: 'pa-num', text: brl(enc.total) })]),
         el('tr', {}, [el('td', { text: 'Pago' }), el('td', { class: 'pa-num', text: brl(st.paid) })]),
+        st.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(st.discounted) })]),
         el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num' + (st.saldo > 0.005 ? ' pa-bad' : ''), text: brl(st.saldo) })]),
       ]),
       hist.length > 0 && el('ul', { class: 'pa-list pa-tight' }, hist.map((pg) => el('li', { class: 'pa-list-item' + (store.isReversed('payment', pg.id) ? ' pa-reversed' : '') }, [
@@ -2107,6 +2208,8 @@ function encomendaSheet(ctx, enc) {
     search, results,
     el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Total ' }), totalEl])]),
     field('Frete (opcional)', frete),
+    field('Desconto da venda (opcional)', discount),
+    el('p', { class: 'pa-hint', text: 'Este desconto reduz o valor da venda. Um desconto negociado somente na quitação pode ser registrado depois em Financeiro › A Receber.' }),
     field('Observações (opcional)', notes),
     ...paymentSection.filter(Boolean),
   ];
@@ -2133,7 +2236,7 @@ function pagamentoSheet(ctx, encomendaId) {
   const enc = store.get('encomendas', encomendaId);
   const cli = enc && enc.clienteId ? store.get('clients', enc.clienteId) : null;
   const cliName = cli ? cli.name : 'Sem cliente';
-  const saldo = enc ? Math.max(0, (enc.total || 0) - store.paidFor(encomendaId)) : 0;
+  const saldo = enc ? paymentStatus(store, enc).saldo : 0;
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'pag-date', type: 'date', value: todayInput() });
   const valor = moneyField(saldo > 0 ? saldo : null, 'pag-valor');
   const forma = paymentMethodSelect(store, 'pag-forma');
@@ -2176,7 +2279,7 @@ function buildFichas(store, encomendas) {
   return [...groups.entries()].map(([key, ords]) => {
     const client = key === '__none__' ? null : store.get('clients', key);
     const orders = ords.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1)).map((e) => ({
-      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: (e.total || 0) - store.paidFor(e.id),
+      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: paymentStatus(store, e).saldo,
     }));
     return { client, orders, saldoTotal: orders.reduce((s, o) => s + Math.max(0, o.saldo), 0) };
   });
@@ -2186,7 +2289,7 @@ function buildFichas(store, encomendas) {
 function encomendasByMode(store, mode) {
   return store.state.encomendas.filter((e) => {
     if (e.desistenciaAt) return false;
-    const saldo = (e.total || 0) - store.paidFor(e.id);
+    const saldo = paymentStatus(store, e).saldo;
     if (mode === 'aberto') return saldo > 0.005;     // em aberto + parcialmente pagas
     if (mode === 'pagas') return saldo <= 0.005;      // quitadas
     return true;                                      // todas
@@ -2246,10 +2349,13 @@ function buildRecibo(store, enc) {
     date: fmtDate(nowIso()),
     clientName: client ? client.name : 'Consumidor',
     clientContato: client ? [client.phone, client.address].filter(Boolean).join(' · ') : '',
-    items: enc.itens.map((it) => { const p = store.get('products', it.productId); return { name: p ? p.name : '(produto)', qty: it.qty, unitPrice: it.unitPrice, total: (Number(it.qty) || 0) * (Number(it.unitPrice) || 0) }; }),
+    items: enc.itens.map((it) => { const p = store.get('products', it.productId); const composition = bundleCompositionText(store, it); return { name: `${p ? p.name : '(produto)'}${composition ? ` (${composition})` : ''}`, qty: it.qty, unitPrice: it.unitPrice, total: (Number(it.qty) || 0) * (Number(it.unitPrice) || 0) }; }),
     referente: `pedido de ${fmtDate(enc.deliveryDate)}`,
+    subtotal: (Number(enc.total) || 0) + (Number(enc.discount) || 0),
+    desconto: Number(enc.discount) || 0,
     total: enc.total || 0,
     pago: st.paid,
+    descontoQuitacao: st.discounted || 0,
     saldo: st.saldo,
     forma: formas.size === 1 ? [...formas][0] : undefined,
     observacoes: enc.notes || undefined,
@@ -2280,14 +2386,14 @@ function fiadoPanel(ctx) {
   const { store } = ctx;
   const { fiadoStart: start, fiadoEnd: end, fiadoStatus: status } = ctx.view;
   let orders = store.state.encomendas.filter((e) => !e.desistenciaAt && inDateRange(e.deliveryDate, start, end));
-  if (status === 'aberto') orders = orders.filter((e) => (e.total || 0) - store.paidFor(e.id) > 0.005);
-  else if (status === 'recebidos') orders = orders.filter((e) => (e.total || 0) - store.paidFor(e.id) <= 0.005);
+  if (status === 'aberto') orders = orders.filter((e) => paymentStatus(store, e).saldo > 0.005);
+  else if (status === 'recebidos') orders = orders.filter((e) => paymentStatus(store, e).saldo <= 0.005);
   const grouped = new Map();
   for (const e of orders) {
     const key = e.clienteId || '__sem__';
     const g = grouped.get(key) || { key, orders: [], total: 0, received: 0, pending: 0 };
-    const paid = Math.min(Number(e.total) || 0, Math.max(0, store.paidFor(e.id)));
-    g.orders.push(e); g.total += Number(e.total) || 0; g.received += paid; g.pending += Math.max(0, (Number(e.total) || 0) - paid);
+    const statusRow = paymentStatus(store, e); const paid = Math.min(Number(e.total) || 0, statusRow.paid);
+    g.orders.push(e); g.total += Number(e.total) || 0; g.received += paid; g.pending += statusRow.saldo;
     grouped.set(key, g);
   }
   const groups = [...grouped.values()].sort((a, b) => {
@@ -2416,6 +2522,20 @@ function dashboardProductVolume(rows) {
   return svgEl('svg', { viewBox: `0 0 ${width} ${height}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': 'Volume de produtos vendidos', 'data-testid': 'dashboard-volume-chart' }, children);
 }
 
+function financeHomePanel(ctx) {
+  const quick = (icon, label, tab, tone = '') => el('button', { class: `pa-fin-home-link ${tone}`, onclick: () => ctx.actions.setTab(tab) }, [el('span', { class: 'pa-fin-home-icon', text: icon }), el('strong', { text: label })]);
+  return el('section', { class: 'pa-card pa-fin-home' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Central financeira' }), el('h2', { text: 'O que você quer consultar?' })])]),
+    el('p', { class: 'pa-hint', text: 'Todos os atalhos financeiros ficam reunidos aqui. Cada função aparece uma única vez.' }),
+    el('div', { class: 'pa-fin-home-grid' }, [
+      quick('▦', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('↓', 'Contas a receber', 'fin-receber'), quick('↑', 'Contas a pagar', 'fin-pagar'),
+      quick('↔', 'Fluxo de caixa', 'fin-fluxo'), quick('＋', 'Lançamentos', 'financeiro'), quick('▤', 'Recibo / Orçamento', 'fin-documentos'),
+      quick('🛒', 'Compras', 'fin-compras'), quick('☷', 'Plano de Contas', 'fin-plano'), quick('▥', 'Relatórios financeiros', 'fin-relatorios'),
+      quick('⌁', 'Relatório gerencial', 'relatorios'), quick('R$', 'Preços e custos', 'precos'), quick('≈', 'Simular preço', 'simulador'),
+    ]),
+  ]);
+}
+
 function financeDashboardPanel(ctx) {
   const { store, view } = ctx;
   const start = view.dashboardStart; const end = view.dashboardEnd; const presetKey = view.dashboardPreset || 'mes';
@@ -2431,7 +2551,6 @@ function financeDashboardPanel(ctx) {
   const preset = (key, label) => el('button', { class: 'pa-chip' + (presetKey === key ? ' pa-chip-on' : ''), 'data-testid': `dashboard-${key}`, onclick: () => { if (key === 'personalizado') ctx.actions.setDashboardView({ dashboardPreset: key }); else { const [s, e] = presetRange(key); ctx.actions.setDashboardView({ dashboardPreset: key, dashboardStart: s, dashboardEnd: e }); } } }, label);
   const productQty = (row) => { const p = row ? store.get('products', row.id) : null; return row ? `${fmtNum(row.qty)} ${p?.saleUnit || 'un'}` : 'Sem dados'; };
   const insight = (label, title, detail, tone = 'soft') => el('section', { class: `pa-insight pa-insight-${tone}` }, [el('span', { class: 'pa-eyebrow', text: label }), el('strong', { text: title || 'Sem dados no período' }), detail && el('span', { class: 'pa-muted', text: detail })].filter(Boolean));
-  const quick = (label, tab, tone = '') => el('button', { class: `pa-btn ${tone}`, onclick: () => ctx.actions.setTab(tab) }, label);
   return el('section', { class: 'pa-card pa-fin-hero' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Visão financeira e comercial' }), el('h2', { text: 'Dashboard do negócio' })])]),
     el('div', { class: 'pa-chiprow' }, [preset('hoje', 'Hoje'), preset('semana', 'Semana'), preset('mes', 'Mês'), preset('ano', 'Ano'), preset('personalizado', 'Período específico')]),
@@ -2460,7 +2579,6 @@ function financeDashboardPanel(ctx) {
       insight('Produtos sem vendas', String(decision.productsWithoutSales), 'Itens do catálogo sem venda no período selecionado'),
     ]),
     decision.soldProducts.some((p) => p.qty > 0 && p.marginPct == null) && el('p', { class: 'pa-callout', text: 'Alguns produtos vendidos ainda não têm margem calculável. Complete os preços dos insumos e a ficha técnica da receita.' }),
-    el('div', { class: 'pa-actiongrid' }, [quick('Contas a receber', 'fin-receber', 'pa-primary'), quick('Contas a pagar', 'fin-pagar'), quick('Fluxo de caixa', 'fin-fluxo'), quick('Lançamentos', 'financeiro'), quick('Recibo / Orçamento', 'fin-documentos'), quick('Compras', 'fin-compras'), quick('Plano de Contas', 'fin-plano'), quick('Relatórios financeiros', 'fin-relatorios'), quick('Relatório gerencial', 'relatorios'), quick('Preços e custos', 'precos'), quick('Simular preço', 'simulador')]),
   ].filter(Boolean));
 }
 
@@ -2612,11 +2730,13 @@ function commercialDocumentSheet(ctx, modal = {}) {
     lines.push(line); itemsBox.append(line.row); renderTotals();
   }
 
-  const orderItems = order ? (order.itens || []).map((item) => ({
-    productId: item.productId, name: store.get('products', item.productId)?.name || '(produto removido)',
-    qty: Number(item.qty) || 0, unitPrice: Number(item.unitPrice) || 0,
-  })) : [];
-  if (order && Number(order.frete) > 0) orderItems.push({ name: 'Frete / entrega', qty: 1, unitPrice: Number(order.frete) });
+  const orderGross = order ? (order.itens || []).reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), Number(order.frete) || 0) : 0;
+  const orderFactor = orderGross > 0 ? Math.max(0, Number(order.total) || 0) / orderGross : 1;
+  const orderItems = order ? (order.itens || []).map((item) => {
+    const composition = bundleCompositionText(store, item);
+    return { productId: item.productId, name: `${store.get('products', item.productId)?.name || '(produto removido)'}${composition ? ` (${composition})` : ''}`, qty: Number(item.qty) || 0, unitPrice: (Number(item.unitPrice) || 0) * orderFactor };
+  }) : [];
+  if (order && Number(order.frete) > 0) orderItems.push({ name: 'Frete / entrega', qty: 1, unitPrice: Number(order.frete) * orderFactor });
   if (orderItems.length) orderItems.forEach(addLine); else addLine();
   client.addEventListener('change', renderClient); type.addEventListener('change', renderType);
   validity.addEventListener('change', renderTotals); paid.input.addEventListener('input', renderTotals);
@@ -2684,11 +2804,11 @@ function clientStatementSheet(ctx, modal = {}) {
 
   const currentStatement = () => clientFinancialStatement(store, client.value, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
   const movementRow = (row) => {
-    const purchase = row.type === 'purchase'; const payment = row.type === 'payment';
+    const purchase = row.type === 'purchase'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount';
     return el('section', { class: 'pa-detail-card', 'data-testid': `client-statement-${row.type}` }, [
       el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
-        el('strong', { class: payment ? 'pa-positive' : 'pa-num', text: `${payment ? '+ ' : ''}${brl(row.amount)}` }),
+        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
+        el('strong', { class: payment ? 'pa-positive' : discountRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow ? '− ' : ''}${brl(row.amount)}` }),
       ]),
       purchase && el('ul', { class: 'pa-list pa-tight' }, row.items.map((item) => el('li', { class: 'pa-list-item' }, [
         el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)}× ${item.name}` }),
@@ -2696,9 +2816,11 @@ function clientStatementSheet(ctx, modal = {}) {
         el('strong', { class: 'pa-num', text: brl(item.total) }),
       ]))),
       purchase && el('p', { class: 'pa-muted', text: [`Entrega: ${row.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, row.freight > 0 && `Frete ${brl(row.freight)}`, row.notes && `Obs.: ${row.notes}`].filter(Boolean).join(' · ') }),
+      purchase && row.discount > 0 && el('p', { class: 'pa-badge pa-ok', text: `Desconto da venda: ${brl(row.discount)}` }),
       !purchase && el('p', { class: 'pa-muted', text: `${row.description}${payment && row.method ? ` · ${row.method}` : ''}` }),
-      !payment && el('div', { class: 'pa-row' }, [
+      !payment && !discountRow && el('div', { class: 'pa-row' }, [
         el('span', { class: 'pa-muted pa-grow', text: `Recebido ${brl(row.paid)}` }),
+        row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
         el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : 'quitado' }),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: client.value, orderId: row.orderId }) }, 'Gerar recibo'),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
@@ -2751,14 +2873,15 @@ function financeTitleDetailSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'Título não encontrado', rows: [] }); const state = titleState(ctx.store, title); const settlements = titleSettlements(ctx.store, title); const cat = title.categoryId ? ctx.store.get('categories', title.categoryId) : null;
   const history = settlements.length ? el('ul', { class: 'pa-list pa-tight' }, settlements.slice().sort((a, b) => a.at < b.at ? 1 : -1).map((s) => {
     const correctionKind = s.legacyKind === 'payment' ? 'payment' : ctx.store.get('financeSettlements', s.id) ? 'financeSettlement' : null;
-    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: s.method || 'Forma não informada' })]), el('strong', { class: 'pa-positive', text: brl(s.amount) }), correctionKind && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
+    const isDiscount = s.kind === 'discount';
+    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), correctionKind && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
   })) : el('p', { class: 'pa-empty', text: 'Nenhuma baixa registrada.' });
   const editAction = title.sourceType === 'manual' && !title.cancelledAt
     ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-title-edit', id: title.id }) }, 'Editar valor e dados')
     : title.sourceType === 'encomenda' && title.sourceId
       ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: title.sourceId }) }, 'Editar encomenda')
       : null;
-  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])]), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
+  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
   return sheet({ title: title.direction === 'receber' ? 'Detalhe a receber' : 'Detalhe a pagar', rows, danger: !title.cancelledAt && state.balance > 0.005 ? { label: 'Cancelar título', testid: 'fin-title-cancel', onClick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Cancelar título?', message: 'O histórico e as baixas já realizadas serão preservados.', yesLabel: 'Cancelar título', onYes: () => ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, cancelledAt: nowIso() })) }) } : null });
 }
 
@@ -2777,7 +2900,7 @@ function financeTitleEditSheet(ctx, id) {
   const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
-    const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.paid) { amount.input.setCustomValidity(`O valor não pode ser menor que o já quitado (${brl(state.paid)}).`); amount.input.reportValidity(); return; }
+    const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.settled) { amount.input.setCustomValidity(`O valor não pode ser menor que o já baixado (${brl(state.settled)}).`); amount.input.reportValidity(); return; }
     const selectedParty = parties.find((p) => p.id === party.value);
     ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyId: selectedParty?.id, partyName: selectedParty?.name || title.partyName || (isReceive ? 'Outro cliente' : 'Outro fornecedor'), expectedMethod: method.value, notes: notes.value.trim() || undefined }));
   }
@@ -2789,6 +2912,7 @@ function financeSettlementEditSheet(ctx, m) {
   const title = ctx.store.get('financeTitles', m.titleId); const isPayment = m.settlementKind === 'payment';
   const original = isPayment ? ctx.store.get('payments', m.settlementId) : ctx.store.get('financeSettlements', m.settlementId);
   if (!title || !original) return sheet({ title: 'Pagamento não encontrado', rows: [] });
+  const isDiscount = !isPayment && original.kind === 'discount';
   const state = titleState(ctx.store, title); const oldAmount = Number(isPayment ? original.valor : original.amount) || 0;
   const date = el('input', { class: 'pa-input', type: 'date', value: dateOnly(original.at), 'data-testid': 'fin-correct-date' });
   const amount = moneyField(oldAmount, 'fin-correct-amount');
@@ -2797,24 +2921,33 @@ function financeSettlementEditSheet(ctx, m) {
   const account = el('select', { class: 'pa-input', 'data-testid': 'fin-correct-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name, ...(!isPayment && original.accountId === a.id ? { selected: 'selected' } : {}) })));
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
-    const value = parseNum(amount.input.value); const otherPaid = Math.max(0, state.paid - oldAmount); const maximum = Math.max(0, title.amount - otherPaid);
+    const value = parseNum(amount.input.value); const otherSettled = Math.max(0, state.settled - oldAmount); const maximum = Math.max(0, title.amount - otherSettled);
     if (!(value > 0) || value > maximum + 0.005) { amount.input.setCustomValidity(`O valor máximo para este lançamento é ${brl(maximum)}.`); amount.input.reportValidity(); return; }
     ctx.actions.mutate((s) => {
       s.addReversal({ id: uuid(), at: nowIso(), kind: isPayment ? 'payment' : 'financeSettlement', refId: original.id });
       if (isPayment) s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: original.encomendaId, valor: value, forma: method.value });
-      else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, method: method.value, accountId: account.value || undefined, notes: `Correção do lançamento de ${fmtDate(original.at)}` });
-      if (title.sourceType === 'manual' && state.balance <= 0.005) s.upsertFinanceTitle({ ...title, amount: otherPaid + value });
+      else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: isDiscount ? 'discount' : 'payment', ...(isDiscount ? {} : { method: method.value, accountId: account.value || undefined }), notes: `Correção do lançamento de ${fmtDate(original.at)}` });
+      if (title.sourceType === 'manual' && state.balance <= 0.005) s.upsertFinanceTitle({ ...title, amount: otherSettled + value });
     });
   }
-  return sheet({ title: title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A correção não apaga o registro anterior: ele será estornado e o novo valor ficará no histórico.' }), field('Data', date), field('Valor correto', amount), field('Forma', method), !isPayment && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
+  return sheet({ title: isDiscount ? 'Corrigir desconto' : title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A correção não apaga o registro anterior: ele será estornado e o novo valor ficará no histórico.' }), field('Data', date), field('Valor correto', amount), !isDiscount && field('Forma', method), !isPayment && !isDiscount && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
 }
 
 MODALS['finance-settle'] = (ctx, m) => financeSettleSheet(ctx, m.id);
 function financeSettleSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title); if (!title || !state) return sheet({ title: 'Título não encontrado', rows: [] });
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
-  function save() { const value = parseNum(amount.input.value); if (!(value > 0) || value > state.balance + 0.005) { amount.input.focus(); return; } ctx.actions.mutate((s) => { if (title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value }); else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined }); }); }
-  return sheet({ title: title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field('Valor', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'fin-settle-save' });
+  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const discount = moneyField(null, 'fin-settle-discount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
+  const isReceivable = title.direction === 'receber';
+  function save() {
+    const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
+    if (!(value + discountValue > 0) || value + discountValue > state.balance + 0.005) { amount.input.focus(); return; }
+    ctx.actions.mutate((s) => {
+      if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
+      else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
+      if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
+    });
+  }
+  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: 'O valor recebido entra no caixa. O desconto apenas reduz o saldo do cliente e ficará identificado no histórico.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
 }
 
 function presetRange(key) {
@@ -2855,7 +2988,7 @@ function financeCashFlowPanel(ctx) {
   });
   const pendingRows = pending.map((r) => {
     const title = r.title; const isIn = title.direction === 'receber'; const overdue = r.status === 'vencido'; const cat = title.categoryId ? store.get('categories', title.categoryId) : null;
-    const meta = [isIn ? 'A receber' : 'A pagar', cat?.name, r.paid > 0.005 ? `Parcial · já quitado ${brl(r.paid)}` : null].filter(Boolean).join(' · ');
+    const meta = [isIn ? 'A receber' : 'A pagar', cat?.name, r.settled > 0.005 ? `Parcial · já baixado ${brl(r.settled)}` : null].filter(Boolean).join(' · ');
     return el('button', { class: `pa-cash-row pa-cash-pending ${isIn ? 'pa-cash-in' : 'pa-cash-out'}${overdue ? ' pa-cash-overdue' : ''}`, 'data-testid': 'fin-flow-pending-row', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [el('time', { class: 'pa-cash-date', datetime: dateOnly(title.dueDate), text: fmtDate(title.dueDate) }), el('div', { class: 'pa-cash-description' }, [el('div', {}, [el('strong', { text: title.partyName || title.description }), overdue && el('span', { class: 'pa-badge pa-warn', text: 'Vencido' })].filter(Boolean)), el('span', { class: 'pa-muted', text: `${title.description} · ${meta}` })]), el('strong', { class: `pa-cash-value ${isIn ? 'pa-positive' : 'pa-bad'}`, text: `${isIn ? '+' : '−'} ${brl(r.balance)}` })]);
   });
 
@@ -3133,7 +3266,8 @@ function financeiroPanel(ctx) {
   for (const st of store.state.financeSettlements) {
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
     const kind = store.get('categories', title.categoryId)?.nature;
-    movements.push({ id: st.id, at: st.at, type: title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: title.partyName || title.description, description: [title.description, st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id) });
+    const discount = st.kind === 'discount';
+    movements.push({ id: st.id, at: st.at, type: discount ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.description, discount ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount });
   }
   for (const title of store.state.financeTitles) {
     const state = titleState(store, title); if (title.cancelledAt || state.balance <= 0.005) continue;

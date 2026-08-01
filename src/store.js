@@ -7,14 +7,24 @@
 
 import { indexStore } from './cost-engine.js';
 import { toYaml, fromYaml } from './yaml-bridge.js';
+import { orderProduction } from './bundles.js';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Append-only, immutable event collections (§2.2). */
 const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals'];
 /** Mutable master-data collections (§2.1). */
 const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
+
+function normalizeProductSaleKind(product) {
+  if (['normal', 'cesta', 'kit', 'combo'].includes(product?.saleKind)) return product;
+  const legacyName = String(product?.name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const saleKind = /(^|\s)cesta(\s|$)/.test(legacyName) ? 'cesta'
+    : /(^|\s)kit(\s|$)/.test(legacyName) ? 'kit'
+      : /(^|\s)combo(\s|$)/.test(legacyName) ? 'combo' : 'normal';
+  return { ...product, saleKind };
+}
 
 /**
  * Seed financial categories (Rev 06) — the user reshapes them freely afterwards. `{name, kind}`
@@ -110,6 +120,9 @@ export class PaiolStore {
       }
       delete p.recipeId;
       delete p.portion;
+      // One-time compatibility for existing catalogs. From now on the type is stored explicitly,
+      // so renaming a product never changes its dashboard classification.
+      if (!p.saleKind) Object.assign(p, normalizeProductSaleKind(p));
     }
     // Read-model memo (§perf): the UI re-renders the whole panel on every action and looks records
     // up per-row, so id/price scans must be O(1). `_rev` bumps on every mutation; the lazily-built
@@ -180,7 +193,7 @@ export class PaiolStore {
   /** @param {import('./domain.js').Recipe} x */
   upsertRecipe(x) { return this._upsert('recipes', x); }
   /** @param {import('./domain.js').Product} x */
-  upsertProduct(x) { return this._upsert('products', x); }
+  upsertProduct(x) { return this._upsert('products', normalizeProductSaleKind(x)); }
   /** @param {import('./domain.js').Cliente} x */
   upsertClient(x) { return this._upsert('clients', x); }
   /** @param {object} x */
@@ -307,8 +320,7 @@ export class PaiolStore {
     const date = String(enc.deliveryDate || '').slice(0, 10);
     const comanda = date ? this.get('comandas', date) : null;
     if (comanda) {
-      const cancelled = new Map();
-      for (const it of enc.itens || []) cancelled.set(it.productId, (cancelled.get(it.productId) || 0) + (Number(it.qty) || 0));
+      const cancelled = orderProduction(enc);
       const itens = (comanda.itens || []).map((it) => {
         if (it.prevista == null || !cancelled.has(it.productId)) return it;
         return { ...it, prevista: Math.max(0, Number(it.prevista) - cancelled.get(it.productId)) };

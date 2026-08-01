@@ -19,7 +19,7 @@ test('empty state has all collections', () => {
   const st = emptyState();
   assert.deepEqual(st.ingredients, []);
   assert.deepEqual(st.sales, []);
-  assert.equal(st.version, 3);
+  assert.equal(st.version, 4);
   assert.deepEqual(st.financeTitles, []);
   assert.deepEqual(st.financeSettlements, []);
   assert.deepEqual(st.trashItems, []);

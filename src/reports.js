@@ -13,6 +13,8 @@
 
 import { estimateLens, productUnitCost } from './cost-engine.js';
 import { managerialDre } from './dre.js';
+import { isBundleProduct, orderItemUnitCost, saleNet } from './bundles.js';
+import { titleState } from './finance.js';
 
 const ym = (iso) => String(iso || '').slice(0, 7); // 'YYYY-MM'
 const day = (iso) => String(iso || '').slice(0, 10);
@@ -27,7 +29,7 @@ export function monthSummary(store, month) {
   let recebidoVendas = 0; let unidades = 0;
   for (const s of store.state.sales) {
     if (ym(s.at) !== month || store.isReversed('sale', s.id)) continue;
-    recebidoVendas += s.qty * s.unitPrice;
+    recebidoVendas += saleNet(s);
     unidades += s.qty;
   }
   let recebidoPagamentos = 0;
@@ -43,6 +45,7 @@ export function monthSummary(store, month) {
   let recebidoFinanceiro = 0;
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
+    if (st.kind === 'discount') continue;
     const title = store.get('financeTitles', st.titleId);
     if (title?.direction === 'receber') recebidoFinanceiro += st.amount || 0;
   }
@@ -64,6 +67,7 @@ export function monthSummary(store, month) {
   let pagoFinanceiro = 0;
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
+    if (st.kind === 'discount') continue;
     const title = store.get('financeTitles', st.titleId); if (title?.direction !== 'pagar') continue;
     const category = store.get('categories', title.categoryId); const value = st.amount || 0;
     pagoFinanceiro += value;
@@ -85,7 +89,8 @@ export function monthSummary(store, month) {
   let aReceber = 0;
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt) continue;
-    const saldo = (e.total || 0) - store.paidFor(e.id);
+    const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
+    const saldo = title ? titleState(store, title).balance : (e.total || 0) - store.paidFor(e.id);
     if (saldo > 0.005) aReceber += saldo;
   }
   for (const t of store.state.financeTitles || []) {
@@ -111,6 +116,7 @@ export function despesasByCategory(store, month) {
   }
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
+    if (st.kind === 'discount') continue;
     const title = store.get('financeTitles', st.titleId);
     if (title?.direction !== 'pagar') continue;
     map.set(title.categoryId || '__sem__', (map.get(title.categoryId || '__sem__') || 0) + (st.amount || 0));
@@ -143,7 +149,7 @@ export function productSummary(store, month) {
   };
   for (const s of store.state.sales) {
     if (ym(s.at) !== month || store.isReversed('sale', s.id)) continue;
-    add(s.productId, s.qty, s.qty * s.unitPrice);
+    add(s.productId, s.qty, saleNet(s));
   }
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt || ym(e.deliveryDate) !== month) continue;
@@ -245,24 +251,27 @@ export function businessPeriodSummary(store, start, end) {
   // it has a historical sale in this period, preserving the truth of past reports and rankings.
   const products = new Map(store.state.products.filter((p) => p.active !== false).map((p) => [p.id, { id: p.id, name: p.name, qty: 0, revenue: 0, cost: 0, fees: 0, costKnown: true }]));
   const clients = new Map();
-  const addProduct = (id, qty, revenue, feePct) => {
+  const addProduct = (id, qty, revenue, feePct, costOverride = null) => {
     const product = store.get('products', id);
     const row = products.get(id) || { id, name: product?.name || '(produto removido)', qty: 0, revenue: 0, cost: 0, fees: 0, costKnown: true };
-    const cost = unitCost(id);
+    const cost = costOverride == null ? unitCost(id) : costOverride;
     row.qty += Number(qty) || 0; row.revenue += Number(revenue) || 0; row.fees += (Number(revenue) || 0) * (Number(feePct) || 0);
     if (cost == null) row.costKnown = false; else row.cost += (Number(qty) || 0) * cost;
     products.set(id, row);
   };
   for (const sale of store.state.sales) {
     if (store.isReversed('sale', sale.id) || !inPeriod(sale.at, start, end)) continue;
-    addProduct(sale.productId, sale.qty, (Number(sale.qty) || 0) * (Number(sale.unitPrice) || 0), (sale.paymentFeePct ?? config.paymentFeePct) + (sale.commissionPct ?? config.commissionPct ?? 0));
+    const gross = (Number(sale.qty) || 0) * (Number(sale.unitPrice) || 0);
+    addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)), (sale.paymentFeePct ?? config.paymentFeePct) + (sale.commissionPct ?? config.commissionPct ?? 0));
   }
   for (const order of store.state.encomendas) {
     if (order.desistenciaAt || !inPeriod(order.deliveryDate, start, end)) continue;
     const clientId = order.clienteId || '__sem__';
     const client = clients.get(clientId) || { id: clientId, orders: 0, total: 0 };
     client.orders += 1; client.total += Number(order.total) || 0; clients.set(clientId, client);
-    for (const item of order.itens || []) addProduct(item.productId, item.qty, (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0));
+    const itemGross = (order.itens || []).reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), 0);
+    const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(order.discount) || 0)) / itemGross : 1;
+    for (const item of order.itens || []) addProduct(item.productId, item.qty, (Number(item.qty) || 0) * (Number(item.unitPrice) || 0) * discountFactor, (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0), orderItemUnitCost(store, item, unitCost));
   }
   const productRows = [...products.values()].map((row) => {
     const profit = row.costKnown ? row.revenue - row.cost - row.fees : null;
@@ -270,13 +279,7 @@ export function businessPeriodSummary(store, start, end) {
   });
   const sold = productRows.filter((p) => p.qty > 0).sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
   const marginKnown = sold.filter((p) => p.marginPct != null).sort((a, b) => b.marginPct - a.marginPct);
-  const normalize = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-  const isBasket = (row) => {
-    const product = store.get('products', row.id);
-    const label = normalize(`${row.name} ${(product?.tags || []).join(' ')}`);
-    return /(^|\s)(cesta|kit|combo)(\s|$)/.test(label) || (product?.components || []).some((c) => c.kind === 'product');
-  };
-  const baskets = sold.filter(isBasket);
+  const baskets = sold.filter((row) => isBundleProduct(store.get('products', row.id)));
   const clientRows = [...clients.values()].map((row) => ({ ...row, name: row.id === '__sem__' ? 'Sem cliente' : (store.get('clients', row.id)?.name || '(cliente removido)') }));
   return {
     start, end,
@@ -311,7 +314,7 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
   }
   for (const s of store.state.sales) {
     if (!store.isReversed('sale', s.id) || !inPeriod(s.at, start, end)) continue;
-    cancellations.push({ kind: 'sale', id: s.id, at: s.at, sale: s, clientId: '__sem__', total: (Number(s.qty) || 0) * (Number(s.unitPrice) || 0) });
+    cancellations.push({ kind: 'sale', id: s.id, at: s.at, sale: s, clientId: '__sem__', total: Math.max(0, (Number(s.qty) || 0) * (Number(s.unitPrice) || 0) - (Number(s.discount) || 0)) });
   }
   cancellations.sort((a, b) => (a.at < b.at ? 1 : -1));
 
@@ -327,16 +330,19 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt || !inPeriod(e.deliveryDate, start, end)) continue;
     const total = Number(e.total) || 0;
-    const received = Math.min(total, Math.max(0, store.paidFor(e.id)));
-    const pending = Math.max(0, total - received);
+    const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
+    const finance = title ? titleState(store, title) : null;
+    const received = Math.min(total, finance ? finance.paid : Math.max(0, store.paidFor(e.id)));
+    const discounted = finance?.discounted || 0;
+    const pending = finance ? finance.balance : Math.max(0, total - received);
     const paid = pending <= 0.005;
     if (status === 'recebidos' && !paid) continue;
     if (status === 'naorecebidos' && paid) continue;
-    rows.push({ kind: 'encomenda', id: e.id, at: e.deliveryDate, order: e, clientId: e.clienteId || '__sem__', total, received, pending, paid });
+    rows.push({ kind: 'encomenda', id: e.id, at: e.deliveryDate, order: e, clientId: e.clienteId || '__sem__', total, received, discounted, pending, paid });
   }
   for (const s of store.state.sales) {
     if (store.isReversed('sale', s.id) || !inPeriod(s.at, start, end) || status === 'naorecebidos') continue;
-    const total = (Number(s.qty) || 0) * (Number(s.unitPrice) || 0);
+    const total = Math.max(0, (Number(s.qty) || 0) * (Number(s.unitPrice) || 0) - (Number(s.discount) || 0));
     rows.push({ kind: 'sale', id: s.id, at: s.at, sale: s, clientId: '__sem__', total, received: total, pending: 0, paid: true });
   }
   rows.sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -363,6 +369,7 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
     totalVendido: rows.reduce((sum, x) => sum + x.total, 0),
     totalRecebido: rows.reduce((sum, x) => sum + x.received, 0),
     totalPendente: rows.reduce((sum, x) => sum + x.pending, 0),
+    totalDescontado: rows.reduce((sum, x) => sum + (x.discounted || 0), 0),
     totalDesistencias: cancellations.reduce((sum, x) => sum + x.total, 0),
     clients: [...clients.values()].map((c) => ({ ...c, name: c.id === '__sem__' ? 'Sem cliente' : (store.get('clients', c.id)?.name || '(cliente removido)') })).sort((a, b) => b.total - a.total),
     products: [...products.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total),
