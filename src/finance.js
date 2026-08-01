@@ -1,6 +1,8 @@
 // Paiol — núcleo financeiro. Mantém títulos (obrigações/direitos) separados das baixas
 // (dinheiro que efetivamente entrou/saiu), evitando misturar caixa realizado com projeções.
 
+import { saleNet } from './bundles.js';
+
 const financeDay = (iso) => String(iso || '').slice(0, 10);
 const financeNorm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const inRange = (iso, start, end) => (!start || financeDay(iso) >= start) && (!end || financeDay(iso) <= end);
@@ -126,8 +128,10 @@ export function defaultCashAccount(store) {
 
 export function titleSettlements(store, title) {
   if (title.sourceType === 'encomenda') {
-    return store.state.payments.filter((p) => p.encomendaId === title.sourceId && !store.isReversed('payment', p.id))
-      .map((p) => ({ id: p.id, at: p.at, titleId: title.id, amount: Number(p.valor) || 0, method: p.forma, legacyKind: 'payment' }));
+    const payments = store.state.payments.filter((p) => p.encomendaId === title.sourceId && !store.isReversed('payment', p.id))
+      .map((p) => ({ id: p.id, at: p.at, titleId: title.id, amount: Number(p.valor) || 0, method: p.forma, kind: 'payment', legacyKind: 'payment' }));
+    const adjustments = store.state.financeSettlements.filter((s) => s.titleId === title.id && !store.isReversed('financeSettlement', s.id));
+    return [...payments, ...adjustments];
   }
   if (title.sourceType === 'sale') {
     const sale = store.get('sales', title.sourceId);
@@ -145,18 +149,20 @@ export function titleSettlements(store, title) {
 }
 
 export function titlePaid(store, title) {
-  return titleSettlements(store, title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  return titleSettlements(store, title).filter((s) => s.kind !== 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 }
 
 export function titleState(store, title, today = financeDay(new Date().toISOString())) {
   const paid = Math.max(0, titlePaid(store, title));
-  const balance = Math.max(0, (Number(title.amount) || 0) - paid);
+  const discounted = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
+  const settled = paid + discounted;
+  const balance = Math.max(0, (Number(title.amount) || 0) - settled);
   let status = 'aberto';
   if (title.cancelledAt) status = 'cancelado';
   else if (balance <= 0.005) status = 'quitado';
   else if (financeDay(title.dueDate) < today) status = 'vencido';
-  else if (paid > 0.005) status = 'parcial';
-  return { paid, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
+  else if (settled > 0.005) status = 'parcial';
+  return { paid, discounted, settled, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
 }
 
 export function listTitles(store, filters = {}) {
@@ -165,7 +171,7 @@ export function listTitles(store, filters = {}) {
   if (filters.start || filters.end) rows = rows.filter((r) => inRange(r.title.dueDate, filters.start, filters.end));
   if (filters.status && filters.status !== 'todos') {
     if (filters.status === 'aberto') rows = rows.filter((r) => ['aberto', 'parcial', 'vencido'].includes(r.status));
-    else if (filters.status === 'parcial') rows = rows.filter((r) => r.paid > 0.005 && r.balance > 0.005);
+    else if (filters.status === 'parcial') rows = rows.filter((r) => r.settled > 0.005 && r.balance > 0.005);
     else rows = rows.filter((r) => r.status === filters.status);
   }
   if (filters.partyId) rows = rows.filter((r) => r.title.partyId === filters.partyId);
@@ -178,7 +184,7 @@ export function listTitles(store, filters = {}) {
 export function cashMovements(store) {
   const out = [];
   const fallbackAccount = defaultCashAccount(store)?.id;
-  for (const s of store.state.sales) if (!store.isReversed('sale', s.id)) out.push({ id: `sale:${s.id}`, at: s.at, direction: 'entrada', amount: (Number(s.qty) || 0) * (Number(s.unitPrice) || 0), label: 'Venda rápida', sourceType: 'sale', sourceId: s.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'vendas')?.id });
+  for (const s of store.state.sales) if (!store.isReversed('sale', s.id)) out.push({ id: `sale:${s.id}`, at: s.at, direction: 'entrada', amount: saleNet(s), label: 'Venda rápida', sourceType: 'sale', sourceId: s.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'vendas')?.id });
   for (const p of store.state.payments) if (!store.isReversed('payment', p.id)) {
     const order = store.get('encomendas', p.encomendaId); const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === p.encomendaId);
     out.push({ id: `payment:${p.id}`, at: p.at, direction: 'entrada', amount: Number(p.valor) || 0, label: title?.partyName || 'Recebimento de venda', method: p.forma, sourceType: 'payment', sourceId: p.id, accountId: fallbackAccount, categoryId: title?.categoryId, order });
@@ -188,6 +194,7 @@ export function cashMovements(store) {
   for (const v of store.state.variableCosts) if (!store.isReversed('variableCost', v.id)) out.push({ id: `variableCost:${v.id}`, at: v.at, direction: 'saida', amount: Number(v.amount) || 0, label: v.description || v.note || 'Custo antigo', sourceType: 'variableCost', sourceId: v.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'outros-custos')?.id });
   for (const st of store.state.financeSettlements) {
     if (store.isReversed('financeSettlement', st.id)) continue;
+    if (st.kind === 'discount') continue;
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
     out.push({ id: `financeSettlement:${st.id}`, at: st.at, direction: title.direction === 'receber' ? 'entrada' : 'saida', amount: Number(st.amount) || 0, label: title.description, method: st.method, sourceType: 'financeSettlement', sourceId: st.id, titleId: title.id, accountId: st.accountId || fallbackAccount, categoryId: title.categoryId });
   }

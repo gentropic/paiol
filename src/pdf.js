@@ -162,8 +162,10 @@ export async function generateReciboPdf(r) {
   page.drawLine({ start: { x: padL, y: y + 4 }, end: { x: padR, y: y + 4 }, thickness: 0.5, color: line });
   y -= 12;
   const kv = (label, val, b = false, color = fg) => { page.drawText(label, { x: padR - 200, y, size: 10, font: b ? bold : font, color }); rightText(val, padR, y, 10, b ? bold : font, color); y -= 16; };
+  if (r.desconto > 0.005) { kv('Subtotal', money(r.subtotal)); kv('Desconto da venda', `- ${money(r.desconto)}`, false, rgb(0.18, 0.45, 0.20)); }
   if (r.total && Math.abs(r.total - r.pago) > 0.005) kv('Total do pedido', money(r.total));
   kv('Valor pago' + (r.forma ? ` (${r.forma})` : ''), money(r.pago), true);
+  if (r.descontoQuitacao > 0.005) kv('Desconto na quitação', money(r.descontoQuitacao), false, rgb(0.18, 0.45, 0.20));
   if (r.saldo > 0.005) kv('Saldo restante', money(r.saldo), false, rgb(0.70, 0.15, 0.12));
   else kv('Situação', 'QUITADO', true, rgb(0.18, 0.45, 0.20));
 
@@ -297,9 +299,9 @@ export async function generateCommercialDocumentPdf(spec) {
 }
 
 /**
- * A4 daily comanda grouped by client. Multiple orders from the same client/date are already merged
- * by the caller, preventing duplicate production slips.
- * @param {{date:string, groups:Array<{clientName:string,contact?:string,items:Array<{name:string,qty:number}>,notes?:string}>, production:Array<{name:string,prevista:number,produzido:number}>}} spec
+ * A4 production comanda for a selected period. The caller consolidates repeated products into
+ * one list, regardless of the delivery date inside the selected period.
+ * @param {{period?:string,generatedAt?:string,production?:Array<{name:string,prevista:number,produzido:number}>}} spec
  */
 export async function generateComandaPdf(spec) {
   const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
@@ -309,46 +311,28 @@ export async function generateComandaPdf(spec) {
   const navy = rgb(0.23, 0.32, 0.44);
   const teal = rgb(0.08, 0.45, 0.51);
   const soft = rgb(0.37, 0.39, 0.39);
-  const line = rgb(0.85, 0.86, 0.84);
   let page; let y;
 
   const newPage = () => {
     page = doc.addPage(A4); y = A4[1] - M;
     page.drawText('Quitutes do Paiol', { x: M, y: y - 12, size: 16, font: bold, color: navy });
-    page.drawText(`COMANDA DO DIA  ${spec.date}`, { x: M, y: y - 34, size: 10, font: bold, color: teal });
+    page.drawText(`COMANDA DE PRODUCAO  ${spec.period || spec.date || ''}`, { x: M, y: y - 34, size: 10, font: bold, color: teal });
+    if (spec.generatedAt) page.drawText(`Gerada em ${spec.generatedAt}`, { x: A4[0] - M - 145, y: y - 34, size: 8, font, color: soft });
     page.drawLine({ start: { x: M, y: y - 43 }, end: { x: A4[0] - M, y: y - 43 }, thickness: 2, color: teal });
     y -= 62;
   };
   const ensure = (need) => { if (!page || y - need < M) newPage(); };
   newPage();
-
-  page.drawText('RESUMO DE PRODUCAO', { x: M, y, size: 9, font: bold, color: navy }); y -= 17;
+  page.drawRectangle({ x: M, y: y - 20, width: A4[0] - 2 * M, height: 27, color: rgb(0.91, 0.96, 0.95) });
+  page.drawText('LISTA UNICA DE PRODUCAO', { x: M + 9, y: y - 11, size: 11, font: bold, color: teal });
+  y -= 39;
   for (const item of spec.production || []) {
-    ensure(16);
-    page.drawText(trunc(item.name, 54), { x: M, y, size: 9.5, font, color: soft });
-    page.drawText(`previsto ${item.prevista}   produzido ${item.produzido}`, { x: A4[0] - 205, y, size: 9, font, color: navy });
-    y -= 14;
+    ensure(22);
+    page.drawText(trunc(item.name, 54), { x: M, y, size: 10, font: bold, color: navy });
+    page.drawText(`previsto ${item.prevista}   produzido ${item.produzido}`, { x: A4[0] - 205, y, size: 9.5, font, color: soft });
+    y -= 20;
   }
-  y -= 12;
-
-  for (const group of spec.groups || []) {
-    ensure(58 + Math.min(8, group.items.length) * 14);
-    page.drawRectangle({ x: M, y: y - 24, width: A4[0] - 2 * M, height: 29, color: rgb(0.95, 0.97, 0.96) });
-    page.drawText(trunc(group.clientName || 'Sem cliente', 48), { x: M + 9, y: y - 13, size: 12, font: bold, color: navy });
-    if (group.contact) page.drawText(trunc(group.contact, 42), { x: A4[0] - 245, y: y - 12, size: 8.5, font, color: soft });
-    y -= 38;
-    for (const item of group.items || []) {
-      ensure(15);
-      page.drawText(`${item.qty} x`, { x: M + 10, y, size: 10, font: bold, color: teal });
-      page.drawText(trunc(item.name, 62), { x: M + 45, y, size: 10, font, color: navy });
-      y -= 15;
-    }
-    if (group.notes) { ensure(16); page.drawText(trunc(`Obs.: ${group.notes}`, 86), { x: M + 10, y, size: 8.5, font, color: soft }); y -= 15; }
-    page.drawLine({ start: { x: M, y }, end: { x: A4[0] - M, y }, thickness: 0.6, color: line });
-    y -= 18;
-  }
-
-  if (!(spec.groups || []).length) page.drawText('Nenhuma encomenda ativa nesta data.', { x: M, y, size: 11, font, color: soft });
+  if (!(spec.production || []).length) page.drawText('Sem itens de producao no periodo.', { x: M, y, size: 10, font, color: soft });
   return doc.save();
 }
 
@@ -413,11 +397,12 @@ export async function generateClientStatementPdf(statement) {
   page.drawText('MOVIMENTAÇÕES', { x: M, y, size: 8.5, font: bold, color: navy }); y -= 13;
 
   for (const movement of statement.movements || []) {
-    if (movement.type === 'payment') {
+    if (movement.type === 'payment' || movement.type === 'discount') {
+      const discount = movement.type === 'discount';
       ensure(38);
       page.drawLine({ start: { x: M, y: y + 5 }, end: { x: right, y: y + 5 }, thickness: 0.5, color: line });
-      page.drawText(`${ptDate(movement.at)}  PAGAMENTO`, { x: M, y: y - 8, size: 9, font: bold, color: good });
-      rightText(page, money(movement.amount), right, y - 8, 10, bold, good);
+      page.drawText(`${ptDate(movement.at)}  ${discount ? 'DESCONTO NA QUITAÇÃO' : 'PAGAMENTO'}`, { x: M, y: y - 8, size: 9, font: bold, color: discount ? navy : good });
+      rightText(page, money(movement.amount), right, y - 8, 10, bold, discount ? navy : good);
       y -= 21;
       page.drawText(trunc(`${movement.description}${movement.method ? ` - ${movement.method}` : ''}`, 82), { x: M + 12, y, size: 8.5, font, color: soft });
       y -= 17;
@@ -444,6 +429,12 @@ export async function generateClientStatementPdf(statement) {
         rightText(page, money(movement.freight), right, y, 8.5, font, navy);
         y -= 14;
       }
+      if (movement.discount > 0) {
+        ensure(16);
+        page.drawText('Desconto da venda', { x: M + 12, y, size: 8.5, font, color: good });
+        rightText(page, `- ${money(movement.discount)}`, right, y, 8.5, font, good);
+        y -= 14;
+      }
       if (movement.deliveryMethod || movement.notes) {
         ensure(16);
         const detail = [`Entrega: ${movement.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, movement.notes && `Obs.: ${movement.notes}`].filter(Boolean).join(' - ');
@@ -455,9 +446,10 @@ export async function generateClientStatementPdf(statement) {
       y -= 14;
     }
     ensure(17);
+    const discountText = movement.discounted > 0.005 ? `  -  Desconto ${money(movement.discounted)}` : '';
     const status = movement.balance > 0.005
-      ? `Recebido ${money(movement.paid)}  -  Em aberto ${money(movement.balance)}`
-      : `Recebido ${money(movement.paid)}  -  QUITADO`;
+      ? `Recebido ${money(movement.paid)}${discountText}  -  Em aberto ${money(movement.balance)}`
+      : `Recebido ${money(movement.paid)}${discountText}  -  QUITADO`;
     page.drawText(status, { x: M + 12, y, size: 8.5, font: bold, color: movement.balance > 0.005 ? bad : good });
     y -= 19;
   }

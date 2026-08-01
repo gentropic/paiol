@@ -7,14 +7,24 @@
 
 import { indexStore } from './cost-engine.js';
 import { toYaml, fromYaml } from './yaml-bridge.js';
+import { orderProduction } from './bundles.js';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Append-only, immutable event collections (§2.2). */
 const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals'];
 /** Mutable master-data collections (§2.1). */
-const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases'];
+const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
+
+function normalizeProductSaleKind(product) {
+  if (['normal', 'cesta', 'kit', 'combo'].includes(product?.saleKind)) return product;
+  const legacyName = String(product?.name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const saleKind = /(^|\s)cesta(\s|$)/.test(legacyName) ? 'cesta'
+    : /(^|\s)kit(\s|$)/.test(legacyName) ? 'kit'
+      : /(^|\s)combo(\s|$)/.test(legacyName) ? 'combo' : 'normal';
+  return { ...product, saleKind };
+}
 
 /**
  * Seed financial categories (Rev 06) — the user reshapes them freely afterwards. `{name, kind}`
@@ -48,9 +58,11 @@ export const DEFAULT_CONFIG = {
   valorHora: 20,                    // BRL/hour of hands-on time
   taxaGas: 0.10,                    // BRL/minute of oven
   custosFixosMes: 500,              // monthly fixed pool (rent, internet, DAS, …)
-  expectedActiveMinutesMonth: 2400, // ~40h/month (pricing-lens rateio denominator; §8.3)
+  expectedActiveMinutesMonth: 2400, // legacy hands-on denominator kept for older backups
+  expectedProductionMinutesMonth: 2400, // monthly production capacity used to allocate fixed costs
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
+  commissionPct: 0,
   paymentMethods: [
     { id: 'pix', name: 'Pix' },
     { id: 'dinheiro', name: 'Dinheiro' },
@@ -84,8 +96,9 @@ export function emptyState() {
   return {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
-    ingredients: [], recipes: [], products: [], clients: [], encomendas: [], comandas: [], categories: [],
+    ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
     suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], trashItems: [],
+    notifications: [], shoppingItems: [],
     priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [],
   };
 }
@@ -107,6 +120,9 @@ export class PaiolStore {
       }
       delete p.recipeId;
       delete p.portion;
+      // One-time compatibility for existing catalogs. From now on the type is stored explicitly,
+      // so renaming a product never changes its dashboard classification.
+      if (!p.saleKind) Object.assign(p, normalizeProductSaleKind(p));
     }
     // Read-model memo (§perf): the UI re-renders the whole panel on every action and looks records
     // up per-row, so id/price scans must be O(1). `_rev` bumps on every mutation; the lazily-built
@@ -177,9 +193,11 @@ export class PaiolStore {
   /** @param {import('./domain.js').Recipe} x */
   upsertRecipe(x) { return this._upsert('recipes', x); }
   /** @param {import('./domain.js').Product} x */
-  upsertProduct(x) { return this._upsert('products', x); }
+  upsertProduct(x) { return this._upsert('products', normalizeProductSaleKind(x)); }
   /** @param {import('./domain.js').Cliente} x */
   upsertClient(x) { return this._upsert('clients', x); }
+  /** @param {object} x */
+  upsertEmployee(x) { return this._upsert('employees', x); }
   /** @param {import('./domain.js').Encomenda} x */
   upsertEncomenda(x) { return this._upsert('encomendas', x); }
   /** @param {import('./domain.js').Comanda} x */
@@ -194,11 +212,16 @@ export class PaiolStore {
   upsertFinanceTitle(x) { return this._upsert('financeTitles', x); }
   /** @param {object} x */
   upsertPurchase(x) { return this._upsert('purchases', x); }
+  /** @param {object} x */
+  upsertNotification(x) { return this._upsert('notifications', x); }
+  /** @param {object} x */
+  upsertShoppingItem(x) { return this._upsert('shoppingItems', x); }
 
   removeIngredient(id, at) { return this._trash('ingredients', id, at); }
   removeRecipe(id, at) { return this._trash('recipes', id, at); }
   removeProduct(id, at) { return this._trash('products', id, at); }
   removeClient(id, at) { return this._trash('clients', id, at); }
+  removeEmployee(id, at) { return this._trash('employees', id, at); }
   removeEncomenda(id, at) { return this._trash('encomendas', id, at); }
   removeComanda(id, at) { return this._trash('comandas', id, at); }
   removeCategory(id, at) { return this._trash('categories', id, at); }
@@ -206,6 +229,8 @@ export class PaiolStore {
   removeSupplier(id, at) { return this._trash('suppliers', id, at); }
   /** @param {string} id */
   removeCashAccount(id, at) { return this._trash('cashAccounts', id, at); }
+  removeNotification(id, at) { return this._trash('notifications', id, at); }
+  removeShoppingItem(id, at) { return this._trash('shoppingItems', id, at); }
 
   /** Deleted master records retained for 30 days, newest first. */
   activeTrash() {
@@ -295,8 +320,7 @@ export class PaiolStore {
     const date = String(enc.deliveryDate || '').slice(0, 10);
     const comanda = date ? this.get('comandas', date) : null;
     if (comanda) {
-      const cancelled = new Map();
-      for (const it of enc.itens || []) cancelled.set(it.productId, (cancelled.get(it.productId) || 0) + (Number(it.qty) || 0));
+      const cancelled = orderProduction(enc);
       const itens = (comanda.itens || []).map((it) => {
         if (it.prevista == null || !cancelled.has(it.productId)) return it;
         return { ...it, prevista: Math.max(0, Number(it.prevista) - cancelled.get(it.productId)) };

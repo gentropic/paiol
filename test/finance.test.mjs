@@ -23,7 +23,7 @@ test('order payments remain the single settlement source and support partial rec
   s.upsertEncomenda({ id: 'e1', at: '2026-07-01', deliveryDate: '2026-07-20', itens: [], total: 100, costSnapshot: 0 });
   ensureFinanceFoundation(s, ids()); const title = s.state.financeTitles[0];
   s.addPayment({ id: 'p1', at: '2026-07-05', encomendaId: 'e1', valor: 35, forma: 'Pix' });
-  assert.deepEqual(titleState(s, title, '2026-07-10'), { paid: 35, balance: 65, status: 'parcial', overdueDays: 0 });
+  assert.deepEqual(titleState(s, title, '2026-07-10'), { paid: 35, discounted: 0, settled: 35, balance: 65, status: 'parcial', overdueDays: 0 });
   assert.equal(cashMovements(s).filter((m) => m.sourceType === 'payment').length, 1);
 });
 
@@ -57,7 +57,7 @@ test('financial reconciliation preserves essential order and comanda data', () =
 test('legacy data is upgraded without deleting existing operational collections', () => {
   const s = new PaiolStore({ version: 1, clients: [{ id: 'c1', name: 'Cliente antigo' }], recipes: [{ id: 'r1', name: 'Receita antiga', components: [] }] });
   ensureFinanceFoundation(s, ids());
-  assert.equal(s.state.version, 3);
+  assert.equal(s.state.version, 4);
   assert.equal(s.get('clients', 'c1').name, 'Cliente antigo');
   assert.equal(s.get('recipes', 'r1').name, 'Receita antiga');
   assert.ok(s.state.cashAccounts.length >= 2);

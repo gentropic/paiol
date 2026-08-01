@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PaiolStore } from '../src/store.js';
-import { monthSummary, despesasByCategory, productSummary, clientSummary, monthsEndingAt, revenueTrend, salesPeriodSummary, businessPeriodSummary } from '../src/reports.js';
+import { monthSummary, despesasByCategory, productSummary, clientSummary, monthsEndingAt, revenueTrend, salesPeriodSummary, businessPeriodSummary, businessProfitTrend } from '../src/reports.js';
 
 // May: a walk-up sale (R$20, paid), an encomenda (R$60 delivered, R$40 received), a R$200 variável +
 // R$600 fixa despesa, a R$10 perda. A priced product so productSummary can estimate a margin.
@@ -105,6 +105,17 @@ test('monthsEndingAt crosses year boundaries; revenueTrend gives recebido + lucr
   assert.deepEqual(t.map((x) => x.month), ['2026-04', '2026-05']);
   assert.equal(t[1].recebido, 60);
   assert.equal(t[1].lucro, -740);
+});
+
+test('businessProfitTrend adapts the buckets and reports DRE result over the chosen period', () => {
+  const store = new PaiolStore();
+  store.upsertCategory({ id: 'income', name: 'Receita', kind: 'receita' });
+  store.upsertCategory({ id: 'expense', name: 'Despesa', kind: 'despesaVariavel' });
+  store.addIncome({ id: 'i1', at: '2026-05-01', valor: 100, categoryId: 'income' });
+  store.addDespesa({ id: 'd1', at: '2026-05-02', valor: 30, categoryId: 'expense' });
+  const trend = businessProfitTrend(store, '2026-05-01', '2026-05-03');
+  assert.deepEqual(trend.map((row) => row.profit), [100, -30, 0]);
+  assert.deepEqual(trend.map((row) => row.label), ['01/05', '02/05', '03/05']);
 });
 
 test('businessPeriodSummary ranks clients, products, baskets and estimated margins', () => {

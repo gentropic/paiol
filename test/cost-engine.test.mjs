@@ -16,6 +16,7 @@ const config = {
   taxaGas: 0.5,                  // BRL/minute of oven
   custosFixosMes: 1000,
   expectedActiveMinutesMonth: 2400,
+  expectedProductionMinutesMonth: 2400,
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
   rateioBase: 'active-time',
@@ -33,7 +34,7 @@ function fixture() {
     recipes: [
       {
         id: 'massa', name: 'Massa base', yieldNominal: 1000, yieldUnit: 'g',
-        activeMinutes: 20, ovenMinutes: 40, fermentMinutes: 0,
+        productionMinutes: 60, activeMinutes: 20, ovenMinutes: 40, fermentMinutes: 0,
         components: [
           { ref: { kind: 'ingredient', id: 'farinha' }, qty: 300, unit: 'g' },
           { ref: { kind: 'ingredient', id: 'acucar' }, qty: 200, unit: 'g' },
@@ -43,7 +44,7 @@ function fixture() {
       },
       {
         id: 'cobertura', name: 'Cobertura', yieldNominal: 200, yieldUnit: 'g',
-        activeMinutes: 10, ovenMinutes: 0, fermentMinutes: 0,
+        productionMinutes: 10, activeMinutes: 10, ovenMinutes: 0, fermentMinutes: 0,
         components: [
           { ref: { kind: 'ingredient', id: 'chocolate' }, qty: 150, unit: 'g' },
           { ref: { kind: 'ingredient', id: 'acucar' }, qty: 50, unit: 'g' },
@@ -51,7 +52,7 @@ function fixture() {
       },
       {
         id: 'bolo', name: 'Bolo de cenoura', yieldNominal: 1, yieldUnit: 'un',
-        activeMinutes: 15, ovenMinutes: 0, fermentMinutes: 0,
+        productionMinutes: 15, activeMinutes: 15, ovenMinutes: 0, fermentMinutes: 0,
         components: [
           { ref: { kind: 'recipe', id: 'massa' }, qty: 800, unit: 'g' },
           { ref: { kind: 'recipe', id: 'cobertura' }, qty: 150, unit: 'g' },
@@ -106,9 +107,10 @@ test('full breakdown rolls up all four cost dimensions', () => {
   approx(b.labor, 19.25);
   // gas: bolo 0 + massa 0.02/g*800=16.00 + cobertura 0 = 16.00
   approx(b.gas, 16.00);
-  // fixed: bolo 1000*15/2400=6.25 + massa (1000*20/2400)/1000*800=6.6667 + cobertura (1000*10/2400)/200*150=3.125
-  approx(b.fixed, 6.25 + (1000 * 20 / 2400) / 1000 * 800 + (1000 * 10 / 2400) / 200 * 150);
-  approx(recipeUnitCost(s, 'bolo', config, est), b.ingredients + b.labor + b.gas + b.fixed);
+  // fixed: allocated by total production time. Massa uses 60 min; bolo/cobertura use 15/10 min.
+  approx(b.fixed, 6.25 + (1000 * 60 / 2400) / 1000 * 800 + (1000 * 10 / 2400) / 200 * 150);
+  // Labor stays visible for feasibility analysis, but is not added twice (payroll is in fixed costs).
+  approx(recipeUnitCost(s, 'bolo', config, est), b.ingredients + b.gas + b.fixed);
 });
 
 // ── Markup / price (§4.4) ─────────────────────────────────────────────────────
@@ -122,6 +124,10 @@ test('product unit cost applies portion + packaging', () => {
 
 test('price divisor excludes MEI tax (only fee + margin)', () => {
   approx(priceFromCost(65, config), 65 / (1 - 0.05 - 0.30)); // = 100
+});
+
+test('commission enters the markup divisor like the payment fee', () => {
+  approx(priceFromCost(60, { ...config, commissionPct: 0.05 }), 60 / (1 - 0.05 - 0.05 - 0.30));
 });
 
 test('impossible markup throws', () => {

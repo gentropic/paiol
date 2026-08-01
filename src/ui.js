@@ -6,18 +6,20 @@
 // on submit, so typing is never interrupted by a re-render.
 
 import {
-  indexStore, estimateLens, costBreakdown, recipeUnitCost, priceFromCost, productUnitCost, productPrice, productBreakdown,
+  indexStore, estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice, productBreakdown,
   effectiveMargin, PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
 import { generateFichasPdf, generateReciboPdf, generateCommercialDocumentPdf, generateComandaPdf, generateClientStatementPdf, generateDrePdf, savePdf } from './pdf.js';
 import { workbookBytes, parseInterchange, previewExchange } from './xlsx-exchange.js';
-import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend, salesPeriodSummary, businessPeriodSummary } from './reports.js';
+import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend, salesPeriodSummary, businessPeriodSummary, businessProfitTrend } from './reports.js';
 import { listTitles, titleState, titleSettlements, cashMovements, cashFlow, financeDashboard, categoryByKey, defaultCashAccount } from './finance.js';
 import { clientFinancialStatement } from './client-statement.js';
 import { managerialDre } from './dre.js';
+import { inventorySummary, ingredientInventory } from './inventory.js';
 import { APP_VERSION } from './config.js';
+import { productSaleKind, isBundleProduct, bundleKindLabel, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -34,8 +36,8 @@ const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '⌂', screens: [['inicio', 'Início']] },
   { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas']] },
   { id: 'producao', label: 'Produção', icon: '◇', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
-  { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['simulador', 'Simulador'], ['produtos', 'Produtos'], ['clientes', 'Clientes']] },
-  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento']] },
+  { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['simulador', 'Simulador'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
+  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙', screens: [['ajustes', 'Ajustes']] },
 ];
 const SECTION_OF = {};
@@ -46,11 +48,11 @@ for (const sid of ['fin-compras', 'fin-plano', 'fin-relatorios', 'precos', 'rela
 // concept answers. The ? button opens it with the current screen's topic expanded.
 const HELP_SCREENS = [
   { id: 'inicio', icon: '🏠', label: 'Início', paras: [
-    'Sua visão geral do mês: quanto você vendeu e lucrou, avisos (como insumos sem preço) e atalhos pra lançar uma encomenda ou abrir a comanda do dia.',
+    'Sua visão geral do mês e a agenda de hoje: contas que vencem, lembretes, aniversários e itens da lista de compras. Um lembrete sai da tela quando você marca “Feito”.',
   ] },
   { id: 'insumos', icon: '🧺', label: 'Insumos', paras: [
     'Tudo que você compra pra produzir — farinha, ovos, chocolate — e também embalagens e itens prontos de revenda (bombom, laço, cartãozinho). Cadastre cada um com a unidade de compra e o preço.',
-    'Toque em “+ Novo” pra adicionar, ou em qualquer linha pra mudar o preço (o histórico fica guardado) ou excluir. Sem o preço, os produtos que usam o insumo também ficam sem preço.',
+    'Informe também a quantidade inicial e o estoque mínimo. Compras aumentam o saldo; a produção anotada na comanda e as perdas de insumo diminuem. Vendas não mexem nesse estoque.',
   ] },
   { id: 'receitas', icon: '📖', label: 'Receitas', paras: [
     'Aqui fica a ficha técnica completa: ingredientes/insumos, rendimento, tempos, embalagem, margem e o produto vendido relacionado.',
@@ -89,6 +91,9 @@ const HELP_SCREENS = [
     'Centraliza o dinheiro que entrou e saiu: pagamentos de vendas, outras receitas, despesas fixas, despesas variáveis e custos.',
     'O controle de pagamentos é somente financeiro e manual — sem QR Code, cobrança automática ou links de pagamento.',
   ] },
+  { id: 'funcionarios', icon: '🧑‍🍳', label: 'Funcionários', paras: [
+    'Cadastre nome, função, telefone e aniversário das pessoas que trabalham com você. Funcionários ativos que fazem aniversário hoje aparecem na agenda do Início.',
+  ] },
   { id: 'fin-documentos', icon: '🧾', label: 'Recibo / Orçamento', paras: [
     'Gere um orçamento ou recibo não fiscal em PDF A4, com logo e dados da empresa, cliente, itens, valores e condição de pagamento.',
     'Você pode escolher um cliente cadastrado ou informar o nome de uma pessoa apenas para aquele documento. Nada é lançado no caixa automaticamente.',
@@ -106,7 +111,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'ajustes', icon: '⚙️', label: 'Ajustes', paras: [
     'Compare suas bases manuais com o que o sistema consegue calcular pelos lançamentos dos últimos meses. Nada é substituído sem você apertar o botão de aplicar.',
-    'Margem-alvo continua sendo uma decisão do negócio. Custo de gás e valor da hora só são sugeridos quando também existem minutos reais de produção suficientes. Aqui também ficam backup e importação/exportação.',
+    'Aqui também ficam o histórico das notificações, a lista de compras, a lixeira, o backup e a importação/exportação. Você pode criar lembretes datados e acrescentar itens livres à lista.',
   ] },
 ];
 const HELP_CONCEPTS = [
@@ -266,10 +271,10 @@ function searchInput(placeholder, container, testid) {
 export function renderApp(root, ctx) {
   const panels = {
     inicio: inicioPanel,
-    insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel,
+    insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel, funcionarios: funcionariosPanel,
     precos: precosPanel, vendas: vendasPanel,
-    encomendas: encomendasPanel, comanda: comandaPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
-    'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-pagar': financePayablePanel,
+    encomendas: encomendasPanel, comanda: comandaPeriodPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
+    'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-pagar': financePayablePanel,
     'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
@@ -451,6 +456,15 @@ MODALS.help = (ctx) => {
 
 // ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
 
+const birthdayMatches = (birthday, date = todayInput()) => String(birthday || '').slice(5, 10) === String(date).slice(5, 10);
+function birthdaysToday(store, date = todayInput()) {
+  return [
+    ...store.state.clients.filter((person) => birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Cliente' })),
+    ...store.state.employees.filter((person) => !person.inactive && birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Funcionário' })),
+    ...store.state.suppliers.filter((person) => !person.archived && birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Fornecedor' })),
+  ].sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
+}
+
 function inicioPanel(ctx) {
   const { store } = ctx;
   const sum = monthSummary(store, currentMonth());
@@ -467,6 +481,11 @@ function inicioPanel(ctx) {
     });
     ctx.actions.setTab('fin-pagar');
   };
+  const notifications = store.state.notifications.filter((item) => item.date === today && !item.done).sort((a, b) => norm(a.title).localeCompare(norm(b.title)));
+  const birthdays = birthdaysToday(store, today);
+  const lowStock = inventorySummary(store).filter((row) => row.low && !row.ingredient.shoppingHidden);
+  const manualShopping = store.state.shoppingItems.filter((item) => !item.done);
+  const hasDailyNotices = notifications.length || birthdays.length || lowStock.length || manualShopping.length;
 
   return el('section', {}, [
     el('section', { class: 'pa-card pa-home-agenda' }, [
@@ -487,6 +506,26 @@ function inicioPanel(ctx) {
         ]),
       ]),
     ]),
+    el('section', { class: 'pa-card', 'data-testid': 'home-notifications' }, [
+      el('div', { class: 'pa-cardhead' }, [
+        el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Agenda do dia' }), el('h2', { text: 'Notificações' })]),
+        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('ajustes') }, 'Consultar histórico'),
+      ]),
+      !hasDailyNotices && el('p', { class: 'pa-empty', text: 'Nenhuma notificação para hoje.' }),
+      ...notifications.map((item) => el('div', { class: 'pa-list-item', 'data-testid': 'home-notification' }, [
+        el('div', { class: 'pa-grow' }, [el('strong', { text: item.title }), item.notes && el('span', { class: 'pa-muted', text: item.notes })].filter(Boolean)),
+        el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'notification-done', onclick: () => ctx.actions.mutate((s) => s.upsertNotification({ ...item, done: true, doneAt: nowIso() })) }, 'Feito'),
+      ])),
+      ...birthdays.map((person) => el('div', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `🎂 Aniversário: ${person.name}` }), el('span', { class: 'pa-badge', text: person.type })])),
+      lowStock.length > 0 && el('div', { class: 'pa-callout' }, [
+        el('strong', { text: 'Lista de compras · estoque mínimo' }),
+        el('ul', { class: 'pa-list pa-tight' }, lowStock.map((row) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: row.ingredient.name }), el('strong', { class: 'pa-bad', text: `${fmtNum(row.current)} ${row.ingredient.stockUnit}` })]))),
+      ]),
+      manualShopping.length > 0 && el('div', { class: 'pa-callout' }, [
+        el('strong', { text: 'Itens incluídos na lista de compras' }),
+        el('ul', { class: 'pa-list pa-tight' }, manualShopping.map((item) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: item.name }), el('strong', { text: [fmtNum(item.qty), item.unit].filter(Boolean).join(' ') })]))),
+      ]),
+    ].filter(Boolean)),
     el('section', { class: 'pa-card' }, [
       el('div', { class: 'pa-row' }, [
         el('h2', { class: 'pa-grow', text: `Este mês — ${monthLabel(currentMonth())}` }),
@@ -537,12 +576,14 @@ function insumoRow(ctx, ing) {
   const { store } = ctx;
   const price = store.currentPrice(ing.id);
   const lastAt = store.lastPriceAt(ing.id);
+  const inventory = ingredientInventory(store, ing.id);
   return el('li', { class: 'pa-row-item', 'data-search': `${ing.name} ${ing.lastSupplier || ''} ${(ing.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'insumo-edit', id: ing.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: ing.name })),
       price != null
         ? el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ${brl(price)}/${ing.stockUnit}${lastAt ? ` · ${fmtDate(lastAt)}` : ''}${ing.lastSupplier ? ` · ${ing.lastSupplier}` : ''}` })
         : el('span', {}, [el('span', { class: 'pa-muted', text: `${ing.stockUnit} · ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem preço' })]),
+      inventory && el('span', { class: inventory.low ? 'pa-badge pa-bad' : 'pa-muted', text: `Estoque: ${fmtNum(inventory.current)} ${ing.stockUnit}${inventory.minimum > 0 ? ` · mínimo ${fmtNum(inventory.minimum)}` : ''}` }),
       tagChips(ing.tags),
     ].filter(Boolean)),
     el('span', { class: 'pa-chev', text: '›' }),
@@ -558,6 +599,8 @@ function insumoSheet(ctx, ing) {
     STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(ing && u === ing.stockUnit ? { selected: 'selected' } : {}) })));
   const price = moneyField(ing ? ctx.store.currentPrice(ing.id) : null, 'ins-price');
   const supplier = el('input', { class: 'pa-input', 'data-testid': 'ins-supplier', type: 'text', placeholder: 'fornecedor da última compra', value: ing ? (ing.lastSupplier || '') : '' });
+  const stockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.stockQty != null ? String(ing.stockQty).replace('.', ',') : '' });
+  const minStockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-min-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.minStockQty != null ? String(ing.minStockQty).replace('.', ',') : '' });
   const tags = tagsInput(ing && ing.tags, 'ins-tags');
 
   function save() {
@@ -568,7 +611,8 @@ function insumoSheet(ctx, ing) {
     const tg = tags.value();
     const id = ing ? ing.id : uuid();
     ctx.actions.mutate((s) => {
-      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined });
+      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined,
+        stockQty: Math.max(0, parseNum(stockQty.value) || 0), minStockQty: Math.max(0, parseNum(minStockQty.value) || 0), shoppingHidden: false });
       const cur = ing ? s.currentPrice(id) : null;
       if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
     });
@@ -579,6 +623,8 @@ function insumoSheet(ctx, ing) {
     field('Nome', name),
     field('Unidade de compra', unit),
     field('Preço (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
+    el('div', { class: 'pa-filtergrid' }, [field('Quantidade inicial/base em estoque', stockQty), field('Estoque mínimo permitido', minStockQty)]),
+    el('p', { class: 'pa-hint', text: 'O saldo atual soma as compras e desconta apenas a produção registrada e as perdas de insumos. Vendas não alteram o estoque.' }),
     field('Fornecedor (opcional)', supplier),
     field('Etiquetas (opcional)', tags.el),
     history.length > 1 && el('details', { class: 'pa-history' }, [
@@ -623,7 +669,7 @@ function receitaRow(ctx, recipe) {
   return el('li', { class: 'pa-row-item', 'data-search': `${recipe.name} ${(recipe.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'receita-edit', id: recipe.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: recipe.name })),
-      el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${n} ${n === 1 ? 'item' : 'itens'}` }),
+      el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} · ${recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))}min de produção · ${n} ${n === 1 ? 'item' : 'itens'}` }),
       linked && el('span', { class: 'pa-muted', text: `Produto: ${linked.name} · venda ${brl(linked.salePrice || 0)}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
       tagChips(recipe.tags),
@@ -646,6 +692,7 @@ function receitaSheet(ctx, recipe) {
   const yieldUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-yunit' },
     STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.yieldUnit ? { selected: 'selected' } : {}) })));
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos', value: recipe ? String(recipe.activeMinutes) : '' });
+  const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-production', type: 'text', inputmode: 'numeric', placeholder: 'min produção', value: recipe ? String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) : '' });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno', value: recipe ? String(recipe.ovenMinutes) : '' });
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-notes', rows: '3', placeholder: 'Observação / modo de preparo (opcional)' });
   notes.value = recipe ? (recipe.notes || '') : '';
@@ -723,7 +770,9 @@ function receitaSheet(ctx, recipe) {
       const savedRecipe = {
       ...(recipe || { fermentMinutes: 0 }), id, name: nm,
       yieldNominal: y, yieldUnit: yieldUnit.value,
-      activeMinutes: parseNum(active.value) || 0, ovenMinutes: parseNum(oven.value) || 0,
+      activeMinutes: parseNum(active.value) || 0,
+      productionMinutes: parseNum(production.value) || 0,
+      ovenMinutes: parseNum(oven.value) || 0,
       components: comps, ...(obs ? { notes: obs } : { notes: undefined }),
       weightTotal: w == null ? undefined : w, weightUnit: w == null ? undefined : weightUnit.value,
       tags: tg.length ? tg : undefined,
@@ -746,8 +795,9 @@ function receitaSheet(ctx, recipe) {
   const rows = [
     field('Nome', name),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yieldQty, yieldUnit]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'Min ativos = mão na massa; min forno = gás. Fermentação não conta como trabalho.' }),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção (min)' }), production]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
+    el('p', { class: 'pa-hint', text: 'O tempo total distribui os custos fixos por hora. Minutos ativos medem a mão de obra direta para análise, mas não somam novamente ao custo porque salários e encargos já estão nos custos fixos. Minutos de forno calculam o gás.' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Peso do lote (opcional)' }), weight, weightUnit]),
     el('p', { class: 'pa-hint', text: 'Peso total que a receita rende — ajuda a cotar por kg numa venda de lote maior.' }),
     field('Observação (modo de preparo)', notes),
@@ -826,7 +876,7 @@ function produtoRow(ctx, product) {
   };
   return el('li', { class: 'pa-row-item' + (active ? '' : ' pa-reversed'), 'data-search': `${product.name} ${(product.tags || []).join(' ')} ${active ? 'ativo' : 'inativo'}`, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
     el('div', { class: 'pa-grow' }, [
-      el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })]),
+      el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), isBundleProduct(product) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })].filter(Boolean)),
       el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} · venda ${brl(sellingPrice(store, product.id))}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
       tagChips(product.tags),
@@ -845,26 +895,49 @@ function produtoSheet(ctx, product) {
   const saleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-sale-qty', type: 'text', inputmode: 'decimal', placeholder: '1 ou 500', value: product ? String(product.saleQty || 1).replace('.', ',') : '1' });
   const saleUnit = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-unit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...((product?.saleUnit || 'un') === u ? { selected: 'selected' } : {}) })));
   const salePrice = moneyField(product ? sellingPrice(store, product.id) : null, 'prod-sale-price');
+  const saleKind = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-kind' }, [
+    ['normal', 'Produto comum'], ['cesta', 'Cesta'], ['kit', 'Kit'], ['combo', 'Combo'],
+  ].map(([value, label]) => el('option', { value, text: label, ...(productSaleKind(product) === value ? { selected: 'selected' } : {}) })));
   const activeChk = el('input', { type: 'checkbox', 'data-testid': 'prod-active' });
   activeChk.checked = product ? productIsActive(product) : true;
   const linkedRecipe = product ? store.state.recipes.find((r) => (product.components || []).some((c) => c.kind === 'recipe' && c.id === r.id)) : null;
+  const packagingItems = product ? (product.components || []).filter((c) => c.kind === 'ingredient').map((c) => ({ id: c.id, qty: Number(c.qty) || 0 })) : [];
+  const packagingBox = el('div', { class: 'pa-detail-card' });
+  const packagingList = el('ul', { class: 'pa-list pa-tight' });
+  const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
+  const packagingQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-bundle-insumo-qty', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
+  const renderPackaging = () => packagingList.replaceChildren(...(packagingItems.length ? packagingItems.map((item, index) => {
+    const ingredient = store.get('ingredients', item.id);
+    return el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)} ${ingredient?.stockUnit || 'un'} · ${ingredient?.name || '(insumo removido)'}` }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { packagingItems.splice(index, 1); renderPackaging(); } }, '✕')]);
+  }) : [el('li', { class: 'pa-empty pa-sm', text: 'Nenhuma embalagem ou detalhe vinculado.' })]));
+  const addPackaging = () => { const q = parseNum(packagingQty.value); if (!packagingIngredient.value || !(q > 0)) { packagingQty.focus(); return; } const current = packagingItems.find((item) => item.id === packagingIngredient.value); if (current) current.qty += q; else packagingItems.push({ id: packagingIngredient.value, qty: q }); packagingQty.value = ''; renderPackaging(); };
+  packagingBox.append(el('p', { class: 'pa-hint', text: 'Opcional: informe cesta, caixa, laço, cartão ou outro insumo físico consumido em cada conjunto. O estoque baixa quando a montagem for registrada na comanda.' }), packagingList, store.state.ingredients.length ? el('div', { class: 'pa-row pa-form' }, [packagingIngredient, packagingQty, el('button', { class: 'pa-btn pa-sm', 'data-testid': 'prod-bundle-insumo-add', onclick: addPackaging }, '+ detalhe')]) : el('p', { class: 'pa-hint', text: 'Cadastre as embalagens em Insumos para vinculá-las aqui.' }));
+  renderPackaging();
+  const reconcileKind = () => { packagingBox.style.display = saleKind.value === 'normal' ? 'none' : ''; };
+  saleKind.addEventListener('change', reconcileKind); reconcileKind();
 
   function save() {
     const nm = name.value.trim();
     const q = parseNum(saleQty.value);
     const price = parseNum(salePrice.input.value);
     if (!nm || !(q > 0) || price == null || price < 0) { (nm ? saleQty : name).focus(); return; }
+    const components = saleKind.value === 'normal'
+      ? (product ? (product.components || []) : [])
+      : packagingItems.map((item) => ({ kind: 'ingredient', id: item.id, qty: item.qty }));
     ctx.actions.mutate((s) => s.upsertProduct({
       ...(product || {}), id: product ? product.id : uuid(), name: nm,
-      components: product ? (product.components || []) : [], packagingCost: product?.packagingCost || 0,
-      saleQty: q, saleUnit: saleUnit.value, salePrice: price, active: activeChk.checked,
+      components, packagingCost: product?.packagingCost || 0,
+      saleQty: q, saleUnit: saleUnit.value, salePrice: price, saleKind: saleKind.value, active: activeChk.checked,
     }));
   }
 
   const rows = [
     field('Nome', name),
+    field('Tipo para venda e Dashboard', saleKind),
+    el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para o sistema contar o conjunto no indicador correto e pedir os produtos internos ao lançar a encomenda.' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Unidade ou peso vendido' }), saleQty, saleUnit]),
     field('Valor de venda', salePrice),
+    packagingBox,
     el('label', { class: 'pa-check' }, [activeChk, el('span', { text: 'Ativo para venda' })]),
     el('p', { class: 'pa-hint', text: 'Se desativado, permanece cadastrado e ligado à receita, mas não aparece em novas vendas, encomendas, comandas avulsas ou estimativas.' }),
     linkedRecipe
@@ -949,8 +1022,9 @@ function clienteHistorico(store, cli) {
   if (!orders.length) return el('p', { class: 'pa-hint', 'data-testid': 'cli-hist', text: 'Ainda sem compras registradas.' });
   const activeOrders = orders.filter((e) => !e.desistenciaAt);
   const totalComprado = activeOrders.reduce((s, e) => s + (e.total || 0), 0);
-  const totalPago = activeOrders.reduce((s, e) => s + store.paidFor(e.id), 0);
-  const saldo = totalComprado - totalPago;
+  const totalPago = activeOrders.reduce((s, e) => s + paymentStatus(store, e).paid, 0);
+  const totalDescontado = activeOrders.reduce((s, e) => s + (paymentStatus(store, e).discounted || 0), 0);
+  const saldo = activeOrders.reduce((s, e) => s + paymentStatus(store, e).saldo, 0);
   const pays = [];
   for (const e of orders) for (const pg of store.state.payments) if (pg.encomendaId === e.id && !store.isReversed('payment', pg.id)) pays.push(pg);
   pays.sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -959,8 +1033,9 @@ function clienteHistorico(store, cli) {
     el('table', { class: 'pa-kv' }, [
       kv('Total comprado', brl(totalComprado)),
       kv('Total pago', brl(totalPago)),
+      totalDescontado > 0.005 && kv('Descontos na quitação', brl(totalDescontado)),
       kv('Saldo pendente', brl(saldo), saldo > 0.005),
-    ]),
+    ].filter(Boolean)),
     el('h3', { class: 'pa-h3', text: `Compras (${orders.length})` }),
     el('ul', { class: 'pa-list pa-tight' }, orders.map((e) => {
       const st = paymentStatus(store, e);
@@ -986,6 +1061,7 @@ function clienteSheet(ctx, cli) {
   const name = el('input', { class: 'pa-input', 'data-testid': 'cli-name', type: 'text', placeholder: 'Nome do cliente', value: cli ? cli.name : '' });
   const phone = el('input', { class: 'pa-input', 'data-testid': 'cli-phone', type: 'tel', inputmode: 'tel', placeholder: 'Telefone', value: cli ? (cli.phone || '') : '' });
   const address = el('input', { class: 'pa-input', 'data-testid': 'cli-address', type: 'text', placeholder: 'Endereço', value: cli ? (cli.address || '') : '' });
+  const birthday = el('input', { class: 'pa-input', 'data-testid': 'cli-birthday', type: 'date', value: cli ? (cli.birthday || '') : '' });
   const tags = tagsInput(cli?.tags, 'cli-tags');
   tags.el.placeholder = 'Ex.: Não vender, Não come doce';
 
@@ -1003,11 +1079,11 @@ function clienteSheet(ctx, cli) {
     const ph = phone.value.trim();
     const ad = address.value.trim();
     const tg = tags.value();
-    ctx.actions.mutate((s) => s.upsertClient({ ...(cli || {}), id: cli ? cli.id : uuid(), name: nm, code: cd || undefined, phone: ph || undefined, address: ad || undefined, tags: tg.length ? tg : undefined }));
+    ctx.actions.mutate((s) => s.upsertClient({ ...(cli || {}), id: cli ? cli.id : uuid(), name: nm, code: cd || undefined, phone: ph || undefined, address: ad || undefined, birthday: birthday.value || undefined, tags: tg.length ? tg : undefined }));
   }
 
   code.addEventListener('input', () => code.setCustomValidity(''));
-  const rows = [field('Código manual (opcional)', code), field('Nome', name), field('Telefone (opcional)', phone), field('Endereço (opcional)', address), field('Etiquetas (separadas por vírgula)', tags.el), el('p', { class: 'pa-hint', text: 'Use etiquetas para lembretes importantes, como “Não vender” ou “Não come doce”.' })];
+  const rows = [field('Código manual (opcional)', code), field('Nome', name), field('Data de aniversário (opcional)', birthday), field('Telefone (opcional)', phone), field('Endereço (opcional)', address), field('Etiquetas (separadas por vírgula)', tags.el), el('p', { class: 'pa-hint', text: 'Use etiquetas para lembretes importantes, como “Não vender” ou “Não come doce”.' })];
   if (cli) {
     rows.push(el('h3', { class: 'pa-h3', text: 'Histórico' }), clienteHistorico(ctx.store, cli));
     rows.push(el('div', { class: 'pa-row pa-cardfoot' }, [
@@ -1028,6 +1104,36 @@ function clienteSheet(ctx, cli) {
 }
 
 // ── Preços (the payoff) ─────────────────────────────────────────────────────────
+
+function funcionariosPanel(ctx) {
+  const rows = ctx.store.state.employees.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name))).map((employee) => el('li', {
+    class: `pa-row-item${employee.inactive ? ' pa-reversed' : ''}`, onclick: () => ctx.actions.openModal({ kind: 'employee-edit', id: employee.id }),
+  }, [
+    el('div', { class: 'pa-grow' }, [el('strong', { text: employee.name }), el('span', { class: 'pa-muted', text: [employee.role, employee.phone, employee.birthday && `aniversário ${fmtDate(`${employee.birthday}T12:00:00`)}`].filter(Boolean).join(' · ') })]),
+    employee.inactive && el('span', { class: 'pa-badge', text: 'inativo' }), el('span', { class: 'pa-chev', text: '›' }),
+  ].filter(Boolean)));
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Funcionários' }), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'employee-new', onclick: () => ctx.actions.openModal({ kind: 'employee-add' }) }, '+ Novo')]),
+    rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows) : el('p', { class: 'pa-empty', text: 'Nenhum funcionário cadastrado.' }),
+  ]);
+}
+
+MODALS['employee-add'] = (ctx) => employeeSheet(ctx, null);
+MODALS['employee-edit'] = (ctx, modal) => employeeSheet(ctx, ctx.store.get('employees', modal.id) || null);
+function employeeSheet(ctx, employee) {
+  const name = el('input', { class: 'pa-input', 'data-testid': 'employee-name', type: 'text', value: employee?.name || '', placeholder: 'Nome' });
+  const role = el('input', { class: 'pa-input', 'data-testid': 'employee-role', type: 'text', value: employee?.role || '', placeholder: 'Função / cargo' });
+  const phone = el('input', { class: 'pa-input', type: 'tel', value: employee?.phone || '', placeholder: 'Telefone' });
+  const birthday = el('input', { class: 'pa-input', 'data-testid': 'employee-birthday', type: 'date', value: employee?.birthday || '' });
+  const save = () => {
+    if (!name.value.trim()) { name.focus(); return; }
+    ctx.actions.mutate((store) => store.upsertEmployee({ ...(employee || {}), id: employee?.id || uuid(), name: name.value.trim(), role: role.value.trim() || undefined, phone: phone.value.trim() || undefined, birthday: birthday.value || undefined }));
+  };
+  return sheet({ title: employee ? 'Editar funcionário' : 'Novo funcionário', rows: [field('Nome', name), field('Função / cargo', role), field('Data de aniversário', birthday), field('Telefone', phone)], onSave: save, saveTestid: 'employee-save', danger: employee ? [
+    { label: employee.inactive ? 'Reativar funcionário' : 'Inativar funcionário', className: 'pa-soft-danger', onClick: () => ctx.actions.mutate((store) => store.upsertEmployee({ ...employee, inactive: !employee.inactive })) },
+    { label: '🗑 Excluir funcionário', onClick: () => confirmRemove(ctx, `o funcionário "${employee.name}"`, (store) => store.removeEmployee(employee.id)) },
+  ] : null });
+}
 
 function precosPanel(ctx) {
   const { store } = ctx;
@@ -1052,7 +1158,7 @@ function precosPanel(ctx) {
       const b = productBreakdown(es, p.id, config, lens);
       const parts = [
         ['Ingredientes', b.ingredients],
-        ['Mão de obra', b.labor],
+        ['Mão de obra direta (indicador; não soma)', b.labor],
         ['Gás (forno)', b.gas],
         ['Custos fixos', b.fixed],
         ['Embalagem', b.packaging + p.packagingCost],
@@ -1062,7 +1168,8 @@ function precosPanel(ctx) {
       const ownMargin = p.targetMarginPct != null;
       const price = priceFromCost(unitCost, { ...config, targetMarginPct: margin });
       // Per-unit profit and per-hour metrics (her spreadsheet's decision numbers).
-      const lucroUnit = price - unitCost - price * config.paymentFeePct;
+      const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+      const lucroUnit = price - unitCost - price * salesRate;
       const activeHoursPerUnit = config.valorHora > 0 ? b.labor / config.valorHora : 0;
       const lucroHora = activeHoursPerUnit > 0 ? lucroUnit / activeHoursPerUnit : null;
       const custoHora = activeHoursPerUnit > 0 ? unitCost / activeHoursPerUnit : null;
@@ -1075,7 +1182,7 @@ function precosPanel(ctx) {
         el('table', { class: 'pa-kv' }, [
           ...parts.map(([label, v]) => kv(label, v)),
           kv('Custo unitário', unitCost, 'pa-kv-total'),
-          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(config.paymentFeePct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
+          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(config.paymentFeePct)}%, comissão ${pct(config.commissionPct || 0)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
           el('tr', {}, [el('td', { text: 'Lucro por unidade' }), el('td', { class: 'pa-num' + (lucroUnit >= 0 ? '' : ' pa-bad'), text: brl(lucroUnit) })]),
           lucroHora != null && el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), el('td', { class: 'pa-num' + (lucroHora >= 0 ? '' : ' pa-bad'), text: brl(lucroHora) })]),
           custoHora != null && el('tr', {}, [el('td', { text: 'Custo por hora de trabalho' }), el('td', { class: 'pa-num', text: brl(custoHora) })]),
@@ -1102,7 +1209,7 @@ function friendlyError(e) {
   if (e instanceof PriceError) return 'Defina o preço de todos os insumos usados nesta receita.';
   if (e instanceof CycleError) return 'Há um ciclo nas receitas (uma receita contém a si mesma).';
   if (e instanceof YieldError) return 'Rendimento inválido — verifique a receita.';
-  if (e instanceof MarkupError) return 'Margem + taxa somam 100% ou mais — ajuste em Ajustes.';
+  if (e instanceof MarkupError) return 'Margem + taxa + comissão somam 100% ou mais — ajuste em Ajustes.';
   if (e instanceof RefError) return 'A receita deste produto não foi encontrada.';
   if (e instanceof ConversionError) return `Unidade incompatível (${e.from}→${e.to}). Use a mesma unidade do insumo.`;
   return String(e && e.message ? e.message : e);
@@ -1114,6 +1221,166 @@ function friendlyError(e) {
 // previsto — for stock, extras, or unplanned runs), a feito ✓, and a delete ✕ on avulso items.
 // Stored per date in a Comanda record: { productId, prevista?, realizado, feito }. Edits persist
 // WITHOUT a re-render (ctx.actions.persist) so inputs keep focus; indicators recompute in place.
+function dateRangeDays(start, end, limit = 31) {
+  const days = [];
+  const cursor = new Date(`${start}T12:00:00`);
+  const last = new Date(`${end}T12:00:00`);
+  while (cursor <= last && days.length < limit) {
+    days.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return days;
+}
+
+function orderedProductionForDate(store, date) {
+  const ordered = new Map();
+  for (const order of store.state.encomendas) {
+    if (order.desistenciaAt || dateOnly(order.deliveryDate) !== date) continue;
+    orderProduction(order, ordered);
+  }
+  return ordered;
+}
+
+function comandaDaySection(ctx, date, unitCost) {
+  const { store } = ctx;
+  const isToday = date === todayInput();
+  const ordered = orderedProductionForDate(store, date);
+  const stored = store.get('comandas', date);
+  const items = new Map();
+  for (const item of stored?.itens || []) items.set(item.productId, { prevista: item.prevista == null ? undefined : Number(item.prevista), realizado: Number(item.realizado) || 0, feito: !!item.feito });
+  let productIds = [...new Set([...ordered.keys(), ...items.keys()])].sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
+  const ensure = (productId) => {
+    if (!items.has(productId)) items.set(productId, { prevista: undefined, realizado: 0, feito: false });
+    return items.get(productId);
+  };
+  const previstaOf = (productId) => items.get(productId)?.prevista ?? ordered.get(productId) ?? 0;
+  const persist = () => {
+    const itens = [...items.entries()].filter(([, item]) => (item.prevista || 0) > 0 || item.realizado > 0 || item.feito).map(([productId, item]) => ({ productId, ...(item.prevista != null ? { prevista: item.prevista } : {}), realizado: item.realizado || 0, feito: !!item.feito }));
+    ctx.actions.persist((s) => { if (itens.length) s.upsertComanda({ id: date, date, itens }); else if (s.get('comandas', date)) s.removeComanda(date); });
+  };
+  const indicators = el('div', { class: 'pa-comanda-ind' });
+  const recompute = () => {
+    let planned = 0; let produced = 0; let available = 0; let cost = 0;
+    for (const productId of productIds) {
+      const expected = Number(previstaOf(productId)) || 0;
+      const done = Number(items.get(productId)?.realizado) || 0;
+      planned += expected; produced += done; available += Math.max(0, done - expected); cost += done * unitCost(productId);
+    }
+    indicators.replaceChildren(el('table', { class: 'pa-kv' }, [
+      el('tr', {}, [el('td', { text: 'Previsto · Produzido' }), el('td', { class: 'pa-num', text: `${fmtNum(planned)} · ${fmtNum(produced)}` })]),
+      el('tr', {}, [el('td', { text: 'Disponível para venda' }), el('td', { class: 'pa-num', 'data-testid': isToday ? 'cmd-disponivel' : `cmd-disponivel-${date}`, text: `${fmtNum(available)} un` })]),
+      el('tr', {}, [el('td', { text: 'Custo da produção registrada' }), el('td', { class: 'pa-num', 'data-testid': isToday ? 'cmd-custo' : `cmd-custo-${date}`, text: brl(cost) })]),
+    ]));
+  };
+  const list = el('div', { class: 'pa-cmd-list' });
+  const itemCard = (productId) => {
+    const product = store.get('products', productId);
+    const item = ensure(productId);
+    const avulso = !ordered.has(productId);
+    const planned = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-prevista', type: 'text', inputmode: 'decimal', value: item.prevista != null ? fmtNum(item.prevista) : (ordered.get(productId) ? fmtNum(ordered.get(productId)) : ''), 'aria-label': 'quantidade prevista' });
+    const produced = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: item.realizado ? fmtNum(item.realizado) : '', 'aria-label': 'produzidos/estoque' });
+    const done = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); done.checked = item.feito;
+    const balance = el('span', { class: 'pa-muted pa-exced' });
+    const updateBalance = () => {
+      const difference = (Number(item.realizado) || 0) - (Number(previstaOf(productId)) || 0);
+      balance.textContent = difference > 0 ? `disponível para venda: ${fmtNum(difference)}` : (item.realizado > 0 && difference < 0 ? `saldo a produzir: ${fmtNum(-difference)}` : '');
+    };
+    const card = el('div', { class: `pa-cmd-item${item.feito ? ' pa-done' : ''}` });
+    planned.addEventListener('input', () => { item.prevista = parseNum(planned.value); updateBalance(); recompute(); persist(); });
+    produced.addEventListener('input', () => { item.realizado = parseNum(produced.value) || 0; updateBalance(); recompute(); persist(); });
+    done.addEventListener('change', () => { item.feito = done.checked; card.classList.toggle('pa-done', done.checked); persist(); });
+    const remove = avulso ? el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cmd-del', title: 'Excluir da comanda', onclick: () => { items.delete(productId); productIds = productIds.filter((id) => id !== productId); card.remove(); recompute(); persist(); } }, '×') : null;
+    card.append(
+      el('div', { class: 'pa-cmd-head' }, [el('strong', { class: 'pa-grow', text: product?.name || '(produto removido)' }), avulso && el('span', { class: 'pa-badge', text: 'avulso' }), remove].filter(Boolean)),
+      el('div', { class: 'pa-cmd-fields' }, [el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Quantidade prevista' }), planned]), el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Produzidos/estoque' }), produced]), el('label', { class: 'pa-cmd-feito' }, [done, el('span', { text: 'Feito' })])]), balance,
+    );
+    updateBalance();
+    return card;
+  };
+  const renderList = () => list.replaceChildren(...(productIds.length ? productIds.map(itemCard) : [el('p', { class: 'pa-empty', text: 'Nenhum item de produção nesta data.' })]));
+  const search = el('input', { class: 'pa-input pa-search', 'data-testid': isToday ? 'cmd-prodsearch' : `cmd-prodsearch-${date}`, type: 'search', placeholder: 'Adicionar produto avulso neste dia…' });
+  const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+  search.addEventListener('input', () => {
+    const query = norm(search.value);
+    const matches = query ? store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(query) && !items.has(p.id) && !ordered.has(p.id)).slice(0, 6) : [];
+    suggestions.style.display = matches.length ? '' : 'none';
+    suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': isToday ? 'cmd-prodresult' : `cmd-prodresult-${date}`, onclick: () => {
+      if (isBundleProduct(product)) { ctx.actions.openModal({ kind: 'comanda-bundle-add', date, productId: product.id }); return; }
+      items.set(product.id, { prevista: undefined, realizado: 0, feito: false }); productIds.push(product.id); productIds.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
+      search.value = ''; suggestions.style.display = 'none'; renderList(); recompute();
+    } }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
+  });
+  const spec = buildComandaSpec(store, date);
+  const orders = spec.groups.length ? el('details', { class: 'pa-history' }, [
+    el('summary', { text: `Ver pedidos agrupados por cliente (${spec.groups.length})` }),
+    ...spec.groups.map((group) => el('div', { class: 'pa-preview-group' }, [el('strong', { text: group.clientName }), el('span', { class: 'pa-muted', text: group.items.map((item) => `${fmtNum(item.qty)}× ${item.name}`).join(' · ') }), group.notes && el('span', { class: 'pa-muted', text: `Obs.: ${group.notes}` })].filter(Boolean))),
+  ]) : null;
+  renderList(); recompute();
+  return el('section', { class: 'pa-detail-card', 'data-testid': 'cmd-period-day' }, [
+    el('div', { class: 'pa-cardhead' }, [el('h3', { class: 'pa-h3 pa-grow', text: fmtDate(`${date}T12:00:00`) }), el('span', { class: 'pa-badge', text: `${productIds.length} item(ns)` })]),
+    list, search, suggestions, indicators, orders,
+  ].filter(Boolean));
+}
+
+MODALS['comanda-bundle-add'] = (ctx, modal) => comandaBundleSheet(ctx, modal);
+function comandaBundleSheet(ctx, modal) {
+  const { store } = ctx; const product = store.get('products', modal.productId);
+  if (!product || !isBundleProduct(product)) return sheet({ title: 'Conjunto não encontrado', rows: [] });
+  const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
+  const children = [];
+  const itemsBox = el('div', { class: 'pa-detail-card' });
+  const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== product.id);
+  const render = () => {
+    const list = children.map((child, index) => {
+      const p = store.get('products', child.productId); const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty) });
+      qty.addEventListener('input', () => { child.qty = parseNum(qty.value) || 0; });
+      return el('li', { class: 'pa-list-item' }, [qty, el('span', { class: 'pa-grow', text: p?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { children.splice(index, 1); render(); } }, '✕')]);
+    });
+    const select = el('select', { class: 'pa-input', 'data-testid': 'cmd-bundle-product' }, candidates.map((p) => el('option', { value: p.id, text: p.name })));
+    const qty = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-bundle-child-qty', type: 'text', inputmode: 'decimal', value: '1' });
+    itemsBox.replaceChildren(el('ul', { class: 'pa-list pa-tight' }, list.length ? list : [el('li', { class: 'pa-empty pa-sm', text: 'Adicione os produtos do conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, el('button', { class: 'pa-btn pa-sm', onclick: () => { const q = parseNum(qty.value); if (!select.value || !(q > 0)) return; const current = children.find((child) => child.productId === select.value); if (current) current.qty += q; else children.push({ productId: select.value, qty: q }); render(); } }, '+ produto')]) : el('p', { class: 'pa-hint', text: 'Não há produtos comuns ativos para montar este conjunto.' }));
+  };
+  render();
+  function save() {
+    const qty = parseNum(bundleQty.value); if (!(qty > 0) || !children.some((child) => child.qty > 0)) { bundleQty.focus(); return; }
+    const required = orderProduction({ itens: [{ productId: product.id, qty, bundleItems: children }] });
+    const ordered = orderedProductionForDate(store, modal.date); const current = store.get('comandas', modal.date); const byId = new Map((current?.itens || []).map((item) => [item.productId, { ...item }]));
+    for (const [productId, extra] of required) {
+      const row = byId.get(productId) || { productId, realizado: 0, feito: false };
+      row.prevista = (row.prevista == null ? (ordered.get(productId) || 0) : Number(row.prevista) || 0) + extra;
+      byId.set(productId, row);
+    }
+    ctx.actions.mutate((s) => s.upsertComanda({ id: modal.date, date: modal.date, itens: [...byId.values()] }));
+  }
+  return sheet({ title: `Adicionar ${bundleKindLabel(product)} à comanda`, rows: [el('div', { class: 'pa-callout' }, [el('strong', { text: product.name }), el('span', { text: ` · ${fmtDate(`${modal.date}T12:00:00`)}` })]), field(`Quantidade de ${bundleKindLabel(product).toLowerCase()}s`, bundleQty), el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), itemsBox, el('p', { class: 'pa-hint', text: 'Aqui você planeja apenas a produção. Para registrar cliente, preço, desconto e valor a receber, crie uma Encomenda.' })], onSave: save, saveTestid: 'cmd-bundle-save' });
+}
+
+function comandaPeriodPanel(ctx) {
+  const { store } = ctx;
+  const config = store.getConfig();
+  const engineStore = store.toEngineStore();
+  const lens = estimateLens(config);
+  const unitCost = (productId) => { try { return productUnitCost(engineStore, productId, config, lens); } catch { return 0; } };
+  const start = ctx.view.comandaStart || presetRange('semana')[0];
+  const end = ctx.view.comandaEnd || presetRange('semana')[1];
+  const startInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-start', type: 'date', value: start });
+  const endInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-end', type: 'date', value: end });
+  const updateRange = () => {
+    const nextStart = startInput.value || start;
+    const nextEnd = endInput.value && endInput.value >= nextStart ? endInput.value : nextStart;
+    ctx.actions.setComandaRange({ comandaStart: nextStart, comandaEnd: nextEnd });
+  };
+  startInput.addEventListener('change', updateRange); endInput.addEventListener('change', updateRange);
+  const days = dateRangeDays(start, end);
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produção' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF')]),
+    el('div', { class: 'pa-period' }, [field('Data inicial', startInput), el('span', { class: 'pa-period-arrow', text: 'até' }), field('Data final', endInput)]),
+    el('p', { class: 'pa-hint', text: 'Todos os itens das encomendas do período aparecem abaixo. Ajuste quantidades e registre a produção diretamente em cada dia; não há uma segunda seleção de data.' }),
+    ...days.map((day) => comandaDaySection(ctx, day, unitCost)),
+    days.length >= 31 && el('p', { class: 'pa-callout', text: 'A visualização aceita no máximo 31 dias por vez. Escolha um período menor para ver os dias seguintes.' }),
+  ].filter(Boolean));
+}
+
 function comandaPanel(ctx) {
   const { store } = ctx;
   const config = store.getConfig();
@@ -1301,15 +1568,18 @@ function comandaPanel(ctx) {
 
 function buildComandaSpec(store, date) {
   const groups = new Map();
-  const ordered = new Map();
+  const ordered = orderedProductionForDate(store, date);
   for (const enc of store.state.encomendas) {
     if (enc.desistenciaAt || dateOnly(enc.deliveryDate) !== date) continue;
     const key = enc.clienteId || '__sem__';
     const client = enc.clienteId ? store.get('clients', enc.clienteId) : null;
     const group = groups.get(key) || { clientName: client?.name || 'Sem cliente / pronta entrega', contact: [client?.phone, client?.address].filter(Boolean).join(' · '), items: new Map(), notes: [] };
     for (const it of enc.itens || []) {
-      group.items.set(it.productId, (group.items.get(it.productId) || 0) + (Number(it.qty) || 0));
-      ordered.set(it.productId, (ordered.get(it.productId) || 0) + (Number(it.qty) || 0));
+      const composition = bundleCompositionText(store, it);
+      const itemKey = `${it.productId}|${composition}`;
+      const current = group.items.get(itemKey) || { productId: it.productId, qty: 0, composition };
+      current.qty += Number(it.qty) || 0;
+      group.items.set(itemKey, current);
     }
     if (enc.notes) group.notes.push(enc.notes);
     groups.set(key, group);
@@ -1322,14 +1592,33 @@ function buildComandaSpec(store, date) {
     date: fmtDate(`${date}T12:00:00`),
     groups: [...groups.values()].map((g) => ({
       clientName: g.clientName, contact: g.contact,
-      items: [...g.items.entries()].map(([id, qty]) => ({ name: store.get('products', id)?.name || '(produto removido)', qty })),
+      items: [...g.items.values()].map((item) => ({ name: `${store.get('products', item.productId)?.name || '(produto removido)'}${item.composition ? ` (${item.composition})` : ''}`, qty: item.qty })),
       notes: g.notes.join(' · '),
     })).sort((a, b) => norm(a.clientName).localeCompare(norm(b.clientName))),
     production: productionIds.map((id) => ({
+      productId: id,
       name: store.get('products', id)?.name || '(produto removido)',
       prevista: explicit.has(id) ? explicit.get(id) : (ordered.get(id) || 0),
       produzido: produced.get(id) || 0,
     })).sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
+  };
+}
+
+function buildComandaPeriodSpec(store, start, end) {
+  const days = dateRangeDays(start, end).map((date) => ({ isoDate: date, ...buildComandaSpec(store, date) }));
+  const consolidated = new Map();
+  for (const day of days) for (const item of day.production) {
+    const key = item.productId || norm(item.name);
+    const current = consolidated.get(key) || { productId: item.productId, name: item.name, prevista: 0, produzido: 0 };
+    current.prevista += Number(item.prevista) || 0;
+    current.produzido += Number(item.produzido) || 0;
+    consolidated.set(key, current);
+  }
+  return {
+    start, end,
+    period: start === end ? fmtDate(`${start}T12:00:00`) : `${fmtDate(`${start}T12:00:00`)} a ${fmtDate(`${end}T12:00:00`)}`,
+    generatedAt: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date()),
+    production: [...consolidated.values()].sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
   };
 }
 
@@ -1363,26 +1652,46 @@ function recipeProfitabilityCard(store, recipe) {
   try {
     const es = store.toEngineStore();
     const lens = estimateLens(config);
-    const recipeCost = recipeUnitCost(es, recipe.id, config, lens);
+    const breakdown = costBreakdown(es, recipe.id, config, lens);
+    const yieldQty = Number(recipe.yieldNominal) || 0;
+    const totalIngredients = breakdown.ingredients * yieldQty;
+    const totalRecipeCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * yieldQty;
+    const directLaborIndicator = breakdown.labor * yieldQty;
+    const rows = [
+      el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), el('td', { class: 'pa-num', text: brl(totalIngredients) })]),
+      el('tr', {}, [el('td', { text: 'Custo total da receita' }), el('td', { class: 'pa-num', text: brl(totalRecipeCost) })]),
+      el('tr', {}, [el('td', { text: 'Mão de obra direta (indicador)' }), el('td', { class: 'pa-num', text: brl(directLaborIndicator) })]),
+    ];
     if (!product) return el('section', { class: 'pa-detail-card' }, [
-      el('strong', { text: 'Custo calculado da receita' }),
-      el('span', { class: 'pa-muted', text: `${brl(recipeCost)} por ${recipe.yieldUnit}. Relacione um produto para comparar com o valor de venda.` }),
+      el('strong', { text: 'Resultado da receita completa' }),
+      el('table', { class: 'pa-kv' }, rows),
+      el('span', { class: 'pa-muted', text: 'O indicador de mão de obra não é somado ao custo. Relacione um produto para calcular venda e lucro da receita.' }),
     ]);
     const unitCost = productUnitCost(es, product.id, config, lens);
     const suggested = productPrice(es, product.id, config, lens).price;
     const salePrice = Number(product.salePrice) || suggested;
-    const fee = salePrice * (Number(config.paymentFeePct) || 0);
-    const profit = salePrice - unitCost - fee;
-    const margin = salePrice > 0 ? profit / salePrice : 0;
+    const recipeComponent = (product.components || []).find((c) => c.kind === 'recipe' && c.id === recipe.id);
+    const recipeQtyPerProduct = Number(recipeComponent?.qty) || 1;
+    const productUnits = recipeQtyPerProduct > 0 ? yieldQty / recipeQtyPerProduct : 0;
+    const totalSale = salePrice * productUnits;
+    const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+    const totalProductCost = unitCost * productUnits;
+    const profit = totalSale - totalProductCost - totalSale * salesRate;
+    const margin = totalSale > 0 ? profit / totalSale : 0;
+    const productionHours = (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0)) / 60;
+    const profitHour = productionHours > 0 ? profit / productionHours : null;
     return el('section', { class: 'pa-detail-card' }, [
-      el('strong', { text: `Rentabilidade · ${product.name}` }),
+      el('strong', { text: `Resultado da receita completa · ${product.name}` }),
       el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Custo por produto' }), el('td', { class: 'pa-num', text: brl(unitCost) })]),
-        el('tr', {}, [el('td', { text: 'Venda cadastrada' }), el('td', { class: 'pa-num', text: brl(salePrice) })]),
-        el('tr', {}, [el('td', { text: 'Preço sugerido' }), el('td', { class: 'pa-num', text: brl(suggested) })]),
-        el('tr', {}, [el('td', { text: 'Lucro estimado' }), el('td', { class: `pa-num ${profit >= 0 ? 'pa-positive' : 'pa-bad'}`, text: brl(profit) })]),
+        ...rows,
+        el('tr', {}, [el('td', { text: `Produtos obtidos da receita` }), el('td', { class: 'pa-num', text: fmtNum(productUnits) })]),
+        el('tr', {}, [el('td', { text: 'Preço de venda total da receita' }), el('td', { class: 'pa-num', text: brl(totalSale) })]),
+        el('tr', {}, [el('td', { text: 'Preço sugerido por produto' }), el('td', { class: 'pa-num', text: brl(suggested) })]),
+        el('tr', {}, [el('td', { text: 'Lucro total da receita' }), el('td', { class: `pa-num ${profit >= 0 ? 'pa-positive' : 'pa-bad'}`, text: brl(profit) })]),
+        el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), el('td', { class: `pa-num ${profit >= 0 ? 'pa-positive' : 'pa-bad'}`, text: profitHour == null ? '—' : brl(profitHour) })]),
         el('tr', {}, [el('td', { text: 'Margem estimada' }), el('td', { class: `pa-num ${margin >= 0 ? 'pa-positive' : 'pa-bad'}`, text: pctStr(margin) })]),
       ]),
+      el('span', { class: 'pa-muted', text: `Taxa de pagamento e comissão descontadas: ${pctStr(salesRate)}. A mão de obra direta é apenas um indicador de esforço e não duplica salários já incluídos nos custos fixos.` }),
     ]);
   } catch (e) {
     return el('p', { class: 'pa-hint', text: friendlyError(e) });
@@ -1390,26 +1699,26 @@ function recipeProfitabilityCard(store, recipe) {
 }
 
 MODALS['comanda-preview'] = (ctx, m) => {
-  const spec = buildComandaSpec(ctx.store, m.date);
+  const start = m.start || m.date || todayInput();
+  const end = m.end || start;
+  const spec = buildComandaPeriodSpec(ctx.store, start, end);
   const preview = el('div', { class: 'pa-print-preview', 'data-testid': 'cmd-print-preview' }, [
-    el('h3', { class: 'pa-h3', text: `Produção · ${spec.date}` }),
-    ...spec.production.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('strong', { text: `${fmtNum(p.prevista)} previsto · ${fmtNum(p.produzido)} produzido` })])),
-    el('h3', { class: 'pa-h3', text: 'Pedidos agrupados por cliente' }),
-    ...spec.groups.map((g) => el('section', { class: 'pa-preview-group' }, [
-      el('strong', { text: g.clientName }),
-      g.contact && el('span', { class: 'pa-muted', text: g.contact }),
-      el('ul', { class: 'pa-list pa-tight' }, g.items.map((it) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: it.name }), el('strong', { text: `${fmtNum(it.qty)} un` })]))),
-      g.notes && el('span', { class: 'pa-muted', text: `Obs.: ${g.notes}` }),
-    ].filter(Boolean))),
+    el('h3', { class: 'pa-h3', text: `Comanda de produção · ${spec.period}` }),
+    el('p', { class: 'pa-muted', text: `Comanda gerada em ${spec.generatedAt}` }),
+    el('strong', { text: 'Lista única de produção' }),
+    ...(spec.production.length ? spec.production.map((p) => el('div', { class: 'pa-preview-line', 'data-testid': 'cmd-preview-item' }, [
+      el('span', { class: 'pa-grow', text: p.name }),
+      el('strong', { text: `${fmtNum(p.prevista)} previsto · ${fmtNum(p.produzido)} produzido` }),
+    ])) : [el('span', { class: 'pa-muted', text: 'Sem itens de produção no período.' })]),
   ]);
   const btn = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'cmd-pdf' }, 'Gerar PDF A4');
   btn.addEventListener('click', async () => {
     const old = btn.textContent; btn.textContent = 'Gerando…'; btn.disabled = true;
-    try { await savePdf(await generateComandaPdf(spec), `comanda-${m.date}.pdf`); }
+    try { await savePdf(await generateComandaPdf(spec), `comanda-${start}-a-${end}.pdf`); }
     catch (e) { window.alert('Não foi possível gerar o PDF: ' + ((e && e.message) || e)); }
     finally { btn.textContent = old; btn.disabled = false; }
   });
-  return sheet({ title: 'Comanda para impressão', rows: [el('p', { class: 'pa-hint', text: 'Pedidos do mesmo cliente e dia aparecem juntos, evitando comandas duplicadas.' }), preview, el('div', { class: 'pa-sheet-actions' }, [btn])] });
+  return sheet({ title: 'Comanda para impressão', rows: [el('p', { class: 'pa-hint', text: 'O PDF apresenta uma única lista para todo o período e soma automaticamente os produtos repetidos.' }), preview, el('div', { class: 'pa-sheet-actions' }, [btn])] });
 };
 
 function vendasPanel(ctx) {
@@ -1551,7 +1860,7 @@ function saleRow(ctx, s) {
   const { store } = ctx;
   const reversed = store.isReversed('sale', s.id);
   const p = store.get('products', s.productId);
-  const rev = s.qty * s.unitPrice;
+  const rev = saleNet(s);
   return el('li', { class: 'pa-list-item' + (reversed ? ' pa-reversed' : ''), 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
     el('div', { class: 'pa-grow' }, [
       el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
@@ -1577,6 +1886,7 @@ function vendaSheet(ctx) {
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
   const price = moneyField(products[0] ? suggested(products[0].id) : null, 'venda-price');
+  const discount = moneyField(null, 'venda-discount');
   const channel = el('input', { class: 'pa-input', 'data-testid': 'venda-canal', type: 'text', placeholder: 'canal (opcional)' });
 
   prodSel.addEventListener('change', () => {
@@ -1588,13 +1898,14 @@ function vendaSheet(ctx) {
     const p = store.get('products', prodSel.value);
     const q = parseNum(qty.value);
     const up = parseNum(price.input.value);
-    if (!p || !(q > 0) || up == null) { return; }
+    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
+    if (!p || !(q > 0) || up == null || discountValue > q * up + 0.005) { discount.input.focus(); return; }
     let cost = 0;
     try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
     const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
     ctx.actions.mutate((s) => s.addSale({
-      id: uuid(), at, productId: p.id, qty: q, unitPrice: up,
-      paymentFeePct: config.paymentFeePct, costSnapshot: cost,
+      id: uuid(), at, productId: p.id, qty: q, unitPrice: up, discount: discountValue || undefined,
+      paymentFeePct: config.paymentFeePct, commissionPct: config.commissionPct || 0, costSnapshot: cost,
       ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
     }));
   }
@@ -1603,6 +1914,7 @@ function vendaSheet(ctx) {
     field('Produto', prodSel),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Qtd' }), qty]),
     field('Preço de venda', price),
+    field('Desconto total (opcional)', discount),
     field('Canal (opcional)', channel),
     el('p', { class: 'pa-hint', text: 'O preço sugerido já vem preenchido — edite se vendeu por outro valor. O custo é congelado na venda para a margem ficar verdadeira.' }),
   ];
@@ -1660,8 +1972,8 @@ function encomendasPanel(ctx) {
   if (status === 'desistencias') list = list.filter((e) => e.desistenciaAt);
   else if (status === 'naoentregue') list = list.filter((e) => !e.desistenciaAt && !e.entregue);
   else if (status === 'entregues') list = list.filter((e) => !e.desistenciaAt && e.entregue);
-  else if (status === 'areceber') list = list.filter((e) => !e.desistenciaAt && (e.total || 0) - store.paidFor(e.id) > 0.005);
-  else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && (e.total || 0) - store.paidFor(e.id) <= 0.005);
+  else if (status === 'areceber') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo > 0.005);
+  else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo <= 0.005);
   else if (status === 'urgentes') list = list.filter((e) => !e.desistenciaAt && e.urgente);
   list.sort((a, b) => {
     if (!!a.urgente !== !!b.urgente) return a.urgente ? -1 : 1; // urgentes pinned to the top
@@ -1714,16 +2026,19 @@ function encomendasPanel(ctx) {
 }
 
 function encomendaItemsResumo(store, e) {
-  return (e.itens || []).map((it) => { const p = store.get('products', it.productId); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}`; }).join(', ');
+  return (e.itens || []).map((it) => { const p = store.get('products', it.productId); const composition = bundleCompositionText(store, it); return `${fmtNum(it.qty)}× ${p ? p.name : '?'}${composition ? ` (${composition})` : ''}`; }).join(', ');
 }
 
 /** Derived payment status of an order from its payments (never a stored flag). */
 function paymentStatus(store, e) {
-  const paid = store.paidFor(e.id);
-  const saldo = (e.total || 0) - paid;
-  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, saldo: 0 };
-  if (paid > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, saldo };
-  return { label: 'não pago', cls: 'pa-warn', paid, saldo };
+  const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
+  const finance = title ? titleState(store, title) : null;
+  const paid = finance ? finance.paid : store.paidFor(e.id);
+  const discounted = finance ? finance.discounted : 0;
+  const saldo = finance ? finance.balance : Math.max(0, (e.total || 0) - paid);
+  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, discounted, saldo: 0 };
+  if (paid + discounted > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, discounted, saldo };
+  return { label: 'não pago', cls: 'pa-warn', paid, discounted, saldo };
 }
 
 function encomendaRow(ctx, e) {
@@ -1757,21 +2072,41 @@ function encomendaSheet(ctx, enc) {
   const suggested = (pid) => sellingPrice(store, pid);
   const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
 
-  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice })) : [];
+  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice, ...(it.bundleItems ? { bundleItems: it.bundleItems.map((child) => ({ ...child })) } : {}) })) : [];
 
   const cliPicker = clientePicker(store, enc ? enc.clienteId : '');
   const urgenteChk = el('input', { type: 'checkbox', 'data-testid': 'enc-urgente' }); urgenteChk.checked = !!(enc && enc.urgente);
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
   const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
   const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
+  const discount = moneyField(enc ? enc.discount : null, 'enc-discount');
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observações (opcional)' });
   notes.value = enc ? (enc.notes || '') : '';
 
   const totalEl = el('strong', { 'data-testid': 'enc-total' });
-  const grandTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
-  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); };
+  const grossTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
+  const grandTotal = () => Math.max(0, grossTotal() - Math.min(grossTotal(), parseNum(discount.input.value) || 0));
+  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); discount.input.setCustomValidity(''); };
 
   const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  function bundleEditor(it, product) {
+    const box = el('div', { class: 'pa-bundle-editor', 'data-testid': 'enc-bundle-editor' });
+    const render = () => {
+      const rows = (it.bundleItems || []).map((child, childIndex) => {
+        const childProduct = store.get('products', child.productId);
+        const childQty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty), 'aria-label': 'quantidade dentro do conjunto' });
+        childQty.addEventListener('input', () => { child.qty = parseNum(childQty.value) || 0; });
+        return el('li', { class: 'pa-list-item' }, [childQty, el('span', { class: 'pa-grow', text: childProduct?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { it.bundleItems.splice(childIndex, 1); render(); } }, '✕')]);
+      });
+      const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== it.productId);
+      const select = el('select', { class: 'pa-input', 'data-testid': 'enc-bundle-product' }, candidates.map((p) => el('option', { value: p.id, text: p.name })));
+      const qty = el('input', { class: 'pa-input pa-qty', 'data-testid': 'enc-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
+      const add = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-bundle-add', onclick: () => { const q = parseNum(qty.value); if (!select.value || !(q > 0)) return; const current = it.bundleItems.find((child) => child.productId === select.value); if (current) current.qty += q; else it.bundleItems.push({ productId: select.value, qty: q }); render(); } }, '+ produto');
+      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Essas quantidades serão multiplicadas pela quantidade do conjunto e aparecerão na comanda de produção.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, add]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }));
+    };
+    render();
+    return box;
+  }
   function renderItems() {
     itemsList.replaceChildren(...(items.length ? items.map((it, idx) => {
       const p = store.get('products', it.productId);
@@ -1784,7 +2119,7 @@ function encomendaSheet(ctx, enc) {
       renderLine();
       return el('li', { class: 'pa-list-item pa-encitem' }, [
         qty,
-        el('div', { class: 'pa-grow' }, [el('div', { text: p ? p.name : '(produto removido)' }), lineTot]),
+        el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('span', { text: p ? p.name : '(produto removido)' }), p && isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(p) })].filter(Boolean)), lineTot, p && isBundleProduct(p) && bundleEditor(it, p)]),
         el('span', { class: 'pa-lab', text: 'R$' }), price,
         el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { items.splice(idx, 1); renderItems(); renderTotal(); } }, '✕'),
       ]);
@@ -1800,17 +2135,22 @@ function encomendaSheet(ctx, enc) {
     if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
     const matches = store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(q)).slice(0, 6);
     results.style.display = matches.length ? '' : 'none';
-    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
-      el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' }),
+    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id), ...(isBundleProduct(p) ? { bundleItems: [] } : {}) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
+      el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: `${bundleKindLabel(p)} · escolher composição` })].filter(Boolean)), el('span', { class: 'pa-add', text: '+' }),
     ])));
   }
   search.addEventListener('input', renderResults);
   frete.input.addEventListener('input', renderTotal);
+  discount.input.addEventListener('input', renderTotal);
   renderTotal();
 
   function save() {
     if (!items.length) { search.focus(); return; }
-    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * unitCost(it.productId), 0);
+    const incompleteBundle = items.find((it) => isBundleProduct(store.get('products', it.productId)) && !(it.bundleItems || []).some((child) => (Number(child.qty) || 0) > 0));
+    if (incompleteBundle) { window.alert('Escolha os produtos que compõem cada cesta, kit ou combo antes de salvar.'); return; }
+    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
+    if (discountValue > grossTotal() + 0.005) { discount.input.setCustomValidity('O desconto não pode ser maior que o total bruto.'); discount.input.reportValidity(); return; }
+    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * (orderItemUnitCost(store, it, unitCost) || 0), 0);
     const fr = parseNum(frete.input.value);
     const ob = notes.value.trim();
     ctx.actions.mutate((s) => s.upsertEncomenda({
@@ -1818,8 +2158,9 @@ function encomendaSheet(ctx, enc) {
       id: enc ? enc.id : uuid(),
       deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
       clienteId: cliPicker.value() || undefined,
-      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0 })),
+      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0, ...(it.bundleItems?.length ? { bundleItems: it.bundleItems.map((child) => ({ productId: child.productId, qty: Number(child.qty) || 0 })) } : {}) })),
       total: grandTotal(),
+      discount: discountValue || undefined,
       costSnapshot: cost,
       deliveryMethod: entrega.value,
       frete: fr == null ? undefined : fr,
@@ -1839,6 +2180,7 @@ function encomendaSheet(ctx, enc) {
       el('table', { class: 'pa-kv' }, [
         el('tr', {}, [el('td', { text: 'Total' }), el('td', { class: 'pa-num', text: brl(enc.total) })]),
         el('tr', {}, [el('td', { text: 'Pago' }), el('td', { class: 'pa-num', text: brl(st.paid) })]),
+        st.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(st.discounted) })]),
         el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num' + (st.saldo > 0.005 ? ' pa-bad' : ''), text: brl(st.saldo) })]),
       ]),
       hist.length > 0 && el('ul', { class: 'pa-list pa-tight' }, hist.map((pg) => el('li', { class: 'pa-list-item' + (store.isReversed('payment', pg.id) ? ' pa-reversed' : '') }, [
@@ -1866,6 +2208,8 @@ function encomendaSheet(ctx, enc) {
     search, results,
     el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Total ' }), totalEl])]),
     field('Frete (opcional)', frete),
+    field('Desconto da venda (opcional)', discount),
+    el('p', { class: 'pa-hint', text: 'Este desconto reduz o valor da venda. Um desconto negociado somente na quitação pode ser registrado depois em Financeiro › A Receber.' }),
     field('Observações (opcional)', notes),
     ...paymentSection.filter(Boolean),
   ];
@@ -1892,7 +2236,7 @@ function pagamentoSheet(ctx, encomendaId) {
   const enc = store.get('encomendas', encomendaId);
   const cli = enc && enc.clienteId ? store.get('clients', enc.clienteId) : null;
   const cliName = cli ? cli.name : 'Sem cliente';
-  const saldo = enc ? Math.max(0, (enc.total || 0) - store.paidFor(encomendaId)) : 0;
+  const saldo = enc ? paymentStatus(store, enc).saldo : 0;
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'pag-date', type: 'date', value: todayInput() });
   const valor = moneyField(saldo > 0 ? saldo : null, 'pag-valor');
   const forma = paymentMethodSelect(store, 'pag-forma');
@@ -1935,7 +2279,7 @@ function buildFichas(store, encomendas) {
   return [...groups.entries()].map(([key, ords]) => {
     const client = key === '__none__' ? null : store.get('clients', key);
     const orders = ords.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1)).map((e) => ({
-      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: (e.total || 0) - store.paidFor(e.id),
+      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: paymentStatus(store, e).saldo,
     }));
     return { client, orders, saldoTotal: orders.reduce((s, o) => s + Math.max(0, o.saldo), 0) };
   });
@@ -1945,7 +2289,7 @@ function buildFichas(store, encomendas) {
 function encomendasByMode(store, mode) {
   return store.state.encomendas.filter((e) => {
     if (e.desistenciaAt) return false;
-    const saldo = (e.total || 0) - store.paidFor(e.id);
+    const saldo = paymentStatus(store, e).saldo;
     if (mode === 'aberto') return saldo > 0.005;     // em aberto + parcialmente pagas
     if (mode === 'pagas') return saldo <= 0.005;      // quitadas
     return true;                                      // todas
@@ -2005,10 +2349,13 @@ function buildRecibo(store, enc) {
     date: fmtDate(nowIso()),
     clientName: client ? client.name : 'Consumidor',
     clientContato: client ? [client.phone, client.address].filter(Boolean).join(' · ') : '',
-    items: enc.itens.map((it) => { const p = store.get('products', it.productId); return { name: p ? p.name : '(produto)', qty: it.qty, unitPrice: it.unitPrice, total: (Number(it.qty) || 0) * (Number(it.unitPrice) || 0) }; }),
+    items: enc.itens.map((it) => { const p = store.get('products', it.productId); const composition = bundleCompositionText(store, it); return { name: `${p ? p.name : '(produto)'}${composition ? ` (${composition})` : ''}`, qty: it.qty, unitPrice: it.unitPrice, total: (Number(it.qty) || 0) * (Number(it.unitPrice) || 0) }; }),
     referente: `pedido de ${fmtDate(enc.deliveryDate)}`,
+    subtotal: (Number(enc.total) || 0) + (Number(enc.discount) || 0),
+    desconto: Number(enc.discount) || 0,
     total: enc.total || 0,
     pago: st.paid,
+    descontoQuitacao: st.discounted || 0,
     saldo: st.saldo,
     forma: formas.size === 1 ? [...formas][0] : undefined,
     observacoes: enc.notes || undefined,
@@ -2039,14 +2386,14 @@ function fiadoPanel(ctx) {
   const { store } = ctx;
   const { fiadoStart: start, fiadoEnd: end, fiadoStatus: status } = ctx.view;
   let orders = store.state.encomendas.filter((e) => !e.desistenciaAt && inDateRange(e.deliveryDate, start, end));
-  if (status === 'aberto') orders = orders.filter((e) => (e.total || 0) - store.paidFor(e.id) > 0.005);
-  else if (status === 'recebidos') orders = orders.filter((e) => (e.total || 0) - store.paidFor(e.id) <= 0.005);
+  if (status === 'aberto') orders = orders.filter((e) => paymentStatus(store, e).saldo > 0.005);
+  else if (status === 'recebidos') orders = orders.filter((e) => paymentStatus(store, e).saldo <= 0.005);
   const grouped = new Map();
   for (const e of orders) {
     const key = e.clienteId || '__sem__';
     const g = grouped.get(key) || { key, orders: [], total: 0, received: 0, pending: 0 };
-    const paid = Math.min(Number(e.total) || 0, Math.max(0, store.paidFor(e.id)));
-    g.orders.push(e); g.total += Number(e.total) || 0; g.received += paid; g.pending += Math.max(0, (Number(e.total) || 0) - paid);
+    const statusRow = paymentStatus(store, e); const paid = Math.min(Number(e.total) || 0, statusRow.paid);
+    g.orders.push(e); g.total += Number(e.total) || 0; g.received += paid; g.pending += statusRow.saldo;
     grouped.set(key, g);
   }
   const groups = [...grouped.values()].sort((a, b) => {
@@ -2135,6 +2482,60 @@ const paymentMethodSelect = (store, testid, selected = '') => {
 };
 const dateIso = (value) => value ? new Date(`${value}T12:00:00`).toISOString() : nowIso();
 
+function dashboardProfitLine(series) {
+  const width = 360; const height = 155; const left = 38; const right = 10; const top = 14; const bottom = 28;
+  const values = series.map((row) => Number(row.profit) || 0);
+  const minimum = Math.min(0, ...values); const maximum = Math.max(0, ...values);
+  const range = Math.max(1, maximum - minimum); const plotWidth = width - left - right; const plotHeight = height - top - bottom;
+  const x = (index) => left + (series.length <= 1 ? plotWidth / 2 : index * plotWidth / (series.length - 1));
+  const y = (value) => top + (maximum - value) * plotHeight / range;
+  const zeroY = y(0); const labelEvery = Math.max(1, Math.ceil(series.length / 6));
+  const children = [
+    svgEl('line', { x1: left, y1: zeroY, x2: width - right, y2: zeroY, stroke: 'var(--au-border)', 'stroke-width': 1 }),
+    svgEl('text', { x: left - 4, y: top + 4, 'text-anchor': 'end', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(maximum)}`),
+    svgEl('text', { x: left - 4, y: height - bottom, 'text-anchor': 'end', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(minimum)}`),
+  ];
+  if (series.length) {
+    const points = series.map((row, index) => `${x(index)},${y(Number(row.profit) || 0)}`).join(' ');
+    children.push(svgEl('polyline', { points, fill: 'none', stroke: 'var(--pa-teal)', 'stroke-width': 3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+    series.forEach((row, index) => {
+      const value = Number(row.profit) || 0;
+      children.push(svgEl('circle', { cx: x(index), cy: y(value), r: 3.5, fill: value >= 0 ? 'var(--pa-teal)' : 'var(--pa-terra)' }, [svgEl('title', {}, `${row.label}: ${brl(value)}`)]));
+      if (index % labelEvery === 0 || index === series.length - 1) children.push(svgEl('text', { x: x(index), y: height - 9, 'text-anchor': 'middle', 'font-size': 8, fill: 'var(--au-fg-soft)' }, row.label));
+    });
+  }
+  return svgEl('svg', { viewBox: `0 0 ${width} ${height}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': 'Evolução do lucro gerencial', 'data-testid': 'dashboard-profit-chart' }, children);
+}
+
+function dashboardProductVolume(rows) {
+  const visible = rows.slice(0, 8); const width = 360; const left = 132; const right = 38; const rowHeight = 27; const height = Math.max(82, visible.length * rowHeight + 18);
+  const maximum = Math.max(1, ...visible.map((row) => Number(row.qty) || 0)); const plotWidth = width - left - right;
+  const children = [];
+  visible.forEach((row, index) => {
+    const y = 8 + index * rowHeight; const barWidth = Math.max(2, (Number(row.qty) || 0) * plotWidth / maximum);
+    const name = row.name.length > 21 ? row.name.slice(0, 20) + '…' : row.name;
+    children.push(svgEl('text', { x: left - 7, y: y + 14, 'text-anchor': 'end', 'font-size': 9, fill: 'var(--au-fg)' }, name));
+    children.push(svgEl('rect', { x: left, y: y + 3, width: barWidth, height: 15, rx: 5, fill: 'var(--pa-gold)' }, [svgEl('title', {}, `${row.name}: ${fmtNum(row.qty)} unidade(s)`) ]));
+    children.push(svgEl('text', { x: Math.min(width - right + 4, left + barWidth + 5), y: y + 14, 'font-size': 9, fill: 'var(--au-fg-soft)' }, fmtNum(row.qty)));
+  });
+  if (!visible.length) children.push(svgEl('text', { x: width / 2, y: height / 2, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--au-fg-soft)' }, 'Sem vendas no período'));
+  return svgEl('svg', { viewBox: `0 0 ${width} ${height}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': 'Volume de produtos vendidos', 'data-testid': 'dashboard-volume-chart' }, children);
+}
+
+function financeHomePanel(ctx) {
+  const quick = (icon, label, tab, tone = '') => el('button', { class: `pa-fin-home-link ${tone}`, onclick: () => ctx.actions.setTab(tab) }, [el('span', { class: 'pa-fin-home-icon', text: icon }), el('strong', { text: label })]);
+  return el('section', { class: 'pa-card pa-fin-home' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Central financeira' }), el('h2', { text: 'O que você quer consultar?' })])]),
+    el('p', { class: 'pa-hint', text: 'Todos os atalhos financeiros ficam reunidos aqui. Cada função aparece uma única vez.' }),
+    el('div', { class: 'pa-fin-home-grid' }, [
+      quick('▦', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('↓', 'Contas a receber', 'fin-receber'), quick('↑', 'Contas a pagar', 'fin-pagar'),
+      quick('↔', 'Fluxo de caixa', 'fin-fluxo'), quick('＋', 'Lançamentos', 'financeiro'), quick('▤', 'Recibo / Orçamento', 'fin-documentos'),
+      quick('🛒', 'Compras', 'fin-compras'), quick('☷', 'Plano de Contas', 'fin-plano'), quick('▥', 'Relatórios financeiros', 'fin-relatorios'),
+      quick('⌁', 'Relatório gerencial', 'relatorios'), quick('R$', 'Preços e custos', 'precos'), quick('≈', 'Simular preço', 'simulador'),
+    ]),
+  ]);
+}
+
 function financeDashboardPanel(ctx) {
   const { store, view } = ctx;
   const start = view.dashboardStart; const end = view.dashboardEnd; const presetKey = view.dashboardPreset || 'mes';
@@ -2146,10 +2547,10 @@ function financeDashboardPanel(ctx) {
   const overdueReceivable = receivableRows.filter((row) => row.status === 'vencido').reduce((sum, row) => sum + row.balance, 0);
   const overduePayable = payableRows.filter((row) => row.status === 'vencido').reduce((sum, row) => sum + row.balance, 0);
   const decision = businessPeriodSummary(store, start, end);
+  const profitTrend = businessProfitTrend(store, start, end);
   const preset = (key, label) => el('button', { class: 'pa-chip' + (presetKey === key ? ' pa-chip-on' : ''), 'data-testid': `dashboard-${key}`, onclick: () => { if (key === 'personalizado') ctx.actions.setDashboardView({ dashboardPreset: key }); else { const [s, e] = presetRange(key); ctx.actions.setDashboardView({ dashboardPreset: key, dashboardStart: s, dashboardEnd: e }); } } }, label);
   const productQty = (row) => { const p = row ? store.get('products', row.id) : null; return row ? `${fmtNum(row.qty)} ${p?.saleUnit || 'un'}` : 'Sem dados'; };
   const insight = (label, title, detail, tone = 'soft') => el('section', { class: `pa-insight pa-insight-${tone}` }, [el('span', { class: 'pa-eyebrow', text: label }), el('strong', { text: title || 'Sem dados no período' }), detail && el('span', { class: 'pa-muted', text: detail })].filter(Boolean));
-  const quick = (label, tab, tone = '') => el('button', { class: `pa-btn ${tone}`, onclick: () => ctx.actions.setTab(tab) }, label);
   return el('section', { class: 'pa-card pa-fin-hero' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Visão financeira e comercial' }), el('h2', { text: 'Dashboard do negócio' })])]),
     el('div', { class: 'pa-chiprow' }, [preset('hoje', 'Hoje'), preset('semana', 'Semana'), preset('mes', 'Mês'), preset('ano', 'Ano'), preset('personalizado', 'Período específico')]),
@@ -2159,6 +2560,10 @@ function financeDashboardPanel(ctx) {
     el('p', { class: 'pa-hint', text: 'Caixa realizado mostra somente dinheiro que entrou ou saiu. Indicadores de vendas usam a data da venda ou da entrega agendada.' }),
     el('div', { class: 'pa-statgrid' }, [statCard('Entradas do período', brl(flow.totalIn), 'ok'), statCard('Saídas do período', brl(flow.totalOut), flow.totalOut ? 'warn' : 'soft'), statCard('Saldo do período', brl(flow.totalIn - flow.totalOut), flow.totalIn - flow.totalOut >= 0 ? 'navy' : 'bad')]),
     el('div', { class: 'pa-statgrid' }, [statCard('A receber no período', brl(receivable), receivable ? 'warn' : 'soft'), statCard('A pagar no período', brl(payable), payable ? 'warn' : 'soft'), statCard('Vencido a receber', brl(overdueReceivable), overdueReceivable ? 'bad' : 'ok'), statCard('Vencido a pagar', brl(overduePayable), overduePayable ? 'bad' : 'ok')]),
+    el('div', { class: 'pa-dashboard-chartgrid' }, [
+      el('section', { class: 'pa-detail-card' }, [el('h3', { class: 'pa-h3', text: 'Evolução do lucro' }), dashboardProfitLine(profitTrend), el('p', { class: 'pa-hint', text: 'Resultado gerencial por competência, agrupado por dia, semana ou mês conforme o período.' })]),
+      el('section', { class: 'pa-detail-card' }, [el('h3', { class: 'pa-h3', text: 'Volume de produtos vendidos' }), dashboardProductVolume(decision.soldProducts), el('p', { class: 'pa-hint', text: 'Quantidade dos produtos vendidos no período, do maior para o menor volume.' })]),
+    ]),
     el('h3', { class: 'pa-h3', text: 'Clientes' }),
     el('div', { class: 'pa-insight-grid' }, [
       insight('Maior frequência', decision.mostFrequentClient?.name, decision.mostFrequentClient ? `${decision.mostFrequentClient.orders} compra(s) · ${brl(decision.mostFrequentClient.total)}` : null, 'teal'),
@@ -2174,7 +2579,6 @@ function financeDashboardPanel(ctx) {
       insight('Produtos sem vendas', String(decision.productsWithoutSales), 'Itens do catálogo sem venda no período selecionado'),
     ]),
     decision.soldProducts.some((p) => p.qty > 0 && p.marginPct == null) && el('p', { class: 'pa-callout', text: 'Alguns produtos vendidos ainda não têm margem calculável. Complete os preços dos insumos e a ficha técnica da receita.' }),
-    el('div', { class: 'pa-actiongrid' }, [quick('Contas a receber', 'fin-receber', 'pa-primary'), quick('Contas a pagar', 'fin-pagar'), quick('Fluxo de caixa', 'fin-fluxo'), quick('Lançamentos', 'financeiro'), quick('Recibo / Orçamento', 'fin-documentos'), quick('Compras', 'fin-compras'), quick('Plano de Contas', 'fin-plano'), quick('Relatórios financeiros', 'fin-relatorios'), quick('Relatório gerencial', 'relatorios'), quick('Preços e custos', 'precos'), quick('Simular preço', 'simulador')]),
   ].filter(Boolean));
 }
 
@@ -2207,7 +2611,7 @@ function financeTitlePanel(ctx, direction) {
   ].filter(Boolean));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
-    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Abra um título para receber total ou parcialmente; use Ficha do cliente para consultar e imprimir compras, produtos e pagamentos.' : 'Registre vencimentos antes de pagar. Compras de insumos também geram contas automaticamente.' }),
+    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Abra um título para receber total ou parcialmente; use Ficha do cliente para consultar e imprimir compras, produtos e pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
     periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), `fin-${direction}`),
     el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente' : 'Fornecedor', partyFilter), field('Categoria', catFilter), direction === 'receber' && field('Forma de pagamento', methodFilter)].filter(Boolean)),
     el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), chip('parcial', 'Parciais'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), chip('todos', 'Todos')]),
@@ -2326,11 +2730,13 @@ function commercialDocumentSheet(ctx, modal = {}) {
     lines.push(line); itemsBox.append(line.row); renderTotals();
   }
 
-  const orderItems = order ? (order.itens || []).map((item) => ({
-    productId: item.productId, name: store.get('products', item.productId)?.name || '(produto removido)',
-    qty: Number(item.qty) || 0, unitPrice: Number(item.unitPrice) || 0,
-  })) : [];
-  if (order && Number(order.frete) > 0) orderItems.push({ name: 'Frete / entrega', qty: 1, unitPrice: Number(order.frete) });
+  const orderGross = order ? (order.itens || []).reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), Number(order.frete) || 0) : 0;
+  const orderFactor = orderGross > 0 ? Math.max(0, Number(order.total) || 0) / orderGross : 1;
+  const orderItems = order ? (order.itens || []).map((item) => {
+    const composition = bundleCompositionText(store, item);
+    return { productId: item.productId, name: `${store.get('products', item.productId)?.name || '(produto removido)'}${composition ? ` (${composition})` : ''}`, qty: Number(item.qty) || 0, unitPrice: (Number(item.unitPrice) || 0) * orderFactor };
+  }) : [];
+  if (order && Number(order.frete) > 0) orderItems.push({ name: 'Frete / entrega', qty: 1, unitPrice: Number(order.frete) * orderFactor });
   if (orderItems.length) orderItems.forEach(addLine); else addLine();
   client.addEventListener('change', renderClient); type.addEventListener('change', renderType);
   validity.addEventListener('change', renderTotals); paid.input.addEventListener('input', renderTotals);
@@ -2398,11 +2804,11 @@ function clientStatementSheet(ctx, modal = {}) {
 
   const currentStatement = () => clientFinancialStatement(store, client.value, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
   const movementRow = (row) => {
-    const purchase = row.type === 'purchase'; const payment = row.type === 'payment';
+    const purchase = row.type === 'purchase'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount';
     return el('section', { class: 'pa-detail-card', 'data-testid': `client-statement-${row.type}` }, [
       el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
-        el('strong', { class: payment ? 'pa-positive' : 'pa-num', text: `${payment ? '+ ' : ''}${brl(row.amount)}` }),
+        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
+        el('strong', { class: payment ? 'pa-positive' : discountRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow ? '− ' : ''}${brl(row.amount)}` }),
       ]),
       purchase && el('ul', { class: 'pa-list pa-tight' }, row.items.map((item) => el('li', { class: 'pa-list-item' }, [
         el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)}× ${item.name}` }),
@@ -2410,9 +2816,11 @@ function clientStatementSheet(ctx, modal = {}) {
         el('strong', { class: 'pa-num', text: brl(item.total) }),
       ]))),
       purchase && el('p', { class: 'pa-muted', text: [`Entrega: ${row.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, row.freight > 0 && `Frete ${brl(row.freight)}`, row.notes && `Obs.: ${row.notes}`].filter(Boolean).join(' · ') }),
+      purchase && row.discount > 0 && el('p', { class: 'pa-badge pa-ok', text: `Desconto da venda: ${brl(row.discount)}` }),
       !purchase && el('p', { class: 'pa-muted', text: `${row.description}${payment && row.method ? ` · ${row.method}` : ''}` }),
-      !payment && el('div', { class: 'pa-row' }, [
+      !payment && !discountRow && el('div', { class: 'pa-row' }, [
         el('span', { class: 'pa-muted pa-grow', text: `Recebido ${brl(row.paid)}` }),
+        row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
         el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : 'quitado' }),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: client.value, orderId: row.orderId }) }, 'Gerar recibo'),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
@@ -2465,14 +2873,15 @@ function financeTitleDetailSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'Título não encontrado', rows: [] }); const state = titleState(ctx.store, title); const settlements = titleSettlements(ctx.store, title); const cat = title.categoryId ? ctx.store.get('categories', title.categoryId) : null;
   const history = settlements.length ? el('ul', { class: 'pa-list pa-tight' }, settlements.slice().sort((a, b) => a.at < b.at ? 1 : -1).map((s) => {
     const correctionKind = s.legacyKind === 'payment' ? 'payment' : ctx.store.get('financeSettlements', s.id) ? 'financeSettlement' : null;
-    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: s.method || 'Forma não informada' })]), el('strong', { class: 'pa-positive', text: brl(s.amount) }), correctionKind && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
+    const isDiscount = s.kind === 'discount';
+    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), correctionKind && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
   })) : el('p', { class: 'pa-empty', text: 'Nenhuma baixa registrada.' });
   const editAction = title.sourceType === 'manual' && !title.cancelledAt
     ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-title-edit', id: title.id }) }, 'Editar valor e dados')
     : title.sourceType === 'encomenda' && title.sourceId
       ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: title.sourceId }) }, 'Editar encomenda')
       : null;
-  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])]), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
+  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
   return sheet({ title: title.direction === 'receber' ? 'Detalhe a receber' : 'Detalhe a pagar', rows, danger: !title.cancelledAt && state.balance > 0.005 ? { label: 'Cancelar título', testid: 'fin-title-cancel', onClick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Cancelar título?', message: 'O histórico e as baixas já realizadas serão preservados.', yesLabel: 'Cancelar título', onYes: () => ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, cancelledAt: nowIso() })) }) } : null });
 }
 
@@ -2491,7 +2900,7 @@ function financeTitleEditSheet(ctx, id) {
   const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
-    const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.paid) { amount.input.setCustomValidity(`O valor não pode ser menor que o já quitado (${brl(state.paid)}).`); amount.input.reportValidity(); return; }
+    const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.settled) { amount.input.setCustomValidity(`O valor não pode ser menor que o já baixado (${brl(state.settled)}).`); amount.input.reportValidity(); return; }
     const selectedParty = parties.find((p) => p.id === party.value);
     ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyId: selectedParty?.id, partyName: selectedParty?.name || title.partyName || (isReceive ? 'Outro cliente' : 'Outro fornecedor'), expectedMethod: method.value, notes: notes.value.trim() || undefined }));
   }
@@ -2503,6 +2912,7 @@ function financeSettlementEditSheet(ctx, m) {
   const title = ctx.store.get('financeTitles', m.titleId); const isPayment = m.settlementKind === 'payment';
   const original = isPayment ? ctx.store.get('payments', m.settlementId) : ctx.store.get('financeSettlements', m.settlementId);
   if (!title || !original) return sheet({ title: 'Pagamento não encontrado', rows: [] });
+  const isDiscount = !isPayment && original.kind === 'discount';
   const state = titleState(ctx.store, title); const oldAmount = Number(isPayment ? original.valor : original.amount) || 0;
   const date = el('input', { class: 'pa-input', type: 'date', value: dateOnly(original.at), 'data-testid': 'fin-correct-date' });
   const amount = moneyField(oldAmount, 'fin-correct-amount');
@@ -2511,24 +2921,33 @@ function financeSettlementEditSheet(ctx, m) {
   const account = el('select', { class: 'pa-input', 'data-testid': 'fin-correct-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name, ...(!isPayment && original.accountId === a.id ? { selected: 'selected' } : {}) })));
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
-    const value = parseNum(amount.input.value); const otherPaid = Math.max(0, state.paid - oldAmount); const maximum = Math.max(0, title.amount - otherPaid);
+    const value = parseNum(amount.input.value); const otherSettled = Math.max(0, state.settled - oldAmount); const maximum = Math.max(0, title.amount - otherSettled);
     if (!(value > 0) || value > maximum + 0.005) { amount.input.setCustomValidity(`O valor máximo para este lançamento é ${brl(maximum)}.`); amount.input.reportValidity(); return; }
     ctx.actions.mutate((s) => {
       s.addReversal({ id: uuid(), at: nowIso(), kind: isPayment ? 'payment' : 'financeSettlement', refId: original.id });
       if (isPayment) s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: original.encomendaId, valor: value, forma: method.value });
-      else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, method: method.value, accountId: account.value || undefined, notes: `Correção do lançamento de ${fmtDate(original.at)}` });
-      if (title.sourceType === 'manual' && state.balance <= 0.005) s.upsertFinanceTitle({ ...title, amount: otherPaid + value });
+      else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: isDiscount ? 'discount' : 'payment', ...(isDiscount ? {} : { method: method.value, accountId: account.value || undefined }), notes: `Correção do lançamento de ${fmtDate(original.at)}` });
+      if (title.sourceType === 'manual' && state.balance <= 0.005) s.upsertFinanceTitle({ ...title, amount: otherSettled + value });
     });
   }
-  return sheet({ title: title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A correção não apaga o registro anterior: ele será estornado e o novo valor ficará no histórico.' }), field('Data', date), field('Valor correto', amount), field('Forma', method), !isPayment && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
+  return sheet({ title: isDiscount ? 'Corrigir desconto' : title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A correção não apaga o registro anterior: ele será estornado e o novo valor ficará no histórico.' }), field('Data', date), field('Valor correto', amount), !isDiscount && field('Forma', method), !isPayment && !isDiscount && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
 }
 
 MODALS['finance-settle'] = (ctx, m) => financeSettleSheet(ctx, m.id);
 function financeSettleSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title); if (!title || !state) return sheet({ title: 'Título não encontrado', rows: [] });
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
-  function save() { const value = parseNum(amount.input.value); if (!(value > 0) || value > state.balance + 0.005) { amount.input.focus(); return; } ctx.actions.mutate((s) => { if (title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value }); else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined }); }); }
-  return sheet({ title: title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field('Valor', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'fin-settle-save' });
+  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const discount = moneyField(null, 'fin-settle-discount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
+  const isReceivable = title.direction === 'receber';
+  function save() {
+    const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
+    if (!(value + discountValue > 0) || value + discountValue > state.balance + 0.005) { amount.input.focus(); return; }
+    ctx.actions.mutate((s) => {
+      if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
+      else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
+      if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
+    });
+  }
+  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: 'O valor recebido entra no caixa. O desconto apenas reduz o saldo do cliente e ficará identificado no histórico.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
 }
 
 function presetRange(key) {
@@ -2569,7 +2988,7 @@ function financeCashFlowPanel(ctx) {
   });
   const pendingRows = pending.map((r) => {
     const title = r.title; const isIn = title.direction === 'receber'; const overdue = r.status === 'vencido'; const cat = title.categoryId ? store.get('categories', title.categoryId) : null;
-    const meta = [isIn ? 'A receber' : 'A pagar', cat?.name, r.paid > 0.005 ? `Parcial · já quitado ${brl(r.paid)}` : null].filter(Boolean).join(' · ');
+    const meta = [isIn ? 'A receber' : 'A pagar', cat?.name, r.settled > 0.005 ? `Parcial · já baixado ${brl(r.settled)}` : null].filter(Boolean).join(' · ');
     return el('button', { class: `pa-cash-row pa-cash-pending ${isIn ? 'pa-cash-in' : 'pa-cash-out'}${overdue ? ' pa-cash-overdue' : ''}`, 'data-testid': 'fin-flow-pending-row', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [el('time', { class: 'pa-cash-date', datetime: dateOnly(title.dueDate), text: fmtDate(title.dueDate) }), el('div', { class: 'pa-cash-description' }, [el('div', {}, [el('strong', { text: title.partyName || title.description }), overdue && el('span', { class: 'pa-badge pa-warn', text: 'Vencido' })].filter(Boolean)), el('span', { class: 'pa-muted', text: `${title.description} · ${meta}` })]), el('strong', { class: `pa-cash-value ${isIn ? 'pa-positive' : 'pa-bad'}`, text: `${isIn ? '+' : '−'} ${brl(r.balance)}` })]);
   });
 
@@ -2631,7 +3050,23 @@ function drePreviewSheet(ctx, modal = {}) {
 
 function financePurchasesPanel(ctx) {
   const rows = ctx.store.state.purchases.slice().sort((a, b) => a.at < b.at ? 1 : -1);
-  return el('section', { class: 'pa-card' }, [el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Fornecedores e insumos' }), el('h2', { text: 'Compras' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'purchase-new', onclick: () => ctx.actions.openModal({ kind: 'purchase-add' }) }, '+ Compra')]), el('p', { class: 'pa-hint', text: 'A compra atualiza o último fornecedor e o preço do insumo, além de gerar a conta a pagar sem duplicidade.' }), rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows.map((p) => { const supplier = p.supplierId ? ctx.store.get('suppliers', p.supplierId) : null; const title = p.titleId ? ctx.store.get('financeTitles', p.titleId) : null; const st = title ? titleState(ctx.store, title) : null; return el('li', { class: 'pa-row-item', onclick: () => title && ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('strong', { text: supplier?.name || 'Sem fornecedor' }), st && titleBadge(st.status)]), el('span', { class: 'pa-muted', text: `${fmtDate(p.at)} · ${(p.items || []).map((it) => ctx.store.get('ingredients', it.ingredientId)?.name).filter(Boolean).join(', ')}` })]), el('strong', { class: 'pa-num', text: brl(p.total) }), el('span', { class: 'pa-chev', text: '›' })]); })) : el('p', { class: 'pa-empty', text: 'Nenhuma compra registrada.' })]);
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Fornecedores e insumos' }), el('h2', { text: 'Compras' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'purchase-new', onclick: () => ctx.actions.openModal({ kind: 'purchase-add' }) }, '+ Compra')]),
+    el('p', { class: 'pa-hint', text: 'Toda compra atualiza preço, fornecedor, histórico e estoque. Você decide no lançamento se ela também deve entrar no Contas a Pagar.' }),
+    rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows.map((purchase) => {
+      const supplier = purchase.supplierId ? ctx.store.get('suppliers', purchase.supplierId) : null;
+      const title = purchase.titleId ? ctx.store.get('financeTitles', purchase.titleId) : null;
+      const state = title ? titleState(ctx.store, title) : null;
+      return el('li', { class: 'pa-row-item', onclick: () => title && ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [
+        el('div', { class: 'pa-grow' }, [
+          el('div', { class: 'pa-enc-title' }, [el('strong', { text: supplier?.name || 'Sem fornecedor' }), state ? titleBadge(state.status) : el('span', { class: 'pa-badge', text: 'Somente estoque' })]),
+          el('span', { class: 'pa-muted', text: `${fmtDate(purchase.at)} · ${(purchase.items || []).map((item) => ctx.store.get('ingredients', item.ingredientId)?.name).filter(Boolean).join(', ')}` }),
+        ]),
+        el('strong', { class: 'pa-num', text: brl(purchase.total) }),
+        title && el('span', { class: 'pa-chev', text: '›' }),
+      ].filter(Boolean));
+    })) : el('p', { class: 'pa-empty', text: 'Nenhuma compra registrada.' }),
+  ]);
 }
 
 MODALS['purchase-add'] = (ctx) => purchaseAddSheet(ctx);
@@ -2639,12 +3074,38 @@ function purchaseAddSheet(ctx) {
   const { store } = ctx; const suppliers = store.state.suppliers.filter((s) => !s.archived); const ingredients = store.state.ingredients;
   if (!suppliers.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre pelo menos um fornecedor antes da primeira compra.' }), el('button', { class: 'pa-btn pa-primary', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Cadastrar fornecedor')] });
   if (!ingredients.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre os insumos antes de registrar uma compra.' })] });
-  const supplier = el('select', { class: 'pa-input', 'data-testid': 'purchase-supplier' }, suppliers.map((s) => el('option', { value: s.id, text: s.name }))); const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-date' }); const due = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-due' }); const situation = el('select', { class: 'pa-input', 'data-testid': 'purchase-situation' }, [el('option', { value: 'pendente', text: 'Pagar depois' }), el('option', { value: 'quitado', text: 'Pago agora' })]); const method = paymentMethodSelect(store, 'purchase-method'); const account = el('select', { class: 'pa-input', 'data-testid': 'purchase-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
+  const supplier = el('select', { class: 'pa-input', 'data-testid': 'purchase-supplier' }, suppliers.map((s) => el('option', { value: s.id, text: s.name })));
+  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-date' });
+  const financeChoice = el('select', { class: 'pa-input', 'data-testid': 'purchase-finance' }, [el('option', { value: 'sim', text: 'Sim · criar no Contas a Pagar' }), el('option', { value: 'nao', text: 'Não · somente histórico e estoque' })]);
+  const due = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-due' });
+  const situation = el('select', { class: 'pa-input', 'data-testid': 'purchase-situation' }, [el('option', { value: 'pendente', text: 'Pagar depois' }), el('option', { value: 'quitado', text: 'Pago agora' })]);
+  const method = paymentMethodSelect(store, 'purchase-method');
+  const account = el('select', { class: 'pa-input', 'data-testid': 'purchase-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
+  const payableCategories = activeFinanceCategories(store, 'pagar');
+  const defaultCategory = categoryByKey(store, 'insumos');
+  const category = el('select', { class: 'pa-input', 'data-testid': 'purchase-category' }, payableCategories.map((item) => el('option', { value: item.id, text: `${item.code ? `${item.code} · ` : ''}${item.name}`, ...(item.id === defaultCategory?.id ? { selected: 'selected' } : {}) })));
   const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = [];
   function addLine() { const index = lines.length; const ing = el('select', { class: 'pa-input', 'data-testid': `purchase-item-${index}` }, ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` }))); const qty = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0.001', step: 'any', value: '1', 'data-testid': `purchase-qty-${index}` }); const price = moneyField(null, `purchase-price-${index}`); const line = { ing, qty, price, row: null }; line.row = el('div', { class: 'pa-detail-card' }, [field('Insumo/embalagem', ing), el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Preço por unidade de compra', price)]), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); } }, 'Remover item')]); lines.push(line); itemsBox.append(line.row); }
   addLine();
-  function save() { const items = lines.map((l) => ({ ingredientId: l.ing.value, qty: Number(l.qty.value) || 0, unitPrice: parseNum(l.price.input.value) || 0 })).filter((x) => x.qty > 0 && x.unitPrice > 0); if (!items.length) return; const total = items.reduce((s, x) => s + x.qty * x.unitPrice, 0); const purchaseId = uuid(); const titleId = uuid(); const sup = store.get('suppliers', supplier.value); const isPackaging = items.every((x) => { const i = store.get('ingredients', x.ingredientId); return norm(`${i?.name} ${(i?.tags || []).join(' ')}`).includes('embalag'); }); const cat = categoryByKey(store, isPackaging ? 'embalagens' : 'insumos'); ctx.actions.mutate((s) => { s.upsertPurchase({ id: purchaseId, at: dateIso(date.value), supplierId: supplier.value, items, total, titleId }); s.upsertFinanceTitle({ id: titleId, direction: 'pagar', issuedAt: dateIso(date.value), competenceDate: dateIso(date.value), dueDate: dateIso(due.value), amount: total, description: `Compra · ${sup?.name || 'Fornecedor'}`, categoryId: cat?.id, partyType: 'fornecedor', partyId: supplier.value, partyName: sup?.name || 'Fornecedor', expectedMethod: method.value, sourceType: 'compra', sourceId: purchaseId }); for (const item of items) { const ing = s.get('ingredients', item.ingredientId); s.addPriceChange({ id: uuid(), at: dateIso(date.value), ingredientId: item.ingredientId, price: item.unitPrice }); if (ing) s.upsertIngredient({ ...ing, lastSupplier: sup?.name || ing.lastSupplier }); } if (situation.value === 'quitado') s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId, amount: total, method: method.value, accountId: account.value || undefined }); }); }
-  return sheet({ title: 'Registrar compra', rows: [field('Fornecedor', supplier), el('div', { class: 'pa-filtergrid' }, [field('Data da compra', date), field('Vencimento', due)]), itemsBox, el('button', { class: 'pa-btn', onclick: addLine }, '+ Adicionar item'), field('Situação', situation), field('Forma de pagamento', method), field('Conta financeira', account), el('p', { class: 'pa-hint', text: 'Informe o preço por kg, litro ou unidade — a mesma unidade cadastrada no insumo.' })], onSave: save, saveTestid: 'purchase-save' });
+  const financeFields = el('section', { class: 'pa-detail-card', 'data-testid': 'purchase-finance-fields' }, [
+    field('Categoria no Plano de Contas', category),
+    el('div', { class: 'pa-filtergrid' }, [field('Vencimento', due), field('Situação', situation)]),
+    field('Forma de pagamento', method), field('Conta financeira', account),
+  ]);
+  const syncFinanceVisibility = () => { financeFields.style.display = financeChoice.value === 'sim' ? '' : 'none'; };
+  financeChoice.addEventListener('change', syncFinanceVisibility); syncFinanceVisibility();
+  function save() {
+    const items = lines.map((line) => ({ ingredientId: line.ing.value, qty: parseNum(line.qty.value) || 0, unitPrice: parseNum(line.price.input.value) || 0 })).filter((item) => item.qty > 0 && item.unitPrice > 0);
+    if (!items.length) return;
+    const total = items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0); const purchaseId = uuid(); const financiallyTracked = financeChoice.value === 'sim'; const titleId = financiallyTracked ? uuid() : undefined; const selectedSupplier = store.get('suppliers', supplier.value);
+    ctx.actions.mutate((nextStore) => {
+      nextStore.upsertPurchase({ id: purchaseId, at: dateIso(date.value), supplierId: supplier.value, items, total, financiallyTracked, ...(titleId ? { titleId } : {}) });
+      if (financiallyTracked) nextStore.upsertFinanceTitle({ id: titleId, direction: 'pagar', issuedAt: dateIso(date.value), competenceDate: dateIso(date.value), dueDate: dateIso(due.value), amount: total, description: `Compra · ${selectedSupplier?.name || 'Fornecedor'}`, categoryId: category.value || undefined, partyType: 'fornecedor', partyId: supplier.value, partyName: selectedSupplier?.name || 'Fornecedor', expectedMethod: method.value, sourceType: 'compra', sourceId: purchaseId });
+      for (const item of items) { const ingredient = nextStore.get('ingredients', item.ingredientId); nextStore.addPriceChange({ id: uuid(), at: dateIso(date.value), ingredientId: item.ingredientId, price: item.unitPrice }); if (ingredient) nextStore.upsertIngredient({ ...ingredient, lastSupplier: selectedSupplier?.name || ingredient.lastSupplier, shoppingHidden: false }); }
+      if (financiallyTracked && situation.value === 'quitado') nextStore.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId, amount: total, method: method.value, accountId: account.value || undefined });
+    });
+  }
+  return sheet({ title: 'Registrar compra', rows: [field('Fornecedor', supplier), field('Data da compra', date), itemsBox, el('button', { class: 'pa-btn', onclick: addLine }, '+ Adicionar item'), field('Entrar no Contas a Pagar?', financeChoice), financeFields, el('p', { class: 'pa-hint', text: 'Se escolher “Não”, a compra atualizará preço, fornecedor, histórico e estoque, mas não entrará no Contas a Pagar nem na DRE.' }), el('p', { class: 'pa-hint', text: 'Informe o preço por kg, litro ou unidade — a mesma unidade cadastrada no insumo.' })], onSave: save, saveTestid: 'purchase-save' });
 }
 
 function financeChartPanel(ctx) {
@@ -2654,8 +3115,20 @@ function financeChartPanel(ctx) {
 
 MODALS['finance-suppliers'] = (ctx) => financeSuppliersSheet(ctx);
 function financeSuppliersSheet(ctx) {
-  const name = el('input', { class: 'pa-input pa-grow', type: 'text', placeholder: 'Nome do fornecedor', 'data-testid': 'supplier-name' }); const rows = ctx.store.state.suppliers.map((s) => el('li', { class: 'pa-list-item' + (s.archived ? ' pa-reversed' : '') }, [el('span', { class: 'pa-grow', text: s.name }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((st) => st.upsertSupplier({ ...s, archived: !s.archived })) }, s.archived ? 'Reativar' : 'Arquivar')]));
-  return sheet({ title: 'Fornecedores', rows: [el('div', { class: 'pa-row' }, [name, el('button', { class: 'pa-btn pa-primary', 'data-testid': 'supplier-add', onclick: () => { if (name.value.trim()) ctx.actions.mutateModal((s) => s.upsertSupplier({ id: uuid(), name: name.value.trim() })); } }, '+ Adicionar')]), rows.length ? el('ul', { class: 'pa-list pa-tight' }, rows) : el('p', { class: 'pa-empty', text: 'Nenhum fornecedor cadastrado.' })] });
+  const name = el('input', { class: 'pa-input', type: 'text', placeholder: 'Nome do fornecedor', 'data-testid': 'supplier-name' });
+  const birthday = el('input', { class: 'pa-input', type: 'date', 'data-testid': 'supplier-birthday' });
+  const rows = ctx.store.state.suppliers.map((supplier) => {
+    const editName = el('input', { class: 'pa-input', type: 'text', value: supplier.name });
+    const editBirthday = el('input', { class: 'pa-input', type: 'date', value: supplier.birthday || '' });
+    return el('section', { class: `pa-detail-card${supplier.archived ? ' pa-reversed' : ''}` }, [
+      el('div', { class: 'pa-filtergrid' }, [field('Nome', editName), field('Data de aniversário', editBirthday)]),
+      el('div', { class: 'pa-row' }, [
+        el('button', { class: 'pa-btn pa-primary pa-sm', onclick: () => ctx.actions.mutateModal((store) => store.upsertSupplier({ ...supplier, name: editName.value.trim() || supplier.name, birthday: editBirthday.value || undefined })) }, 'Salvar'),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((store) => store.upsertSupplier({ ...supplier, archived: !supplier.archived })) }, supplier.archived ? 'Reativar' : 'Arquivar'),
+      ]),
+    ]);
+  });
+  return sheet({ title: 'Fornecedores', rows: [el('div', { class: 'pa-filtergrid' }, [field('Nome', name), field('Data de aniversário', birthday)]), el('button', { class: 'pa-btn pa-primary', 'data-testid': 'supplier-add', onclick: () => { if (name.value.trim()) ctx.actions.mutateModal((store) => store.upsertSupplier({ id: uuid(), name: name.value.trim(), birthday: birthday.value || undefined })); } }, '+ Adicionar fornecedor'), ...rows] });
 }
 
 MODALS['finance-accounts'] = (ctx) => financeAccountsSheet(ctx);
@@ -2793,7 +3266,8 @@ function financeiroPanel(ctx) {
   for (const st of store.state.financeSettlements) {
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
     const kind = store.get('categories', title.categoryId)?.nature;
-    movements.push({ id: st.id, at: st.at, type: title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: title.partyName || title.description, description: [title.description, st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id) });
+    const discount = st.kind === 'discount';
+    movements.push({ id: st.id, at: st.at, type: discount ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.description, discount ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount });
   }
   for (const title of store.state.financeTitles) {
     const state = titleState(store, title); if (title.cancelledAt || state.balance <= 0.005) continue;
@@ -3197,13 +3671,13 @@ function reportCsv(month, sum, despCat, byProduct, byClient) {
 // cost/un is invariant; only labor/gas/fixed per unit move with the new yield + minutes), then
 // compare cost, margin and profit at a fixed price.
 
-/** Per-unit cost breakdown of recipe `recipeId` as if its batch were scaled by `factor`, with new active/oven minutes. */
-function simulateRecipeBreakdown(store, recipeId, factor, active, oven, config) {
+/** Per-unit cost breakdown of recipe `recipeId` as if its batch were scaled, with editable times. */
+function simulateRecipeBreakdown(store, recipeId, factor, production, active, oven, config) {
   const real = store.get('recipes', recipeId);
   const sim = {
     ...real,
     yieldNominal: real.yieldNominal * factor,
-    activeMinutes: active, ovenMinutes: oven,
+    productionMinutes: production, activeMinutes: active, ovenMinutes: oven,
     components: real.components.map((c) => ({ ...c, qty: c.qty * factor })), // ingredients scale with the batch
   };
   const raw = {
@@ -3214,7 +3688,8 @@ function simulateRecipeBreakdown(store, recipeId, factor, active, oven, config) 
   };
   return costBreakdown(indexStore(raw), recipeId, config, estimateLens(config));
 }
-const breakdownTotal = (b) => b.ingredients + b.labor + b.gas + b.fixed;
+// Direct labor is diagnostic only: salaries and payroll charges already live in fixed costs.
+const breakdownTotal = (b) => b.ingredients + b.gas + b.fixed;
 
 function simuladorPanel(ctx) {
   const { store } = ctx;
@@ -3252,14 +3727,10 @@ function simuladorBody(ctx, recipe, config) {
   }
   const registeredExtras = Math.max(0, registeredProductCost - baseRecipeCost * recipeQty);
 
-  const fee = config.paymentFeePct;
-  // Lucro/hora: profit per unit ÷ hours of hands-on work per unit (labor cost / valorHora, like Preços).
-  const lucroHora = (b, lucroUnit) => {
-    const hpu = config.valorHora > 0 ? b.labor / config.valorHora : 0;
-    return hpu > 0 ? lucroUnit / hpu : null;
-  };
+  const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
   const fmtHora = (v) => (v == null ? '—' : brl(v));
   const factor = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-factor', type: 'text', inputmode: 'decimal', value: '1,5' });
+  const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-production', type: 'text', inputmode: 'numeric', value: String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) });
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
   const packaging = moneyField(registeredExtras, 'sim-packaging');
@@ -3270,44 +3741,68 @@ function simuladorBody(ctx, recipe, config) {
 
   function recompute() {
     let f = parseNum(factor.value); if (!(f > 0)) f = 1;
+    const t = parseNum(production.value) || 0;
     const a = parseNum(active.value) || 0;
     const o = parseNum(oven.value) || 0;
     const p = parseNum(price.input.value) || 0;
     const extras = Math.max(0, parseNum(packaging.input.value) || 0);
     const target = Math.max(0, (parseNum(targetMargin.value) || 0) / 100);
     let simBreak;
-    try { simBreak = simulateRecipeBreakdown(store, recipe.id, f, a, o, config); }
+    try { simBreak = simulateRecipeBreakdown(store, recipe.id, f, t, a, o, config); }
     catch (e) { results.replaceChildren(el('p', { class: 'pa-status', text: friendlyError(e) })); return; }
     const simRecipeCost = breakdownTotal(simBreak);
-    const baseCost = baseRecipeCost * recipeQty + registeredExtras;
-    const simCost = simRecipeCost * recipeQty + extras;
-    const margin = (cost) => (p > 0 ? 1 - fee - cost / p : 0);
-    const lucro = (cost) => p - cost - p * fee;
-    const divisor = 1 - fee - target;
-    const targetPrice = divisor > 0 ? simCost / divisor : null;
+    const baseYield = Number(recipe.yieldNominal) || 0;
+    const simYield = baseYield * f;
+    const baseProductUnits = recipeQty > 0 ? baseYield / recipeQty : 0;
+    const simProductUnits = recipeQty > 0 ? simYield / recipeQty : 0;
+    const baseRecipeTotal = baseRecipeCost * baseYield;
+    const simRecipeTotal = simRecipeCost * simYield;
+    const baseIngredientsTotal = baseBreak.ingredients * baseYield;
+    const simIngredientsTotal = simBreak.ingredients * simYield;
+    const baseLaborIndicator = baseBreak.labor * baseYield;
+    const simLaborIndicator = simBreak.labor * simYield;
+    const baseTotalCost = baseRecipeTotal + registeredExtras * baseProductUnits;
+    const simTotalCost = simRecipeTotal + extras * simProductUnits;
+    const baseRevenue = p * baseProductUnits;
+    const simRevenue = p * simProductUnits;
+    const totalProfit = (revenue, cost) => revenue - cost - revenue * salesRate;
+    const baseProfit = totalProfit(baseRevenue, baseTotalCost);
+    const simProfit = totalProfit(simRevenue, simTotalCost);
+    const margin = (revenue, cost) => revenue > 0 ? totalProfit(revenue, cost) / revenue : 0;
+    const baseProductionMinutes = Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0);
+    const profitHour = (profit, minutes) => minutes > 0 ? profit / (minutes / 60) : null;
+    const divisor = 1 - salesRate - target;
+    const simCostPerProduct = simProductUnits > 0 ? simTotalCost / simProductUnits : 0;
+    const targetPrice = divisor > 0 ? simCostPerProduct / divisor : null;
     const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
-    const reachedTarget = margin(simCost) + 0.0001 >= target;
+    const reachedTarget = margin(simRevenue, simTotalCost) + 0.0001 >= target;
     results.replaceChildren(el('table', { class: 'pa-kv pa-sim' }, [
       el('tr', { class: 'pa-sim-head' }, [el('td', {}), el('td', { class: 'pa-num', text: 'Atual' }), el('td', { class: 'pa-num', text: `${fmtNum(f)}×` })]),
-      el('tr', {}, [el('td', { text: 'Rendimento' }), ...col(recipe.yieldNominal, recipe.yieldNominal * f, (v) => `${fmtNum(v)} ${recipe.yieldUnit}`)]),
-      el('tr', {}, [el('td', { text: 'Custo por unidade' }), ...col(baseCost, simCost, brl)]),
-      el('tr', {}, [el('td', { text: `Margem a ${brl(p)}` }), el('td', { class: 'pa-num', text: pctStr(margin(baseCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simCost)) })]),
-      el('tr', {}, [el('td', { text: 'Lucro por unidade' }), ...col(lucro(baseCost), lucro(simCost), brl)]),
-      el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), ...col(lucroHora(baseBreak, lucro(baseCost)), lucroHora(simBreak, lucro(simCost)), fmtHora)]),
+      el('tr', {}, [el('td', { text: 'Rendimento da receita' }), ...col(baseYield, simYield, (v) => `${fmtNum(v)} ${recipe.yieldUnit}`)]),
+      el('tr', {}, [el('td', { text: 'Produtos obtidos' }), ...col(baseProductUnits, simProductUnits, fmtNum)]),
+      el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), ...col(baseIngredientsTotal, simIngredientsTotal, brl)]),
+      el('tr', {}, [el('td', { text: 'Custo total da receita' }), ...col(baseRecipeTotal, simRecipeTotal, brl)]),
+      el('tr', {}, [el('td', { text: 'Mão de obra direta (indicador)' }), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
+      el('tr', {}, [el('td', { text: 'Preço de venda total da receita' }), ...col(baseRevenue, simRevenue, brl)]),
+      el('tr', {}, [el('td', { text: `Margem a ${brl(p)}` }), el('td', { class: 'pa-num', text: pctStr(margin(baseRevenue, baseTotalCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simRevenue, simTotalCost)) })]),
+      el('tr', {}, [el('td', { text: 'Lucro total da receita' }), ...col(baseProfit, simProfit, brl)]),
+      el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), ...col(profitHour(baseProfit, baseProductionMinutes), profitHour(simProfit, t), fmtHora)]),
       el('tr', { class: 'pa-kv-total' }, [el('td', { text: `Preço para margem alvo de ${pctStr(target)}` }), el('td', { class: 'pa-num', text: '—' }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inválida' : brl(targetPrice) })]),
     ]), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simulação alcança a margem desejada com o preço informado.' : `A margem ficou abaixo da meta. Considere preço próximo de ${targetPrice == null ? '—' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
   }
-  [factor, active, oven, packaging.input, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
+  [factor, production, active, oven, packaging.input, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
   recompute();
 
   return el('div', {}, [
-    el('p', { class: 'pa-muted', text: `Atual: rende ${fmtNum(recipe.yieldNominal)} ${recipe.yieldUnit} · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno${product ? ` · produto ${product.name}` : ''}` }),
+    el('p', { class: 'pa-muted', text: `Atual: rende ${fmtNum(recipe.yieldNominal)} ${recipe.yieldUnit} · ${recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))}min de produção · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno${product ? ` · produto ${product.name}` : ''}` }),
     el('h3', { class: 'pa-h3', text: 'E se eu fizer um lote maior?' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Escala' }), factor, el('span', { class: 'pa-lab', text: '× a receita' })]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'min ativos' }), active, el('span', { class: 'pa-lab', text: 'min forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'Ingredientes e rendimento crescem com a escala. Ajuste os minutos para o lote maior — a mão de obra costuma subir pouco.' }),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção (min)' }), production]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
+    el('p', { class: 'pa-hint', text: 'Ajuste livremente rendimento, tempo, embalagem, margem e preço. Minutos ativos mostram o custo direto de trabalho como indicador, sem duplicá-lo no custo do produto.' }),
     el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada (%)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
+    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão consideradas na simulação: ${pctStr(salesRate)}.` }),
     results,
   ]);
 }
@@ -3325,7 +3820,7 @@ function automaticConfigSuggestions(store) {
   const end = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const actual = cashMovements(store).filter((m) => !m.transfer && dateOnly(m.at) >= start && dateOnly(m.at) <= end);
   const category = (m) => m.categoryId ? store.get('categories', m.categoryId) : null;
-  const fixedExcluded = new Set(['pro-labore', 'salarios', 'tarifas']);
+  const fixedExcluded = new Set(['tarifas']);
   const fixed = actual.filter((m) => {
     const c = category(m);
     return m.direction === 'saida' && c && (c.kind === 'despesaFixa' || c.behavior === 'fixa') && !fixedExcluded.has(c.systemKey);
@@ -3333,7 +3828,7 @@ function automaticConfigSuggestions(store) {
   const fixedMonths = new Set(fixed.map((m) => dateOnly(m.at).slice(0, 7)));
   const fixedTotal = fixed.reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
   const gasTotal = actual.filter((m) => m.direction === 'saida' && category(m)?.systemKey === 'gas-producao').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const laborTotal = actual.filter((m) => m.direction === 'saida' && category(m)?.systemKey === 'pro-labore').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
+  const laborTotal = actual.filter((m) => m.direction === 'saida' && ['pro-labore', 'salarios'].includes(category(m)?.systemKey)).reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
   const tariffTotal = actual.filter((m) => m.direction === 'saida' && category(m)?.systemKey === 'tarifas').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
   const salesReceived = actual.filter((m) => m.direction === 'entrada' && category(m)?.systemKey === 'vendas').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
   const batches = store.state.batches.filter((b) => dateOnly(b.at) >= start && dateOnly(b.at) <= end);
@@ -3349,7 +3844,10 @@ function automaticConfigSuggestions(store) {
     const recipe = store.get('recipes', recipeId);
     if (!recipe || stack.has(recipeId) || !(Number(recipe.yieldNominal) > 0)) return 0;
     stack.add(recipeId);
-    let total = (Number(recipe[phase]) || 0) / Number(recipe.yieldNominal);
+    const recipePhase = phase === 'productionMinutes'
+      ? (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))
+      : (Number(recipe[phase]) || 0);
+    let total = recipePhase / Number(recipe.yieldNominal);
     for (const component of recipe.components || []) if (component.ref?.kind === 'recipe') {
       const sub = store.get('recipes', component.ref.id);
       if (sub) total += convertSimple(Number(component.qty) || 0, component.unit, sub.yieldUnit) * recipeMinutesPerUnit(sub.id, phase, stack);
@@ -3378,6 +3876,12 @@ function automaticConfigSuggestions(store) {
   const ovenMinutes = hasBatches
     ? batches.reduce((sum, b) => sum + (Number(b.ovenMinutes) || Number(store.get('recipes', b.recipeId)?.ovenMinutes) || 0), 0)
     : estimatedFromCommandas('ovenMinutes');
+  const productionMinutes = hasBatches
+    ? batches.reduce((sum, b) => {
+        const recipe = store.get('recipes', b.recipeId);
+        return sum + (Number(b.productionMinutes) || Number(recipe?.productionMinutes) || (Number(b.activeMinutes ?? recipe?.activeMinutes) || 0) + (Number(b.ovenMinutes ?? recipe?.ovenMinutes) || 0));
+      }, 0)
+    : estimatedFromCommandas('productionMinutes');
   const productionMonths = new Set((hasBatches ? batches.map((b) => b.at) : commandas.filter((c) => (c.itens || []).some((it) => (Number(it.realizado) || 0) > 0)).map((c) => c.date || c.id)).map((iso) => dateOnly(iso).slice(0, 7)));
   return {
     period: `${fmtDate(`${start}T12:00:00`)} a ${fmtDate(`${end}T12:00:00`)}`,
@@ -3385,20 +3889,20 @@ function automaticConfigSuggestions(store) {
       custosFixosMes: fixedMonths.size ? fixedTotal / fixedMonths.size : null,
       taxaGas: gasTotal > 0 && ovenMinutes > 0 ? gasTotal / ovenMinutes : null,
       valorHora: laborTotal > 0 && activeMinutes > 0 ? laborTotal / (activeMinutes / 60) : null,
-      expectedActiveMinutesMonth: productionMonths.size && activeMinutes > 0 ? activeMinutes / productionMonths.size : null,
+      expectedProductionMinutesMonth: productionMonths.size && productionMinutes > 0 ? productionMinutes / productionMonths.size : null,
     },
     observedFeePct: tariffTotal > 0 && salesReceived > 0 ? tariffTotal / salesReceived : null,
-    facts: { fixedMonths: fixedMonths.size, gasTotal, laborTotal, tariffTotal, salesReceived, productions: hasBatches ? batches.length : commandas.length, productionSource: hasBatches ? 'tempos reais' : 'estimativa das comandas', activeMinutes, ovenMinutes },
+    facts: { fixedMonths: fixedMonths.size, gasTotal, laborTotal, tariffTotal, salesReceived, productions: hasBatches ? batches.length : commandas.length, productionSource: hasBatches ? 'tempos reais' : 'estimativa das comandas', activeMinutes, ovenMinutes, productionMinutes },
   };
 }
 
 const SETTINGS_HELPERS = {
   valorHora: {
     title: 'Calcular o valor da sua hora', configKey: 'valorHora', suffix: 'R$/h',
-    intro: 'Informe quanto deseja receber pelo seu trabalho no mês e quantas horas realmente trabalha na confeitaria.',
-    fields: [['monthlyPay', 'Pró-labore desejado no mês (R$)'], ['monthlyHours', 'Horas trabalhadas no mês']],
+    intro: 'Este valor serve como indicador de esforço. Salários, pró-labore e encargos continuam nos custos fixos e não serão somados duas vezes.',
+    fields: [['monthlyPay', 'Salários + pró-labore + encargos no mês (R$)'], ['monthlyHours', 'Horas ativas de trabalho no mês']],
     calculate: (v) => v.monthlyPay > 0 && v.monthlyHours > 0 ? v.monthlyPay / v.monthlyHours : null,
-    explanation: 'pró-labore mensal ÷ horas trabalhadas',
+    explanation: 'salários, pró-labore e encargos ÷ horas ativas',
   },
   taxaGas: {
     title: 'Calcular o gás por minuto', configKey: 'taxaGas', suffix: 'R$/min',
@@ -3410,14 +3914,14 @@ const SETTINGS_HELPERS = {
   custosFixosMes: {
     title: 'Somar os custos fixos do mês', configKey: 'custosFixosMes', suffix: 'R$/mês',
     intro: 'Preencha somente o que existe no seu negócio. Campos vazios contam como zero.',
-    fields: [['rent', 'Aluguel, condomínio e IPTU'], ['utilities', 'Água e energia administrativa'], ['internet', 'Internet e telefone'], ['accounting', 'Contador'], ['taxes', 'DAS, licenças e taxas fixas'], ['systems', 'Sistemas e assinaturas'], ['other', 'Outros custos fixos']],
+    fields: [['rent', 'Aluguel, condomínio e IPTU'], ['utilities', 'Água e energia administrativa'], ['internet', 'Internet e telefone'], ['payroll', 'Salários, pró-labore e encargos'], ['accounting', 'Contador'], ['taxes', 'DAS, licenças e taxas fixas'], ['systems', 'Sistemas e assinaturas'], ['other', 'Outros custos fixos']],
     calculate: (v) => Object.values(v).reduce((sum, value) => sum + Math.max(0, value || 0), 0),
     explanation: 'soma dos custos fixos informados',
   },
   expected: {
-    title: 'Calcular o tempo produtivo mensal', configKey: 'expectedActiveMinutesMonth', suffix: 'min/mês',
-    intro: 'Considere apenas o tempo em que você está preparando, montando ou finalizando produtos.',
-    fields: [['workDays', 'Dias de produção por mês'], ['hoursPerDay', 'Horas produtivas por dia']],
+    title: 'Calcular o tempo total de produção mensal', configKey: 'expectedProductionMinutesMonth', suffix: 'min/mês',
+    intro: 'Considere o tempo total em que a estrutura da confeitaria fica dedicada à produção.',
+    fields: [['workDays', 'Dias de produção por mês'], ['hoursPerDay', 'Horas de produção por dia']],
     calculate: (v) => v.workDays > 0 && v.hoursPerDay > 0 ? v.workDays * v.hoursPerDay * 60 : null,
     explanation: 'dias de produção × horas produtivas × 60',
   },
@@ -3434,6 +3938,13 @@ const SETTINGS_HELPERS = {
     fields: [['fees', 'Total de taxas pagas no mês (R$)'], ['received', 'Total recebido no mês (R$)']],
     calculate: (v) => v.received > 0 && v.fees >= 0 ? (v.fees / v.received) * 100 : null,
     explanation: 'taxas pagas ÷ total recebido',
+  },
+  commission: {
+    title: 'Calcular a comissão média sobre vendas', configKey: 'commissionPct', suffix: '%', percent: true,
+    intro: 'Informe o total de comissões pagas e o valor das vendas que geraram essas comissões.',
+    fields: [['commissions', 'Total de comissões no período (R$)'], ['sales', 'Total de vendas no período (R$)']],
+    calculate: (v) => v.sales > 0 && v.commissions >= 0 ? (v.commissions / v.sales) * 100 : null,
+    explanation: 'comissões pagas ÷ vendas correspondentes',
   },
 };
 
@@ -3456,12 +3967,11 @@ function settingsHelperSheet(ctx, key) {
   const save = () => {
     if (calculated == null || !Number.isFinite(calculated) || calculated < 0) { Object.values(inputs)[0].focus(); return; }
     const stored = spec.percent ? calculated / 100 : calculated;
-    const pairedRate = spec.configKey === 'targetMarginPct'
-      ? Number(ctx.store.getConfig().paymentFeePct) || 0
-      : spec.configKey === 'paymentFeePct'
-        ? Number(ctx.store.getConfig().targetMarginPct) || 0
-        : 0;
-    if (spec.percent && stored + pairedRate >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado à margem e às taxas de pagamento.'); return; }
+    const current = ctx.store.getConfig();
+    const otherRates = ['targetMarginPct', 'paymentFeePct', 'commissionPct']
+      .filter((rateKey) => rateKey !== spec.configKey)
+      .reduce((sum, rateKey) => sum + (Number(current[rateKey]) || 0), 0);
+    if (spec.percent && stored + otherRates >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado à margem, à taxa de pagamento e à comissão.'); return; }
     ctx.actions.mutate((store) => store.setConfig({ [spec.configKey]: stored }));
   };
   return sheet({ title: spec.title, rows: [el('p', { class: 'pa-hint', text: spec.intro }), ...spec.fields.map(([fieldKey, label]) => field(label, inputs[fieldKey])), result], onSave: save, saveLabel: 'Usar este resultado', saveTestid: `settings-helper-${key}` });
@@ -3479,21 +3989,27 @@ function ajustesPanel(ctx) {
   };
 
   function save() {
-    ctx.actions.setConfig({
+    const next = {
       valorHora: parseNum(f.valorHora.value) ?? c.valorHora,
       taxaGas: parseNum(f.taxaGas.value) ?? c.taxaGas,
       custosFixosMes: parseNum(f.custosFixosMes.value) ?? c.custosFixosMes,
-      expectedActiveMinutesMonth: parseNum(f.expected.value) ?? c.expectedActiveMinutesMonth,
+      expectedProductionMinutesMonth: parseNum(f.expected.value) ?? c.expectedProductionMinutesMonth ?? c.expectedActiveMinutesMonth,
       targetMarginPct: (parseNum(f.margin.value) ?? pct(c.targetMarginPct)) / 100,
       paymentFeePct: (parseNum(f.fee.value) ?? pct(c.paymentFeePct)) / 100,
-    });
+      commissionPct: (parseNum(f.commission.value) ?? pct(c.commissionPct || 0)) / 100,
+    };
+    if (next.targetMarginPct + next.paymentFeePct + next.commissionPct >= 1) {
+      window.alert('Margem, taxa de pagamento e comissão precisam somar menos de 100%.');
+      return;
+    }
+    ctx.actions.setConfig(next);
   }
 
   const autoRows = [
     ['Valor da hora', automatic.values.valorHora, 'R$/h', automatic.facts.activeMinutes > 0 ? `${fmtNum(automatic.facts.activeMinutes / 60)} h · ${automatic.facts.productionSource}` : 'registre produção nas comandas'],
     ['Gás por minuto', automatic.values.taxaGas, 'R$/min', automatic.facts.ovenMinutes > 0 ? `${fmtNum(automatic.facts.ovenMinutes)} min · ${automatic.facts.productionSource}` : 'registre produção e tempo de forno'],
     ['Custos fixos por mês', automatic.values.custosFixosMes, 'R$', automatic.facts.fixedMonths ? `${automatic.facts.fixedMonths} mês(es) com lançamentos` : 'lance despesas fixas pagas'],
-    ['Minutos ativos por mês', automatic.values.expectedActiveMinutesMonth, 'min', automatic.facts.productions ? `${automatic.facts.productions} registro(s) · ${automatic.facts.productionSource}` : 'registre produção nas comandas'],
+    ['Minutos de produção por mês', automatic.values.expectedProductionMinutesMonth, 'min', automatic.facts.productions ? `${automatic.facts.productions} registro(s) · ${automatic.facts.productionSource}` : 'registre produção nas comandas'],
   ].map(([label, value, unit, source]) => el('div', { class: 'pa-auto-row' }, [
     el('div', { class: 'pa-grow' }, [el('strong', { text: label }), el('span', { class: 'pa-muted', text: source })]),
     el('strong', { class: value == null ? 'pa-muted' : 'pa-positive', text: value == null ? 'dados insuficientes' : (unit === 'R$' ? brl(value) : `${fmtNum(value)} ${unit}`) }),
@@ -3507,8 +4023,9 @@ function ajustesPanel(ctx) {
   const saveAutomaticMargin = () => {
     const value = parseNum(automaticMargin.value);
     const feePct = Number(c.paymentFeePct) || 0;
-    if (value == null || value < 0 || value / 100 + feePct >= 1) {
-      window.alert(`Informe uma margem válida. Somada à taxa de pagamento de ${pctStr(feePct)}, ela precisa ficar abaixo de 100%.`);
+    const commissionPct = Number(c.commissionPct) || 0;
+    if (value == null || value < 0 || value / 100 + feePct + commissionPct >= 1) {
+      window.alert(`Informe uma margem válida. Somada à taxa de pagamento (${pctStr(feePct)}) e à comissão (${pctStr(commissionPct)}), ela precisa ficar abaixo de 100%.`);
       return;
     }
     ctx.actions.setConfig({ targetMarginPct: value / 100 });
@@ -3521,12 +4038,13 @@ function ajustesPanel(ctx) {
       el('div', { class: 'pa-settings-grid' }, [
         el('section', { class: 'pa-settings-column' }, [
           el('h3', { class: 'pa-h3', text: 'Seus valores atuais' }),
-          field('valorHora', 'Valor da hora (R$/h)', c.valorHora, null, 'valorHora'),
+          field('valorHora', 'Valor da hora de mão de obra (indicador)', c.valorHora, 'Usado para analisar o esforço dos minutos ativos; não é somado novamente ao custo.', 'valorHora'),
           field('taxaGas', 'Gás por minuto de forno (R$/min)', c.taxaGas, null, 'taxaGas'),
           field('custosFixosMes', 'Custos fixos no mês (R$, inclui DAS)', c.custosFixosMes, null, 'custosFixosMes'),
-          field('expected', 'Minutos ativos esperados no mês', c.expectedActiveMinutesMonth, null, 'expected'),
+          field('expected', 'Minutos totais de produção esperados no mês', c.expectedProductionMinutesMonth ?? c.expectedActiveMinutesMonth, null, 'expected'),
           field('margin', 'Margem alvo (%)', pct(c.targetMarginPct), null, 'margin'),
           field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct), null, 'fee'),
+          field('commission', 'Comissão sobre vendas (%)', pct(c.commissionPct || 0), 'Entra na formação do preço da mesma forma que a taxa de pagamento.', 'commission'),
           el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar valores manuais')]),
         ]),
         el('aside', { class: 'pa-settings-column pa-auto-card', 'data-testid': 'automatic-settings' }, [
@@ -3540,10 +4058,12 @@ function ajustesPanel(ctx) {
           ]),
           el('button', { class: 'pa-btn', 'data-testid': 'save-automatic-target-margin', onclick: saveAutomaticMargin }, 'Atualizar margem dos cálculos'),
           el('button', { class: 'pa-btn pa-primary', 'data-testid': 'apply-automatic-settings', disabled: Object.keys(applicable).length === 0, onclick: applyAutomatic }, 'Usar valores calculados disponíveis'),
-          el('p', { class: 'pa-hint', text: 'Custos só são atualizados quando há dados suficientes. A margem muda apenas quando você confirmar no botão acima; a taxa de pagamento não muda automaticamente.' }),
+          el('p', { class: 'pa-hint', text: 'Custos só são atualizados quando há dados suficientes. Margem, taxa de pagamento e comissão só mudam quando você confirmar.' }),
         ]),
       ]),
     ]),
+    notificationSettingsCard(ctx),
+    shoppingSettingsCard(ctx),
     empresaCard(ctx),
     dadosCard(ctx),
     trashPanel(ctx),
@@ -3662,6 +4182,72 @@ function dadosCard(ctx) {
   ]);
 }
 
+function notificationSettingsCard(ctx) {
+  const notices = ctx.store.state.notifications.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return el('section', { class: 'pa-card', 'data-testid': 'notification-settings' }, [
+    el('div', { class: 'pa-cardhead' }, [
+      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Agenda e lembretes' }), el('h2', { text: 'Notificações' })]),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'notification-new', onclick: () => ctx.actions.openModal({ kind: 'notification-add' }) }, '+ Notificação'),
+    ]),
+    el('p', { class: 'pa-hint', text: 'A notificação aparece no Início somente na data marcada e sai de lá quando você indicar que foi feita. O histórico completo permanece aqui.' }),
+    ...(notices.length ? notices.map((notice) => el('div', { class: `pa-detail-card${notice.done ? ' pa-reversed' : ''}`, 'data-testid': 'notification-history-item' }, [
+      el('div', { class: 'pa-row' }, [
+        el('div', { class: 'pa-grow' }, [el('strong', { text: notice.title || 'Lembrete' }), el('span', { class: 'pa-muted', text: `${fmtDate(`${notice.date}T12:00:00`)}${notice.notes ? ` · ${notice.notes}` : ''}` })]),
+        el('span', { class: notice.done ? 'pa-badge' : 'pa-badge pa-warn', text: notice.done ? 'Feito' : 'Pendente' }),
+      ]),
+      el('div', { class: 'pa-row pa-form' }, [
+        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.mutate((store) => store.upsertNotification({ ...notice, done: !notice.done, doneAt: !notice.done ? nowIso() : undefined })) }, notice.done ? 'Reabrir' : 'Marcar feito'),
+        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.openModal({ kind: 'notification-edit', id: notice.id }) }, 'Editar'),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { if (window.confirm('Enviar esta notificação para a lixeira?')) ctx.actions.mutate((store) => store.removeNotification(notice.id, nowIso())); } }, 'Excluir'),
+      ]),
+    ])) : [el('p', { class: 'pa-empty', text: 'Nenhuma notificação criada.' })]),
+  ]);
+}
+
+MODALS['notification-add'] = (ctx) => notificationSheet(ctx);
+MODALS['notification-edit'] = (ctx, modal) => notificationSheet(ctx, ctx.store.get('notifications', modal.id));
+function notificationSheet(ctx, notice = null) {
+  const date = el('input', { class: 'pa-input', type: 'date', value: notice?.date || todayInput(), 'data-testid': 'notification-date' });
+  const title = el('input', { class: 'pa-input', type: 'text', value: notice?.title || '', placeholder: 'Ex.: Confirmar encomenda da Maria', 'data-testid': 'notification-title' });
+  const notes = el('textarea', { class: 'pa-input', rows: '3', value: notice?.notes || '', placeholder: 'Detalhes opcionais' });
+  const save = () => {
+    if (!date.value) { date.focus(); return; }
+    if (!title.value.trim()) { title.focus(); return; }
+    ctx.actions.mutate((store) => store.upsertNotification({ ...(notice || {}), id: notice?.id || uuid(), date: date.value, title: title.value.trim(), notes: notes.value.trim() || undefined, done: Boolean(notice?.done), createdAt: notice?.createdAt || nowIso() }));
+  };
+  return sheet({ title: notice ? 'Editar notificação' : 'Nova notificação', rows: [field('Data em que deve aparecer', date), field('Lembrete', title), field('Detalhes', notes)], onSave: save, saveTestid: 'notification-save' });
+}
+
+function shoppingSettingsCard(ctx) {
+  const automatic = inventorySummary(ctx.store).filter((row) => row.low && !row.ingredient.shoppingHidden);
+  const manual = ctx.store.state.shoppingItems.filter((item) => !item.done).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR'));
+  const name = el('input', { class: 'pa-input pa-grow', type: 'text', placeholder: 'Ex.: Papel manteiga', 'data-testid': 'shopping-name' });
+  const qty = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
+  const unit = el('input', { class: 'pa-input pa-narrow', type: 'text', placeholder: 'un, kg…' });
+  const add = () => {
+    if (!name.value.trim()) { name.focus(); return; }
+    ctx.actions.mutate((store) => store.upsertShoppingItem({ id: uuid(), name: name.value.trim(), qty: Math.max(0, parseNum(qty.value) || 0) || undefined, unit: unit.value.trim() || undefined, createdAt: nowIso(), done: false }));
+  };
+  const automaticRows = automatic.map((row) => el('div', { class: 'pa-detail-card', 'data-testid': 'shopping-auto-item' }, [
+    el('div', { class: 'pa-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: row.ingredient.name }), el('span', { class: 'pa-muted', text: `Estoque ${fmtNum(row.current)} ${row.unit} · mínimo ${fmtNum(row.minimum)} ${row.unit}` })]), el('span', { class: 'pa-badge pa-warn', text: 'Estoque baixo' })]),
+    el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutate((store) => store.upsertIngredient({ ...row.ingredient, shoppingHidden: true })) }, 'Ocultar desta lista'),
+  ]));
+  const manualRows = manual.map((item) => el('div', { class: 'pa-row pa-detail-card', 'data-testid': 'shopping-manual-item' }, [
+    el('div', { class: 'pa-grow' }, [el('strong', { text: item.name }), (item.qty || item.unit) && el('span', { class: 'pa-muted', text: [item.qty && fmtNum(item.qty), item.unit].filter(Boolean).join(' ') })].filter(Boolean)),
+    el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutate((store) => store.removeShoppingItem(item.id, nowIso())) }, 'Excluir'),
+  ]));
+  return el('section', { class: 'pa-card', 'data-testid': 'shopping-settings' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Reposição de materiais' }), el('h2', { text: 'Lista de compras' })])]),
+    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque mínimo. Você também pode acrescentar itens livres.' }),
+    ...automaticRows,
+    ...manualRows,
+    (!automaticRows.length && !manualRows.length) && el('p', { class: 'pa-empty', text: 'Nenhum item aguardando compra.' }),
+    el('h3', { class: 'pa-h3', text: 'Adicionar item manual' }),
+    el('div', { class: 'pa-row pa-form' }, [name, qty, unit, el('button', { class: 'pa-btn pa-primary', 'data-testid': 'shopping-add', onclick: add }, 'Adicionar')]),
+    el('p', { class: 'pa-hint', text: 'A lista automática desaparece quando a compra eleva o estoque acima do mínimo. Ocultar não altera o estoque; apenas dispensa aquele aviso.' }),
+  ].filter(Boolean));
+}
+
 function backupFileStamp() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
@@ -3670,9 +4256,9 @@ function backupFileStamp() {
 function trashPanel(ctx) {
   const items = ctx.store.activeTrash();
   const typeNames = {
-    ingredients: 'Insumo', recipes: 'Receita', products: 'Produto', clients: 'Cliente', encomendas: 'Encomenda',
+    ingredients: 'Insumo', recipes: 'Receita', products: 'Produto', clients: 'Cliente', employees: 'Funcionário', encomendas: 'Encomenda',
     comandas: 'Comanda', categories: 'Categoria', suppliers: 'Fornecedor', cashAccounts: 'Conta financeira',
-    financeTitles: 'Lançamento financeiro', purchases: 'Compra',
+    financeTitles: 'Lançamento financeiro', purchases: 'Compra', notifications: 'Notificação', shoppingItems: 'Item da lista de compras',
   };
   const rows = items.map((item) => {
     const remaining = Math.max(0, Math.ceil((new Date(item.expiresAt).getTime() - Date.now()) / 86400000));

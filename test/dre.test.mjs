@@ -43,3 +43,12 @@ test('managerialDre follows competenceDate rather than due or settlement date', 
   assert.equal(managerialDre(store, '2026-08-01', '2026-08-31').directCosts, 0);
   assert.equal(managerialDre(store, '2026-07-01', '2026-07-31').directCosts, 60);
 });
+
+test('a stock-only purchase does not enter Accounts Payable or the DRE', () => {
+  const store = new PaiolStore(); ensureFinanceFoundation(store, ids());
+  store.upsertPurchase({ id: 'stock-only', at: '2026-07-12', items: [], total: 90, financiallyTracked: false });
+  store.upsertPurchase({ id: 'legacy-financial', at: '2026-07-13', items: [], total: 40 });
+  const dre = managerialDre(store, '2026-07-01', '2026-07-31');
+  assert.equal(dre.directCosts, 40);
+  assert.equal(store.state.financeTitles.length, 0);
+});

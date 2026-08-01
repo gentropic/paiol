@@ -2,6 +2,7 @@
 // a receita/despesa pertence ao período, independentemente da data de recebimento ou pagamento.
 
 import { titleState } from './finance.js';
+import { saleNet } from './bundles.js';
 
 const dreDay = (iso) => String(iso || '').slice(0, 10);
 const dreInPeriod = (iso, start, end) => (!start || dreDay(iso) >= start) && (!end || dreDay(iso) <= end);
@@ -42,10 +43,11 @@ export function managerialDre(store, start, end) {
   for (const title of store.state.financeTitles) {
     if (title.sourceType && title.sourceId) linkedSources.add(`${title.sourceType}:${title.sourceId}`);
     if (title.cancelledAt || !dreInPeriod(title.competenceDate || title.issuedAt || title.dueDate, start, end)) continue;
-    const amount = dreAmount(title.amount); const category = categoryOf(title.categoryId);
+    const state = titleState(store, title);
+    // A discount granted to a customer is contra-revenue: it closes the receivable but is not cash.
+    const amount = Math.max(0, dreAmount(title.amount) - (title.direction === 'receber' ? state.discounted : 0)); const category = categoryOf(title.categoryId);
     const included = classify(title.direction, amount, category, title.description, title.sourceType);
     if (included) {
-      const state = titleState(store, title);
       if (title.direction === 'receber') openReceivables += state.balance; else openPayables += state.balance;
     }
   }
@@ -57,7 +59,7 @@ export function managerialDre(store, start, end) {
     openReceivables += Math.max(0, dreAmount(order.total) - store.paidFor(order.id));
   }
   for (const sale of store.state.sales) if (!store.isReversed('sale', sale.id) && !linkedSources.has(`sale:${sale.id}`) && dreInPeriod(sale.at, start, end)) {
-    classify('receber', dreAmount(sale.qty) * dreAmount(sale.unitPrice), store.state.categories.find((c) => c.systemKey === 'vendas'), 'Vendas rápidas', 'sale');
+    classify('receber', saleNet(sale), store.state.categories.find((c) => c.systemKey === 'vendas'), 'Vendas rápidas', 'sale');
   }
   for (const income of store.state.incomes) if (!store.isReversed('income', income.id) && !linkedSources.has(`income:${income.id}`) && dreInPeriod(income.at, start, end)) {
     classify('receber', dreAmount(income.valor), categoryOf(income.categoryId), income.description || 'Outras receitas', 'income');
@@ -68,7 +70,7 @@ export function managerialDre(store, start, end) {
   for (const legacy of store.state.variableCosts) if (!store.isReversed('variableCost', legacy.id) && dreInPeriod(legacy.at, start, end)) {
     classify('pagar', dreAmount(legacy.amount), store.state.categories.find((c) => c.systemKey === 'outros-custos'), legacy.description || legacy.note || 'Custo antigo', 'variableCost');
   }
-  for (const purchase of store.state.purchases) if (!linkedSources.has(`compra:${purchase.id}`) && dreInPeriod(purchase.at, start, end)) {
+  for (const purchase of store.state.purchases) if (purchase.financiallyTracked !== false && !linkedSources.has(`compra:${purchase.id}`) && dreInPeriod(purchase.at, start, end)) {
     classify('pagar', dreAmount(purchase.total), store.state.categories.find((c) => c.systemKey === 'insumos'), 'Compra de insumos', 'compra');
   }
   for (const loss of store.state.perdas) if (!store.isReversed('perda', loss.id) && dreInPeriod(loss.at, start, end)) {

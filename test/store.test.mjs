@@ -19,7 +19,7 @@ test('empty state has all collections', () => {
   const st = emptyState();
   assert.deepEqual(st.ingredients, []);
   assert.deepEqual(st.sales, []);
-  assert.equal(st.version, 3);
+  assert.equal(st.version, 4);
   assert.deepEqual(st.financeTitles, []);
   assert.deepEqual(st.financeSettlements, []);
   assert.deepEqual(st.trashItems, []);
@@ -168,6 +168,20 @@ test('client manual code and tags survive YAML round-trip', () => {
   const back = PaiolStore.fromYaml(s.toYaml());
   assert.equal(back.get('clients', 'c-code').code, 'C-025');
   assert.deepEqual(back.get('clients', 'c-code').tags, ['Não vender', 'Não come doce']);
+});
+
+test('employees, dated notifications and shopping items survive backup and use the trash', () => {
+  const store = new PaiolStore(emptyState());
+  store.upsertEmployee({ id: 'employee-1', name: 'Ana', birthday: '1990-07-31' });
+  store.upsertNotification({ id: 'notice-1', date: '2026-07-31', title: 'Comprar gás', done: false });
+  store.upsertShoppingItem({ id: 'shop-1', name: 'Papel manteiga', qty: 2, unit: 'un' });
+  const loaded = PaiolStore.fromYaml(store.toYaml());
+  assert.equal(loaded.get('employees', 'employee-1').name, 'Ana');
+  assert.equal(loaded.get('notifications', 'notice-1').title, 'Comprar gás');
+  assert.equal(loaded.get('shoppingItems', 'shop-1').qty, 2);
+  assert.equal(loaded.removeNotification('notice-1', '2026-07-31T12:00:00.000Z'), true);
+  assert.equal(loaded.get('notifications', 'notice-1'), undefined);
+  assert.equal(loaded.activeTrash()[0].collection, 'notifications');
 });
 
 test('encomendas are mutable master data that round-trip (Rev 04)', () => {

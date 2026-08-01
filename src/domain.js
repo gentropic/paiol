@@ -34,6 +34,9 @@
  * @property {Conversion[]} [conversions]  // cross-dimension / count→mass overrides
  * @property {string}       [lastSupplier] // fornecedor da última compra (free text)
  * @property {string[]}     [tags]         // etiquetas (ex.: "revenda", "festa") — busca/filtro
+ * @property {number}       [stockQty]     // saldo inicial/base na unidade de estoque
+ * @property {number}       [minStockQty]  // nível que aciona a lista de compras
+ * @property {boolean}      [shoppingHidden] // dispensa temporariamente o aviso automático
  */
 
 /**
@@ -54,6 +57,7 @@
  * @property {Unit}        yieldUnit      // "un" | "g" | ...
  * @property {Component[]} components
  * @property {number}      activeMinutes  // hands-on  → labor (mao de obra)
+ * @property {number}     [productionMinutes] // total preparation time → fixed-cost allocation
  * @property {number}      ovenMinutes    // oven on   → gas
  * @property {number}      fermentMinutes // passive rest/proof (captured, not a cost driver by default)
  * @property {string}     [notes]         // observacao / modo de preparo (free text, not costed)
@@ -87,6 +91,7 @@
  * @property {Unit}              [saleUnit]       // unit shown in catalog/comanda
  * @property {number}            [salePrice]      // default price filled into sales and orders
  * @property {boolean}           [active]         // available for new sales; omitted means active (legacy compatible)
+ * @property {'normal'|'cesta'|'kit'|'combo'} [saleKind] // explicit dashboard/order classification
  * @property {string[]}          [tags]          // etiquetas
  * // Legacy shape (recipeId + portion) is migrated to a single `recipe` component on load.
  */
@@ -100,6 +105,7 @@
  * @property {string} [code]       // código manual definido pela usuária
  * @property {string} [phone]      // telefone
  * @property {string} [address]    // endereço
+ * @property {string} [birthday]   // YYYY-MM-DD; o ano pode ser histórico
  * @property {string[]} [tags]     // etiquetas e alertas do cliente
  * @property {boolean} [inactive]  // kept for history, hidden from new-order suggestions
  */
@@ -110,6 +116,7 @@
  * @property {string} productId
  * @property {number} qty
  * @property {number} unitPrice    // sale price charged per unit (defaults to the suggested price)
+ * @property {Array<{productId:string,qty:number}>} [bundleItems] // products inside each cesta/kit/combo
  */
 
 /**
@@ -123,6 +130,7 @@
  * @property {string} [clienteId]     // optional (avulso / balcão)
  * @property {EncomendaItem[]} itens
  * @property {number}  total          // Σ itens + frete
+ * @property {number} [discount]      // desconto comercial concedido na venda
  * @property {number}  costSnapshot   // Σ (qty × product unit cost) at save time
  * @property {'retirada'|'motoboy'} [deliveryMethod]
  * @property {number} [frete]
@@ -181,6 +189,7 @@
  * @property {string}  at             // ISO date
  * @property {string}  recipeId
  * @property {number}  yieldActual    // units that actually came out (<> nominal when something fails)
+ * @property {number} [productionMinutes] // logged total production time; defaults to recipe estimate
  * @property {number} [activeMinutes] // logged actual; defaults to recipe estimate if omitted
  * @property {number} [ovenMinutes]   // logged actual; defaults to recipe estimate if omitted
  */
@@ -194,7 +203,9 @@
  * @property {number}  qty
  * @property {number}  unitPrice       // price actually charged
  * @property {number}  paymentFeePct   // snapshotted at time of sale
+ * @property {number} [commissionPct]  // snapshotted sales commission
  * @property {number}  costSnapshot    // unit cost at time of sale
+ * @property {number} [discount]       // total discount granted on this sale
  * @property {string} [channel]        // single optional tag in v0.1
  */
 
@@ -266,8 +277,43 @@
  * @property {string} name
  * @property {string} [document]
  * @property {string} [phone]
+ * @property {string} [birthday]
  * @property {string} [notes]
  * @property {boolean} [archived]
+ */
+
+/**
+ * Funcionário — cadastro operacional usado também na agenda de aniversários.
+ * @typedef {object} Employee
+ * @property {string} id
+ * @property {string} name
+ * @property {string} [role]
+ * @property {string} [phone]
+ * @property {string} [birthday]
+ * @property {boolean} [inactive]
+ */
+
+/**
+ * Lembrete datado — aparece no Início apenas no dia escolhido e permanece no histórico de Ajustes.
+ * @typedef {object} Notification
+ * @property {string} id
+ * @property {string} date
+ * @property {string} title
+ * @property {string} [notes]
+ * @property {boolean} [done]
+ * @property {string} [doneAt]
+ * @property {string} [createdAt]
+ */
+
+/**
+ * Item manual da lista de compras. Avisos automáticos de estoque baixo são derivados dos insumos.
+ * @typedef {object} ShoppingItem
+ * @property {string} id
+ * @property {string} name
+ * @property {number} [qty]
+ * @property {string} [unit]
+ * @property {boolean} [done]
+ * @property {string} [createdAt]
  */
 
 /**
@@ -312,6 +358,7 @@
  * @property {number} amount
  * @property {string} [method]
  * @property {string} [accountId]
+ * @property {'payment'|'discount'} [kind] // discount settles balance but never moves cash
  * @property {string} [notes]
  */
 
@@ -324,6 +371,7 @@
  * @property {Array<{ingredientId:string,qty:number,unitPrice:number}>} items
  * @property {number} total
  * @property {string} [titleId]
+ * @property {boolean} [financiallyTracked] // false = histórico/preço/estoque, sem Contas a Pagar/DRE
  * @property {string} [notes]
  */
 
@@ -348,7 +396,9 @@
  * @property {number} custosFixosMes         // monthly fixed-cost pool (includes `das`)
  * @property {number} targetMarginPct        // 0..1, goes in the markup divisor
  * @property {number} paymentFeePct          // 0..1, goes in the markup divisor
+ * @property {number} commissionPct          // 0..1, goes in the markup divisor
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
+ * @property {number} expectedProductionMinutesMonth // production-time denominator for fixed costs
  * @property {'active-time'|'total-time'} [rateioBase] // default 'active-time' (§4.3; 'per-unit' deferred)
  * @property {Empresa} [empresa]             // Dados da empresa (Rev 06) — recibo header; filled in Ajustes
  */
