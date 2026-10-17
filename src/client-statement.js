@@ -6,6 +6,7 @@ import { bundleCompositionText } from './bundles.js';
 
 const statementDate = (iso) => String(iso || '').slice(0, 10);
 const statementInPeriod = (iso, start, end) => (!start || statementDate(iso) >= start) && (!end || statementDate(iso) <= end);
+const personName = (name) => String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
 /**
  * @param {import('./store.js').PaiolStore} store
@@ -14,10 +15,17 @@ const statementInPeriod = (iso, start, end) => (!start || statementDate(iso) >= 
  * @param {string} [end] YYYY-MM-DD; blank means through the latest record
  */
 export function clientFinancialStatement(store, clientId, start = '', end = '') {
-  const client = store.get('clients', clientId) || null;
+  const groupedName = String(clientId || '').startsWith('name:') ? String(clientId).slice(5) : '';
+  const matchingClients = groupedName ? store.state.clients.filter((c) => personName(c.name) === groupedName) : [];
+  const matchingIds = new Set(groupedName ? matchingClients.map((c) => c.id) : [clientId]);
+  const matchesTitle = (title) => groupedName
+    ? (title.partyId && store.get('clients', title.partyId) ? matchingIds.has(title.partyId) : personName(title.partyName || 'Sem cliente') === groupedName)
+    : title.partyId === clientId;
+  const namedTitle = groupedName && store.state.financeTitles.find((t) => t.direction === 'receber' && matchesTitle(t));
+  const client = groupedName ? (matchingClients[0] || { name: namedTitle?.partyName || groupedName }) : store.get('clients', clientId) || null;
   const allMovements = [];
 
-  for (const order of store.state.encomendas.filter((e) => e.clienteId === clientId && !e.desistenciaAt)) {
+  for (const order of store.state.encomendas.filter((e) => matchingIds.has(e.clienteId) && !e.desistenciaAt)) {
     const items = (order.itens || []).map((item) => {
       const product = store.get('products', item.productId);
       const qty = Number(item.qty) || 0;
@@ -31,7 +39,7 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     const total = Number(order.total) || 0;
     allMovements.push({
       id: `order:${order.id}`, type: 'purchase', at: order.deliveryDate || order.at,
-      orderId: order.id, description: 'Compra / encomenda', amount: total, items,
+      orderId: order.id, clientId: order.clienteId, description: 'Compra / encomenda', amount: total, items,
       paid: Math.min(total, paid), discounted: state?.discounted || 0, credited: state?.credited || 0, balance: state ? state.balance : Math.max(0, total - paid),
       deliveryMethod: order.deliveryMethod || 'retirada', freight: Number(order.frete) || 0, discount: Number(order.discount) || 0, notes: order.notes,
     });
@@ -49,7 +57,7 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
 
   // Manually entered receivables belong in the financial statement too. The finance title whose
   // source is an order is deliberately excluded because that order and its payments are above.
-  for (const title of store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && t.sourceType !== 'encomenda' && !t.cancelledAt)) {
+  for (const title of store.state.financeTitles.filter((t) => t.direction === 'receber' && matchesTitle(t) && (groupedName || t.sourceType !== 'encomenda') && !t.cancelledAt && !(groupedName && t.sourceType === 'encomenda' && store.state.encomendas.some((e) => e.id === t.sourceId && matchingIds.has(e.clienteId) && !e.desistenciaAt)))) {
     const amount = Number(title.amount) || 0;
     const settlements = titleSettlements(store, title);
     const state = titleState(store, title);
@@ -69,7 +77,7 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     }
   }
 
-  for (const entry of store.state.cashAdjustments.filter((a) => a.kind === 'client-credit' && a.clientId === clientId && !store.isReversed('cashAdjustment', a.id))) {
+  for (const entry of store.state.cashAdjustments.filter((a) => a.kind === 'client-credit' && matchingIds.has(a.clientId) && !store.isReversed('cashAdjustment', a.id))) {
     allMovements.push({ id: `client-credit:${entry.id}`, type: 'payment', at: entry.at, description: entry.description || 'Pagamento recebido como crédito', amount: Number(entry.amount) || 0, method: entry.method });
   }
 
@@ -88,8 +96,8 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     periodDiscounts: discounts(movements),
     periodBalance: charges(movements) - payments(movements) - discounts(movements),
     totalCharged, totalPaid, totalDiscounted: discounts(allMovements),
-    currentBalance: store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt).reduce((sum, t) => sum + titleState(store, t).balance, 0)
+    currentBalance: store.state.financeTitles.filter((t) => t.direction === 'receber' && matchesTitle(t) && !t.cancelledAt).reduce((sum, t) => sum + titleState(store, t).balance, 0)
       + allMovements.filter((row) => row.type === 'purchase' && !store.state.financeTitles.some((t) => t.sourceType === 'encomenda' && t.sourceId === row.orderId)).reduce((sum, row) => sum + row.balance, 0),
-    creditBalance: clientCreditBalance(store, clientId),
+    creditBalance: [...matchingIds].reduce((sum, id) => sum + (store.get('clients', id) ? clientCreditBalance(store, id) : 0), 0),
   };
 }

@@ -2596,34 +2596,29 @@ function financeTitlePanel(ctx, direction) {
     if (!partyMap.has(key)) partyMap.set(key, { key, name: title.partyName });
   }
   const partyChoices = [...partyMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const personKey = (title) => `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
   const financeCategories = direction === 'pagar' ? activeFinanceCategories(store, direction) : [];
   const selectedParty = partyChoices.some((p) => p.key === ctx.view.finPartyId) ? ctx.view.finPartyId : undefined;
+  const selectedPersonKey = direction === 'receber' && selectedParty ? selectedParty.startsWith('name:') ? selectedParty : `name:${norm(store.get('clients', selectedParty)?.name || partyMap.get(selectedParty)?.name)}` : '';
   const selectedCategory = financeCategories.some((c) => c.id === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : undefined;
   let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status, categoryId: selectedCategory });
   if (direction === 'receber') rows = rows.filter((r) => !r.title.cancelledAt);
   const methodReceipts = (title) => titleSettlements(store, title).filter((s) => s.kind !== 'discount' && s.kind !== 'credit' && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
   if (receivedMethod) rows = rows.map((r) => ({ ...r, methodPaid: methodReceipts(r.title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0) })).filter((r) => r.methodPaid > 0.005);
-  if (selectedParty) rows = rows.filter((r) => r.title.partyId === selectedParty || (!r.title.partyId && `name:${norm(r.title.partyName)}` === selectedParty));
+  if (selectedParty) rows = rows.filter((r) => direction === 'receber' ? personKey(r.title) === selectedPersonKey : r.title.partyId === selectedParty || (!r.title.partyId && `name:${norm(r.title.partyName)}` === selectedParty));
   const total = rows.reduce((s, r) => s + (receivedMethod ? r.methodPaid : status === 'quitado' ? r.paid : r.balance), 0);
-  const balances = direction === 'receber' ? new Map(partyChoices.map((p) => [p.key, { ...p, amount: 0, openCount: 0 }])) : null;
-  if (balances) for (const row of listTitles(store, { direction: 'receber' })) {
-    if (row.title.cancelledAt) continue;
-    const key = row.title.partyId || `name:${norm(row.title.partyName)}`;
-    const group = balances.get(key);
-    if (!group) continue;
-    group.amount += row.balance;
-    if (row.balance > 0.005) group.openCount++;
-  }
-  const clientBalances = balances ? [...balances.values()].filter((p) => !selectedParty || p.key === selectedParty)
-    .sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR')) : [];
-  const currentClientBalance = clientBalances.reduce((sum, p) => sum + p.amount, 0);
+  const currentClientBalance = direction === 'receber' ? listTitles(store, { direction: 'receber' }).filter((r) => !r.title.cancelledAt && (!selectedPersonKey || personKey(r.title) === selectedPersonKey)).reduce((sum, r) => sum + r.balance, 0) : 0;
   const filteredGroups = new Map();
   if (direction === 'receber' && status === 'todos' && receivePeriod === 'all' && !receivedMethod) {
-    for (const p of clientBalances) filteredGroups.set(p.key, { key: p.key, name: p.name, amount: 0, count: 0, date: '' });
+    for (const client of store.state.clients) {
+      const key = `name:${norm(client.name)}`;
+      if (selectedPersonKey && key !== selectedPersonKey) continue;
+      if (!filteredGroups.has(key)) filteredGroups.set(key, { key, name: client.name, amount: 0, count: 0, date: '' });
+    }
   }
   if (direction === 'receber') for (const row of rows) {
-    const key = row.title.partyId || `name:${norm(row.title.partyName)}`;
-    const group = filteredGroups.get(key) || { key, name: balances.get(key)?.name || row.title.partyName || 'Sem cliente', amount: 0, count: 0, date: '' };
+    const key = personKey(row.title);
+    const group = filteredGroups.get(key) || { key, name: store.get('clients', row.title.partyId)?.name || row.title.partyName || 'Sem cliente', amount: 0, count: 0, date: '' };
     group.amount += receivedMethod ? row.methodPaid : status === 'quitado' ? row.paid : row.balance;
     group.count++;
     const receiptDates = receivedMethod || status === 'quitado'
@@ -2635,7 +2630,7 @@ function financeTitlePanel(ctx, direction) {
   }
   const filteredClients = [...filteredGroups.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   const filteredClientList = direction === 'receber' && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, filteredClients.map((p) => el('li', {
-    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }),
+    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openModal({ kind: 'client-statement', clientId: p.key }); } },
   }, [el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? 'Último recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` · ${p.count} lançamentos` : ''}` : 'Sem lançamentos' })]),
     el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
   const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
@@ -2659,7 +2654,7 @@ function financeTitlePanel(ctx, direction) {
         const all = query === 'todos' || query === 'todas' || query.startsWith('todos os clientes');
         const matches = all ? partyChoices : query ? partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
         const showAll = () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' });
-        const allOption = all ? [el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-all', onclick: showAll, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showAll(); } } }, 'Todos os clientes — mostrar todos os títulos')] : [];
+        const allOption = all ? [el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-all', onclick: showAll, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showAll(); } } }, 'Todos os clientes — mostrar o total por pessoa')] : [];
         suggestions.replaceChildren(...allOption, ...matches.map((p) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-suggestion', onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.setFinanceView({ finPartyId: p.key }); } } }, p.name)));
         suggestions.style.display = allOption.length || matches.length ? '' : 'none';
       });
@@ -2671,12 +2666,12 @@ function financeTitlePanel(ctx, direction) {
   const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && s.kind !== 'discount' && s.kind !== 'credit').map((s) => s.method)].filter(Boolean))];
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
-    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: store.get('clients', selectedParty)?.id }) }, 'Ficha do cliente'),
+    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: selectedParty }) }, 'Ficha do cliente'),
     el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': `fin-${direction}-new`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction }) }, direction === 'receber' ? '+ Nova entrada' : '+ Nova saída'),
   ].filter(Boolean));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
-    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Abra um título para receber total ou parcialmente; use Ficha do cliente para consultar e imprimir compras, produtos e pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
+    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Cada pessoa aparece uma vez, com o valor total do filtro. Clique no nome para ver a ficha financeira, os lançamentos e os pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
     direction === 'receber' && el('div', { class: 'pa-chiprow' }, [
       el('button', { class: 'pa-chip' + (receivePeriod === 'all' ? ' pa-chip-on' : ''), 'data-testid': 'fin-receber-period-all', onclick: () => ctx.actions.setFinanceView({ finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }) }, 'Período completo'),
       el('button', { class: 'pa-chip' + (receivePeriod === 'custom' ? ' pa-chip-on' : ''), 'data-testid': 'fin-receber-period-custom', onclick: () => ctx.actions.setFinanceView({ finReceivePeriod: 'custom' }) }, 'Selecionar datas'),
@@ -2690,8 +2685,7 @@ function financeTitlePanel(ctx, direction) {
     el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
     direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes no filtro (${filteredClients.length})` }),
     direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes…', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente com lançamentos neste filtro.' })),
-    direction === 'receber' && selectedParty && el('h3', { class: 'pa-h3', text: 'Lançamentos do cliente' }),
-    (direction === 'pagar' || selectedParty) && (rows.length ? el('div', {}, [searchInput(direction === 'receber' ? 'Buscar lançamento…' : 'Buscar fornecedor…', ul, `fin-${direction}-search`), ul]) : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
+    direction === 'pagar' && (rows.length ? el('div', {}, [searchInput('Buscar fornecedor…', ul, `fin-${direction}-search`), ul]) : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
   ]);
 }
 const financeReceivablePanel = (ctx) => financeTitlePanel(ctx, 'receber');
@@ -2899,9 +2893,14 @@ function clientStatementPaymentSheet(ctx, clientId) {
 function clientStatementSheet(ctx, modal = {}) {
   const { store } = ctx;
   const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
-  if (!clients.length) return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-empty', text: 'Cadastre um cliente primeiro para consultar sua ficha financeira.' })] });
+  const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
+    .filter(([key]) => !clients.some((c) => `name:${norm(c.name)}` === key))
+    .map(([id, name]) => ({ id, name }));
+  if (!clients.length && !namedParties.length) return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance um valor a receber para consultar a ficha financeira.' })] });
 
-  let clientId = clients.some((c) => c.id === modal.clientId) ? modal.clientId : '';
+  const hasNamedParty = (id) => String(id || '').startsWith('name:') && (clients.some((c) => `name:${norm(c.name)}` === id) || namedParties.some((p) => p.id === id));
+  let clientId = clients.some((c) => c.id === modal.clientId) || hasNamedParty(modal.clientId) ? modal.clientId : '';
+  const registeredClientIds = () => clientId.startsWith('name:') ? clients.filter((c) => `name:${norm(c.name)}` === clientId).map((c) => c.id) : clientId ? [clientId] : [];
   const clientPicker = el('div', { class: 'pa-cli-picker', 'data-testid': 'client-statement-client' });
   const mode = el('select', { class: 'pa-input', 'data-testid': 'client-statement-mode' }, [el('option', { value: 'geral', text: 'Geral — todo o histórico' }), el('option', { value: 'periodo', text: 'Período específico' })]);
   const start = el('input', { class: 'pa-input', 'data-testid': 'client-statement-start', type: 'date', value: ctx.view.finStart || '' });
@@ -2931,14 +2930,18 @@ function clientStatementSheet(ctx, modal = {}) {
         row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
         row.credited > 0.005 && el('span', { class: 'pa-muted', text: `Crédito usado ${brl(row.credited)}` }),
         el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : 'quitado' }),
-        row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId, orderId: row.orderId }) }, 'Gerar recibo'),
+        row.orderId && row.clientId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: row.clientId, orderId: row.orderId }) }, 'Gerar recibo'),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
+        row.titleId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-title', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: row.titleId }) }, 'Abrir lançamento'),
       ].filter(Boolean)),
     ].filter(Boolean));
   };
   function renderStatement() {
     details.style.display = clientId ? '' : 'none';
     if (!clientId) return;
+    const actionClientIds = registeredClientIds();
+    payment.style.display = actionClientIds.length === 1 ? '' : 'none';
+    receipt.style.display = actionClientIds.length === 1 ? '' : 'none';
     period.style.display = mode.value === 'periodo' ? '' : 'none';
     const statement = currentStatement();
     const label = mode.value === 'periodo' ? 'no período' : 'no histórico geral';
@@ -2949,7 +2952,7 @@ function clientStatementSheet(ctx, modal = {}) {
     );
   }
   function renderClientPicker() {
-    const selected = clientId && store.get('clients', clientId);
+    const selected = clientId && (store.get('clients', clientId) || (clientId.startsWith('name:') ? { name: clients.find((c) => `name:${norm(c.name)}` === clientId)?.name || namedParties.find((p) => p.id === clientId)?.name || clientId.slice(5) } : null));
     if (selected) {
       clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } }, '✕')]));
       return;
@@ -2958,7 +2961,7 @@ function clientStatementSheet(ctx, modal = {}) {
     const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
     search.addEventListener('input', () => {
       const query = norm(search.value);
-      const matches = query ? clients.filter((c) => norm(clientSearchText(c)).includes(query)).slice(0, 8) : [];
+      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
       results.style.display = matches.length ? '' : 'none';
       results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { clientId = c.id; renderClientPicker(); renderStatement(); } }, clientLabel(c))));
     });
@@ -2974,8 +2977,8 @@ function clientStatementSheet(ctx, modal = {}) {
     } catch (error) { window.alert('Não foi possível gerar a ficha financeira: ' + ((error && error.message) || error)); }
     finally { print.textContent = original; print.disabled = false; }
   });
-  const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId }) }, 'Novo recibo para o cliente');
-  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId }) }, 'Registrar pagamento / crédito');
+  const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: registeredClientIds()[0] }) }, 'Novo recibo para o cliente');
+  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId: registeredClientIds()[0] }) }, 'Registrar pagamento / crédito');
   const details = el('div', {}, [field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
   renderClientPicker();
   renderStatement();
