@@ -2994,16 +2994,17 @@ function financeSettleSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title); if (!title || !state) return sheet({ title: 'Título não encontrado', rows: [] });
   const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const discount = moneyField(null, 'fin-settle-discount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
   const isReceivable = title.direction === 'receber';
+  const canCredit = isReceivable && title.partyId && ctx.store.get('clients', title.partyId);
   function save() {
     const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
-    if (!(value + discountValue > 0) || discountValue > state.balance + 0.005 || (!isReceivable && value + discountValue > state.balance + 0.005)) { amount.input.focus(); return; }
+    if (!(value + discountValue > 0) || discountValue > state.balance + 0.005 || (!canCredit && value + discountValue > state.balance + 0.005)) { amount.input.focus(); return; }
     ctx.actions.mutate((s) => {
       if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
       else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
       if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
     });
   }
-  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
+  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
 }
 
 function presetRange(key) {
