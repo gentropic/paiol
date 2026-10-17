@@ -2603,7 +2603,27 @@ function financeTitlePanel(ctx, direction) {
     el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: r.status === 'quitado' ? 'recebido/pago' : 'saldo' }), el('strong', { class: r.status === 'vencido' ? 'pa-bad' : '', text: brl(r.status === 'quitado' ? r.paid : r.balance) })]), el('span', { class: 'pa-chev', text: '›' }),
   ])));
   const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), onclick: () => ctx.actions.setFinanceView({ finStatus: key }) }, label);
-  const partyFilter = el('select', { class: 'pa-input', 'data-testid': `fin-${direction}-party`, onchange: (e) => ctx.actions.setFinanceView({ finPartyId: e.target.value }) }, [el('option', { value: '', text: direction === 'receber' ? 'Todos os clientes' : 'Todos os fornecedores' }), ...partyChoices.map((p) => el('option', { value: p.key, text: p.name, ...(selectedParty === p.key ? { selected: 'selected' } : {}) }))]);
+  const partyFilter = direction === 'receber' ? (() => {
+    const picker = el('div', { class: 'pa-cli-picker', 'data-testid': 'fin-receber-party' });
+    const selected = partyChoices.find((p) => p.key === selectedParty);
+    if (selected) {
+      picker.append(el('div', { class: 'pa-cli-chip' }, [
+        el('span', { class: 'pa-grow', text: selected.name }),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes', 'aria-label': 'Mostrar todos os clientes', onclick: () => ctx.actions.setFinanceView({ finPartyId: '' }) }, '✕'),
+      ]));
+    } else {
+      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os clientes — digite um nome…', 'data-testid': 'fin-receber-party-search' });
+      const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+      search.addEventListener('input', () => {
+        const query = norm(search.value);
+        const matches = query ? partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
+        suggestions.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-suggestion', onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.setFinanceView({ finPartyId: p.key }); } } }, p.name)));
+        suggestions.style.display = matches.length ? '' : 'none';
+      });
+      picker.append(search, suggestions);
+    }
+    return picker;
+  })() : el('select', { class: 'pa-input', 'data-testid': `fin-${direction}-party`, onchange: (e) => ctx.actions.setFinanceView({ finPartyId: e.target.value }) }, [el('option', { value: '', text: 'Todos os fornecedores' }), ...partyChoices.map((p) => el('option', { value: p.key, text: p.name, ...(selectedParty === p.key ? { selected: 'selected' } : {}) }))]);
   const catFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finTitleCategory: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...financeCategories.map((c) => el('option', { value: c.id, text: c.name, ...(selectedCategory === c.id ? { selected: 'selected' } : {}) }))]);
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value }) }, [el('option', { value: '', text: 'Todas as formas' }), ...paymentMethodNames(store).map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
