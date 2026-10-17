@@ -2584,7 +2584,9 @@ function financeDashboardPanel(ctx) {
 }
 
 function financeTitlePanel(ctx, direction) {
-  const { store } = ctx; const status = ctx.view.finStatus || 'aberto'; const start = ctx.view.finStart; const end = ctx.view.finEnd;
+  const { store } = ctx; const status = ctx.view.finStatus || 'aberto';
+  const start = direction === 'receber' ? ctx.view.finReceiveStart || '' : ctx.view.finStart;
+  const end = direction === 'receber' ? ctx.view.finReceiveEnd || '' : ctx.view.finEnd;
   const receivedMethod = direction === 'receber' ? ctx.view.finMethod || '' : '';
   const parties = direction === 'receber' ? store.state.clients : store.state.suppliers;
   const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name }]));
@@ -2601,6 +2603,23 @@ function financeTitlePanel(ctx, direction) {
   if (receivedMethod) rows = rows.map((r) => ({ ...r, methodPaid: methodReceipts(r.title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0) })).filter((r) => r.methodPaid > 0.005);
   if (selectedParty) rows = rows.filter((r) => r.title.partyId === selectedParty || (!r.title.partyId && `name:${norm(r.title.partyName)}` === selectedParty));
   const total = rows.reduce((s, r) => s + (receivedMethod ? r.methodPaid : status === 'quitado' ? r.paid : r.balance), 0);
+  const balances = direction === 'receber' ? new Map(partyChoices.map((p) => [p.key, { ...p, amount: 0, openCount: 0 }])) : null;
+  if (balances) for (const row of listTitles(store, { direction: 'receber' })) {
+    if (row.title.cancelledAt) continue;
+    const key = row.title.partyId || `name:${norm(row.title.partyName)}`;
+    const group = balances.get(key);
+    if (!group) continue;
+    group.amount += row.balance;
+    if (row.balance > 0.005) group.openCount++;
+  }
+  const clientBalances = balances ? [...balances.values()].filter((p) => !selectedParty || p.key === selectedParty)
+    .sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR')) : [];
+  const currentClientBalance = clientBalances.reduce((sum, p) => sum + p.amount, 0);
+  const clientBalanceList = balances && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, clientBalances.map((p) => el('li', {
+    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance',
+    onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }),
+  }, [el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), el('span', { class: 'pa-muted', text: p.openCount ? `${p.openCount} conta(s) em aberto` : 'Sem valor em aberto' })]),
+    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: 'Saldo atual' }), el('strong', { class: p.amount > 0.005 ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
   const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
     el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('strong', { text: r.title.partyName || r.title.description }), titleBadge(r.status)]), el('span', { class: 'pa-muted', text: `${fmtDate(r.title.dueDate)} · ${r.title.description}${r.overdueDays ? ` · ${r.overdueDays} dia(s) em atraso` : ''}` })]),
     el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod ? `recebido por ${receivedMethod}` : r.status === 'quitado' ? 'recebido/pago' : 'saldo' }), el('strong', { class: r.status === 'vencido' ? 'pa-bad' : '', text: brl(receivedMethod ? r.methodPaid : r.status === 'quitado' ? r.paid : r.balance) })]), el('span', { class: 'pa-chev', text: '›' }),
@@ -2639,11 +2658,16 @@ function financeTitlePanel(ctx, direction) {
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
     el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Abra um título para receber total ou parcialmente; use Ficha do cliente para consultar e imprimir compras, produtos e pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
-    periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), `fin-${direction}`),
+    periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finStart: s, finEnd: e }), `fin-${direction}`),
+    direction === 'receber' && el('p', { class: 'pa-hint', text: 'Deixe as datas vazias para consultar todo o histórico. O saldo atual de cada cliente considera todas as contas, mesmo quando você filtra os lançamentos por data.' }),
     receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda não quitadas, escolha “Em aberto”, “Parciais” ou “Todos”.` }),
     el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
+    direction === 'receber' && el('h3', { class: 'pa-h3', text: selectedParty ? 'Saldo do cliente' : `Clientes e saldos (${clientBalances.length})` }),
+    direction === 'receber' && el('div', { class: 'pa-statgrid' }, [statCard('Saldo atual', brl(currentClientBalance), currentClientBalance > 0.005 ? 'bad' : 'ok')]),
+    direction === 'receber' && (clientBalances.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes…', clientBalanceList, 'fin-receber-client-list-search'), clientBalanceList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente cadastrado.' })),
+    direction === 'receber' && el('h3', { class: 'pa-h3', text: 'Lançamentos' }),
     el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), chip('parcial', 'Parciais'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), chip('todos', 'Todos')]),
-    el('div', { class: 'pa-statgrid' }, [statCard(receivedMethod ? `Recebido por ${receivedMethod}` : status === 'quitado' ? (direction === 'receber' ? 'Total recebido' : 'Total pago') : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
+    (direction === 'pagar' || receivedMethod || status === 'quitado') && el('div', { class: 'pa-statgrid' }, [statCard(receivedMethod ? `Recebido por ${receivedMethod}` : status === 'quitado' ? (direction === 'receber' ? 'Total recebido' : 'Total pago') : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
     rows.length ? el('div', {}, [searchInput(direction === 'receber' ? 'Buscar cliente…' : 'Buscar fornecedor…', ul, `fin-${direction}-search`), ul]) : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' }),
   ]);
 }
