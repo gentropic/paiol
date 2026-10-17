@@ -45,9 +45,13 @@ export function monthSummary(store, month) {
   let recebidoFinanceiro = 0;
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
-    if (st.kind === 'discount') continue;
+    if (['discount', 'credit', 'loss', 'client-payment-allocation'].includes(st.kind)) continue;
     const title = store.get('financeTitles', st.titleId);
     if (title?.direction === 'receber') recebidoFinanceiro += st.amount || 0;
+  }
+  for (const payment of store.state.cashAdjustments || []) {
+    if (payment.kind !== 'client-payment' || ym(payment.at) !== month || store.isReversed('cashAdjustment', payment.id)) continue;
+    recebidoFinanceiro += Number(payment.amount) || 0;
   }
   const recebido = recebidoVendas + recebidoPagamentos + recebidoOutrasReceitas + recebidoFinanceiro;
 
@@ -95,7 +99,7 @@ export function monthSummary(store, month) {
   }
   for (const t of store.state.financeTitles || []) {
     if (t.direction !== 'receber' || t.sourceType === 'encomenda' || t.cancelledAt) continue;
-    const saldo = (t.amount || 0) - store.settledFor(t.id);
+    const saldo = titleState(store, t).balance;
     if (saldo > 0.005) aReceber += saldo;
   }
 

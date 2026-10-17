@@ -48,6 +48,7 @@ export const DEFAULT_CHART = [
   { code: '3.14', name: 'Tarifas bancárias', systemKey: 'tarifas', parentKey: 'despesas', nature: 'despesa', kind: 'despesaVariavel', cashFlowGroup: 'operacional' },
   { code: '3.15', name: 'Cursos e capacitação', systemKey: 'capacitacao', parentKey: 'despesas', nature: 'despesa', kind: 'despesaVariavel', cashFlowGroup: 'operacional' },
   { code: '3.16', name: 'Combustível e transporte', systemKey: 'transporte', parentKey: 'despesas', nature: 'despesa', kind: 'despesaVariavel', cashFlowGroup: 'operacional' },
+  { code: '3.17', name: 'Perdas com clientes', systemKey: 'perdas-clientes', parentKey: 'despesas', nature: 'despesa', kind: 'despesaVariavel', cashFlowGroup: 'nao-caixa' },
   { code: '3.99', name: 'Outras despesas', systemKey: 'outras-despesas', parentKey: 'despesas', nature: 'despesa', kind: 'despesaVariavel', cashFlowGroup: 'operacional' },
   { code: '4', name: 'Investimentos e imobilizado', systemKey: 'investimentos', nature: 'investimento', kind: 'custo', cashFlowGroup: 'investimento' },
   { code: '4.1', name: 'Máquinas e equipamentos', systemKey: 'maquinas', parentKey: 'investimentos', nature: 'investimento', kind: 'custo', cashFlowGroup: 'investimento' },
@@ -128,10 +129,12 @@ export function defaultCashAccount(store) {
 }
 
 export function titleSettlements(store, title) {
+  const activeSettlement = (s) => !store.isReversed('financeSettlement', s.id)
+    && (s.kind !== 'client-payment-allocation' || !store.isReversed('cashAdjustment', s.paymentId));
   if (title.sourceType === 'encomenda') {
     const payments = store.state.payments.filter((p) => p.encomendaId === title.sourceId && !store.isReversed('payment', p.id))
       .map((p) => ({ id: p.id, at: p.at, titleId: title.id, amount: Number(p.valor) || 0, method: p.forma, kind: 'payment', legacyKind: 'payment' }));
-    const adjustments = store.state.financeSettlements.filter((s) => s.titleId === title.id && !store.isReversed('financeSettlement', s.id));
+    const adjustments = store.state.financeSettlements.filter((s) => s.titleId === title.id && activeSettlement(s));
     return [...payments, ...adjustments];
   }
   if (title.sourceType === 'sale') {
@@ -146,25 +149,26 @@ export function titleSettlements(store, title) {
     const expense = store.get('despesas', title.sourceId);
     return expense && !store.isReversed('despesa', expense.id) ? [{ id: expense.id, at: expense.at, titleId: title.id, amount: title.amount, legacyKind: 'despesa' }] : [];
   }
-  return store.state.financeSettlements.filter((s) => s.titleId === title.id && !store.isReversed('financeSettlement', s.id));
+  return store.state.financeSettlements.filter((s) => s.titleId === title.id && activeSettlement(s));
 }
 
 export function titlePaid(store, title) {
-  return titleSettlements(store, title).filter((s) => s.kind !== 'discount' && s.kind !== 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  return titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind)).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 }
 
 export function titleState(store, title, today = financeDay(new Date().toISOString())) {
   const paid = Math.max(0, titlePaid(store, title));
   const discounted = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
   const credited = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
-  const settled = paid + discounted + credited;
+  const writtenOff = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'loss').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
+  const settled = paid + discounted + credited + writtenOff;
   const balance = Math.max(0, (Number(title.amount) || 0) - settled);
   let status = 'aberto';
   if (title.cancelledAt) status = 'cancelado';
-  else if (balance <= 0.005) status = 'quitado';
+  else if (balance <= 0.005) status = writtenOff > 0.005 ? 'perda' : 'quitado';
   else if (financeDay(title.dueDate) < today) status = 'vencido';
   else if (settled > 0.005) status = 'parcial';
-  return { paid, discounted, credited, settled, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
+  return { paid, discounted, credited, writtenOff, settled, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
 }
 
 /** Cash received beyond a client's titles, minus credit already used on later titles. */
@@ -172,15 +176,17 @@ function clientCreditNet(store, clientId) {
   let credit = 0;
   for (const title of store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)) {
     const settlements = titleSettlements(store, title);
-    const paid = settlements.filter((s) => s.kind !== 'discount' && s.kind !== 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+    const paid = settlements.filter((s) => !['discount', 'credit', 'loss'].includes(s.kind)).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
     const discounted = settlements.filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
     const applied = settlements.filter((s) => s.kind === 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
     const amount = Number(title.amount) || 0;
-    credit += Math.max(0, paid + applied + Math.min(discounted, Math.max(0, amount - applied)) - amount);
+    const writtenOff = settlements.filter((s) => s.kind === 'loss').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+    credit += Math.max(0, paid + applied + Math.min(discounted + writtenOff, Math.max(0, amount - applied)) - amount);
     credit -= applied;
   }
   for (const entry of store.state.cashAdjustments) {
     if (entry.kind === 'client-credit' && entry.clientId === clientId && !store.isReversed('cashAdjustment', entry.id)) credit += Number(entry.amount) || 0;
+    if (entry.kind === 'client-payment' && entry.clientId === clientId && !store.isReversed('cashAdjustment', entry.id)) credit += Number(entry.creditAmount) || 0;
   }
   return Math.round(credit * 100) / 100;
 }
@@ -248,7 +254,7 @@ export function cashMovements(store) {
   for (const v of store.state.variableCosts) if (!store.isReversed('variableCost', v.id)) out.push({ id: `variableCost:${v.id}`, at: v.at, direction: 'saida', amount: Number(v.amount) || 0, label: v.description || v.note || 'Custo antigo', sourceType: 'variableCost', sourceId: v.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'outros-custos')?.id });
   for (const st of store.state.financeSettlements) {
     if (store.isReversed('financeSettlement', st.id)) continue;
-    if (st.kind === 'discount' || st.kind === 'credit') continue;
+    if (['discount', 'credit', 'loss', 'client-payment-allocation'].includes(st.kind)) continue;
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
     out.push({ id: `financeSettlement:${st.id}`, at: st.at, direction: title.direction === 'receber' ? 'entrada' : 'saida', amount: Number(st.amount) || 0, label: title.description, method: st.method, sourceType: 'financeSettlement', sourceId: st.id, titleId: title.id, accountId: st.accountId || fallbackAccount, categoryId: title.categoryId });
   }

@@ -52,6 +52,12 @@ export function managerialDre(store, start, end) {
     }
   }
 
+  for (const settlement of store.state.financeSettlements) {
+    if (settlement.kind !== 'loss' || store.isReversed('financeSettlement', settlement.id) || !dreInPeriod(settlement.at, start, end)) continue;
+    const title = store.get('financeTitles', settlement.titleId);
+    if (title?.direction === 'receber' && !title.cancelledAt) classify('pagar', dreAmount(settlement.amount), store.state.categories.find((c) => c.systemKey === 'perdas-clientes'), `Perda com cliente · ${title.partyName || title.description}`, 'loss');
+  }
+
   // Operational records created before the title-based Financeiro remain valid and are included
   // only when no linked title exists, preventing double counting after migrations.
   for (const order of store.state.encomendas) if (!order.desistenciaAt && !linkedSources.has(`encomenda:${order.id}`) && dreInPeriod(order.deliveryDate || order.at, start, end)) {

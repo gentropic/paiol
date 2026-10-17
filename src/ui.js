@@ -2462,7 +2462,7 @@ MODALS['fiado-cliente'] = (ctx, m) => {
 
 // ── Financeiro ERP — títulos, baixas, caixa, compras e relatórios ─────────────────────────────
 
-const FIN_STATUS = { aberto: ['Em aberto', 'pa-warn'], parcial: ['Parcial', 'pa-warn'], vencido: ['Vencido', 'pa-bad'], quitado: ['Quitado', 'pa-ok'], cancelado: ['Cancelado', ''] };
+const FIN_STATUS = { aberto: ['Em aberto', 'pa-warn'], parcial: ['Parcial', 'pa-warn'], vencido: ['Vencido', 'pa-bad'], quitado: ['Quitado', 'pa-ok'], perda: ['Perda', 'pa-bad'], cancelado: ['Cancelado', ''] };
 const titleBadge = (status) => el('span', { class: `pa-badge ${FIN_STATUS[status]?.[1] || ''}`, text: FIN_STATUS[status]?.[0] || status });
 const activeFinanceCategories = (store, direction) => store.state.categories.filter((c) => {
   if (c.archived || !c.parentId || c.cashFlowGroup === 'nao-caixa') return false;
@@ -2610,10 +2610,10 @@ function financeTitlePanel(ctx, direction) {
   const selectedCategory = financeCategories.some((c) => c.id === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : undefined;
   let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status, categoryId: selectedCategory });
   if (direction === 'receber') rows = rows.filter((r) => !r.title.cancelledAt);
-  const methodReceipts = (title) => titleSettlements(store, title).filter((s) => s.kind !== 'discount' && s.kind !== 'credit' && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
+  const methodReceipts = (title) => titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
   if (receivedMethod) rows = rows.map((r) => ({ ...r, methodPaid: methodReceipts(r.title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0) })).filter((r) => r.methodPaid > 0.005);
   if (selectedParty) rows = rows.filter((r) => direction === 'receber' ? personKey(r.title) === selectedPersonKey : r.title.partyId === selectedParty || (!r.title.partyId && `name:${norm(r.title.partyName)}` === selectedParty));
-  const total = rows.reduce((s, r) => s + (receivedMethod ? r.methodPaid : status === 'quitado' ? r.paid : r.balance), 0);
+  const total = rows.reduce((s, r) => s + (receivedMethod ? r.methodPaid : status === 'quitado' ? r.paid : status === 'perda' ? r.writtenOff : r.balance), 0);
   const currentClientBalance = direction === 'receber' ? listTitles(store, { direction: 'receber' }).filter((r) => !r.title.cancelledAt && (!selectedPersonKey || personKey(r.title) === selectedPersonKey)).reduce((sum, r) => sum + r.balance, 0) : 0;
   const filteredGroups = new Map();
   if (direction === 'receber' && status === 'todos' && receivePeriod === 'all' && !receivedMethod) {
@@ -2626,10 +2626,10 @@ function financeTitlePanel(ctx, direction) {
   if (direction === 'receber') for (const row of rows) {
     const key = personKey(row.title);
     const group = filteredGroups.get(key) || { key, name: store.get('clients', row.title.partyId)?.name || row.title.partyName || 'Sem cliente', amount: 0, count: 0, date: '' };
-    group.amount += receivedMethod ? row.methodPaid : status === 'quitado' ? row.paid : row.balance;
+    group.amount += receivedMethod ? row.methodPaid : status === 'quitado' ? row.paid : status === 'perda' ? row.writtenOff : row.balance;
     group.count++;
     const receiptDates = receivedMethod || status === 'quitado'
-      ? titleSettlements(store, row.title).filter((s) => s.kind !== 'discount' && s.kind !== 'credit' && (!receivedMethod || norm(s.method) === norm(receivedMethod)) && inDateRange(s.at, start, end)).map((s) => s.at).sort()
+      ? titleSettlements(store, row.title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && (!receivedMethod || norm(s.method) === norm(receivedMethod)) && inDateRange(s.at, start, end)).map((s) => s.at).sort()
       : [];
     const date = receiptDates.length ? receiptDates[receiptDates.length - 1] : row.title.dueDate;
     if (date && (!group.date || (receivedMethod || status === 'quitado' ? date > group.date : date < group.date))) group.date = date;
@@ -2639,10 +2639,10 @@ function financeTitlePanel(ctx, direction) {
   const filteredClientList = direction === 'receber' && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, filteredClients.map((p) => el('li', {
     class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openClientStatement(p.key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openClientStatement(p.key); } },
   }, [el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? 'Último recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` · ${p.count} lançamentos` : ''}` : 'Sem lançamentos' })]),
-    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
+    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: status === 'perda' ? 'Perda' : receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
   const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
     el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('strong', { text: r.title.partyName || r.title.description }), titleBadge(r.status)]), el('span', { class: 'pa-muted', text: `${fmtDate(r.title.dueDate)} · ${r.title.description}${r.overdueDays ? ` · ${r.overdueDays} dia(s) em atraso` : ''}` })]),
-    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod ? `recebido por ${receivedMethod}` : r.status === 'quitado' ? 'recebido/pago' : 'saldo' }), el('strong', { class: r.status === 'vencido' ? 'pa-bad' : '', text: brl(receivedMethod ? r.methodPaid : r.status === 'quitado' ? r.paid : r.balance) })]), el('span', { class: 'pa-chev', text: '›' }),
+    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod ? `recebido por ${receivedMethod}` : r.status === 'perda' ? 'perda' : r.status === 'quitado' ? 'recebido/pago' : 'saldo' }), el('strong', { class: r.status === 'vencido' ? 'pa-bad' : '', text: brl(receivedMethod ? r.methodPaid : r.status === 'perda' ? r.writtenOff : r.status === 'quitado' ? r.paid : r.balance) })]), el('span', { class: 'pa-chev', text: '›' }),
   ])));
   const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), onclick: () => ctx.actions.setFinanceView({ finStatus: key }) }, label);
   const partyFilter = direction === 'receber' ? (() => {
@@ -2670,7 +2670,7 @@ function financeTitlePanel(ctx, direction) {
     return picker;
   })() : el('select', { class: 'pa-input', 'data-testid': `fin-${direction}-party`, onchange: (e) => ctx.actions.setFinanceView({ finPartyId: e.target.value }) }, [el('option', { value: '', text: 'Todos os fornecedores' }), ...partyChoices.map((p) => el('option', { value: p.key, text: p.name, ...(selectedParty === p.key ? { selected: 'selected' } : {}) }))]);
   const catFilter = direction === 'pagar' && el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finTitleCategory: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...financeCategories.map((c) => el('option', { value: c.id, text: c.name, ...(selectedCategory === c.id ? { selected: 'selected' } : {}) }))]);
-  const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && s.kind !== 'discount' && s.kind !== 'credit').map((s) => s.method)].filter(Boolean))];
+  const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && !['discount', 'credit', 'loss'].includes(s.kind)).map((s) => s.method), ...store.state.cashAdjustments.filter((a) => a.kind === 'client-payment' && !store.isReversed('cashAdjustment', a.id)).map((a) => a.method)].filter(Boolean))];
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
     direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openClientStatement(selectedParty || '') }, 'Ficha do cliente'),
@@ -2685,11 +2685,11 @@ function financeTitlePanel(ctx, direction) {
     ]),
     (direction === 'pagar' || receivePeriod === 'custom') && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finStart: s, finEnd: e }), `fin-${direction}`),
     direction === 'receber' && receivePeriod === 'custom' && !receivedMethod && el('p', { class: 'pa-hint', text: 'As datas limitam a lista aos títulos com vencimento no período escolhido.' }),
-    receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda não quitadas, escolha “Em aberto”, “Parciais” ou “Todos”.` }),
+    receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda não quitadas, escolha “Em aberto” ou “Todos”.` }),
     el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
-    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), direction === 'pagar' && chip('parcial', 'Parciais'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), chip('todos', 'Todos')].filter(Boolean)),
+    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), direction === 'pagar' && chip('parcial', 'Parciais'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), direction === 'receber' && chip('perda', 'Perdas'), chip('todos', 'Todos')].filter(Boolean)),
     direction === 'receber' && (receivePeriod === 'custom' || status !== 'aberto' || receivedMethod) && el('p', { class: 'pa-hint', text: `Saldo em aberto em todo o histórico: ${brl(currentClientBalance)}. Esse valor não muda com os filtros de datas, situação ou forma recebida.` }),
-    el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
+    el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'perda' ? 'Perdas no filtro' : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
     direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes no filtro (${filteredClients.length})` }),
     direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes…', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente com lançamentos neste filtro.' })),
     direction === 'pagar' && (rows.length ? el('div', {}, [searchInput('Buscar fornecedor…', ul, `fin-${direction}-search`), ul]) : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
@@ -2868,33 +2868,39 @@ MODALS['client-statement-payment'] = (ctx, m) => clientStatementPaymentSheet(ctx
 function clientStatementPaymentSheet(ctx, clientId) {
   const { store } = ctx; const client = store.get('clients', clientId);
   if (!client) return sheet({ title: 'Cliente não encontrado', rows: [] });
+  const openTitles = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
+    .map((title) => ({ title, balance: titleState(store, title).balance }))
+    .filter((row) => row.balance > 0.005)
+    .sort((a, b) => String(a.title.issuedAt || '').localeCompare(String(b.title.issuedAt || '')));
+  const totalOpen = Math.round(openTitles.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
   const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'client-payment-date' });
-  const amount = moneyField(null, 'client-payment-amount');
+  const amount = moneyField(totalOpen || null, 'client-payment-amount');
   const method = paymentMethodSelect(store, 'client-payment-method');
   const account = el('select', { class: 'pa-input', 'data-testid': 'client-payment-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
   const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
+  amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
     const value = Math.round((parseNum(amount.input.value) || 0) * 100) / 100;
     if (value <= 0) { amount.input.focus(); return; }
+    const latestOpen = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
+      .map((title) => ({ title, balance: titleState(store, title).balance }))
+      .filter((row) => row.balance > 0.005)
+      .sort((a, b) => String(a.title.issuedAt || '').localeCompare(String(b.title.issuedAt || '')));
+    const currentTotal = Math.round(latestOpen.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
+    if (value + 0.005 < currentTotal) {
+      amount.input.setCustomValidity(`Para quitar todas as faturas, informe pelo menos ${brl(currentTotal)}. Para uma fatura, use “Quitar esta fatura” na ficha.`);
+      amount.input.reportValidity(); return;
+    }
     const at = dateIso(date.value);
     ctx.actions.mutate((s) => {
-      let remaining = value;
-      const titles = s.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
-        .sort((a, b) => String(a.issuedAt || '').localeCompare(String(b.issuedAt || '')));
-      for (const title of titles) {
-        if (remaining < 0.005) break;
-        const due = titleState(s, title).balance;
-        const applied = Math.round(Math.min(remaining, due) * 100) / 100;
-        if (applied < 0.005) continue;
-        if (title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at, encomendaId: title.sourceId, valor: applied, forma: method.value });
-        else s.addFinanceSettlement({ id: uuid(), at, titleId: title.id, amount: applied, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
-        remaining = Math.round((remaining - applied) * 100) / 100;
-      }
-      if (remaining > 0.005) s.addCashAdjustment({ id: uuid(), at, kind: 'client-credit', direction: 'entrada', clientId, amount: remaining, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Crédito de ${clientLabel(client)}` });
+      const paymentId = uuid();
+      const creditAmount = Math.max(0, Math.round((value - currentTotal) * 100) / 100);
+      s.addCashAdjustment({ id: paymentId, at, kind: 'client-payment', direction: 'entrada', clientId, amount: value, creditAmount, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Pagamento total de ${clientLabel(client)}` });
+      for (const row of latestOpen) s.addFinanceSettlement({ id: uuid(), at, titleId: row.title.id, amount: row.balance, kind: 'client-payment-allocation', paymentId, method: method.value, notes: 'Quitação pelo pagamento total do cliente' });
     });
     if (ctx.view.tab !== 'fin-ficha') ctx.actions.openModal({ kind: 'client-statement', clientId });
   }
-  return sheet({ title: 'Registrar pagamento do cliente', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. O pagamento quita os valores em aberto; o excedente vira crédito para uma próxima compra.` }), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
+  return sheet({ title: 'Registrar pagamento total', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. Registre um único recebimento para quitar todas as faturas em aberto. O excedente vira crédito para a próxima compra.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Total em aberto: ' }), el('strong', { text: brl(totalOpen) })]), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
 }
 
 function financeClientStatementPanel(ctx) {
@@ -2926,11 +2932,11 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
 
   const currentStatement = () => clientFinancialStatement(store, clientId, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
   const movementRow = (row) => {
-    const purchase = row.type === 'purchase'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount'; const creditRow = row.type === 'credit-application';
+    const purchase = row.type === 'purchase'; const charge = row.type === 'charge'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount'; const creditRow = row.type === 'credit-application'; const lossRow = row.type === 'loss';
     return el('section', { class: 'pa-detail-card', 'data-testid': `client-statement-${row.type}` }, [
       el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : creditRow ? 'Crédito utilizado' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
-        el('strong', { class: payment ? 'pa-positive' : discountRow || creditRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow || creditRow ? '− ' : ''}${brl(row.amount)}` }),
+        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : creditRow ? 'Crédito utilizado' : lossRow ? 'Perda registrada' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
+        el('strong', { class: payment ? 'pa-positive' : discountRow || creditRow || lossRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow || creditRow || lossRow ? '− ' : ''}${brl(row.amount)}` }),
       ]),
       purchase && el('ul', { class: 'pa-list pa-tight' }, row.items.map((item) => el('li', { class: 'pa-list-item' }, [
         el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)}× ${item.name}` }),
@@ -2940,11 +2946,14 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
       purchase && el('p', { class: 'pa-muted', text: [`Entrega: ${row.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, row.freight > 0 && `Frete ${brl(row.freight)}`, row.notes && `Obs.: ${row.notes}`].filter(Boolean).join(' · ') }),
       purchase && row.discount > 0 && el('p', { class: 'pa-badge pa-ok', text: `Desconto da venda: ${brl(row.discount)}` }),
       !purchase && el('p', { class: 'pa-muted', text: `${row.description}${payment && row.method ? ` · ${row.method}` : ''}` }),
-      !payment && !discountRow && el('div', { class: 'pa-row' }, [
+      (purchase || charge) && el('div', { class: 'pa-row' }, [
         el('span', { class: 'pa-muted pa-grow', text: `Recebido ${brl(row.paid)}` }),
         row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
         row.credited > 0.005 && el('span', { class: 'pa-muted', text: `Crédito usado ${brl(row.credited)}` }),
-        el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : 'quitado' }),
+        row.writtenOff > 0.005 && el('span', { class: 'pa-muted', text: `Perda ${brl(row.writtenOff)}` }),
+        el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : row.writtenOff > 0.005 ? 'pa-badge pa-bad' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : row.writtenOff > 0.005 ? 'baixa por perda' : 'quitado' }),
+        row.titleId && row.balance > 0.005 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'client-statement-settle-title', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: row.titleId, fullOnly: true }) }, 'Quitar esta fatura'),
+        row.titleId && row.balance > 0.005 && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-loss-title', onclick: () => ctx.actions.openModal({ kind: 'finance-title-loss', id: row.titleId }) }, 'Registrar como perda'),
         row.orderId && row.clientId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: row.clientId, orderId: row.orderId }) }, 'Gerar recibo'),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
         row.titleId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-title', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: row.titleId }) }, 'Abrir lançamento'),
@@ -2961,7 +2970,7 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
     const statement = currentStatement();
     const label = mode.value === 'periodo' ? 'no período' : 'no histórico geral';
     preview.replaceChildren(
-      el('div', { class: 'pa-statgrid' }, [statCard(`Compras ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), statCard('Crédito disponível', brl(statement.creditBalance), 'ok')]),
+      el('div', { class: 'pa-statgrid' }, [statCard(`Compras ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statement.periodLosses > 0.005 && statCard(`Perdas ${label}`, brl(statement.periodLosses), 'bad'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), statCard('Crédito disponível', brl(statement.creditBalance), 'ok')].filter(Boolean)),
       el('p', { class: 'pa-hint', text: 'O saldo atual e o crédito disponível consideram todo o histórico, mesmo quando a visualização está limitada a um período.' }),
       statement.movements.length ? el('div', {}, statement.movements.slice().reverse().map(movementRow)) : el('p', { class: 'pa-empty', text: 'Nenhuma compra ou pagamento com este filtro.' }),
     );
@@ -2993,7 +3002,7 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
     finally { print.textContent = original; print.disabled = false; }
   });
   const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: registeredClientIds()[0] }) }, 'Novo recibo para o cliente');
-  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId: registeredClientIds()[0] }) }, 'Registrar pagamento / crédito');
+  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId: registeredClientIds()[0] }) }, 'Registrar pagamento total');
   const details = el('div', {}, [field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
   renderClientPicker();
   renderStatement();
@@ -3021,15 +3030,15 @@ function financeTitleDetailSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'Título não encontrado', rows: [] }); const state = titleState(ctx.store, title); const settlements = titleSettlements(ctx.store, title); const cat = title.categoryId ? ctx.store.get('categories', title.categoryId) : null;
   const history = settlements.length ? el('ul', { class: 'pa-list pa-tight' }, settlements.slice().sort((a, b) => a.at < b.at ? 1 : -1).map((s) => {
     const correctionKind = s.legacyKind === 'payment' ? 'payment' : ctx.store.get('financeSettlements', s.id) ? 'financeSettlement' : null;
-    const isDiscount = s.kind === 'discount'; const isCredit = s.kind === 'credit';
-    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : isCredit ? 'Crédito do cliente utilizado' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount || isCredit ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), correctionKind && !isCredit && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
+    const isDiscount = s.kind === 'discount'; const isCredit = s.kind === 'credit'; const isLoss = s.kind === 'loss'; const isAllocation = s.kind === 'client-payment-allocation';
+    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : isCredit ? 'Crédito do cliente utilizado' : isLoss ? 'Baixa por perda, sem entrada no caixa' : isAllocation ? 'Quitação pelo pagamento total do cliente' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount || isCredit || isLoss ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), isLoss && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-loss-reverse', onclick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Estornar perda?', message: 'O valor voltará a ficar em aberto nesta fatura.', yesLabel: 'Estornar perda', onYes: () => ctx.actions.mutate((store) => store.addReversal({ id: uuid(), at: nowIso(), kind: 'financeSettlement', refId: s.id })) }) }, 'Estornar perda'), correctionKind && !isCredit && !isLoss && !isAllocation && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
   })) : el('p', { class: 'pa-empty', text: 'Nenhuma baixa registrada.' });
   const editAction = title.sourceType === 'manual' && !title.cancelledAt
     ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-title-edit', id: title.id }) }, 'Editar valor e dados')
     : title.sourceType === 'encomenda' && title.sourceId
       ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: title.sourceId }) }, 'Editar encomenda')
       : null;
-  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), state.credited > 0.005 && el('tr', {}, [el('td', { text: 'Crédito utilizado' }), el('td', { class: 'pa-num', text: brl(state.credited) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
+  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), state.credited > 0.005 && el('tr', {}, [el('td', { text: 'Crédito utilizado' }), el('td', { class: 'pa-num', text: brl(state.credited) })]), state.writtenOff > 0.005 && el('tr', {}, [el('td', { text: 'Perda registrada' }), el('td', { class: 'pa-num', text: brl(state.writtenOff) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id, fullOnly: title.direction === 'receber' }) }, title.direction === 'receber' ? 'Quitar esta fatura' : 'Registrar pagamento'), title.direction === 'receber' && state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn', 'data-testid': 'fin-loss-open', onclick: () => ctx.actions.openModal({ kind: 'finance-title-loss', id: title.id }) }, 'Registrar como perda'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
   return sheet({ title: title.direction === 'receber' ? 'Detalhe a receber' : 'Detalhe a pagar', rows, danger: !title.cancelledAt && state.balance > 0.005 ? { label: 'Cancelar título', testid: 'fin-title-cancel', onClick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Cancelar título?', message: 'O histórico e as baixas já realizadas serão preservados.', yesLabel: 'Cancelar título', onYes: () => ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, cancelledAt: nowIso() })) }) } : null });
 }
 
@@ -3081,22 +3090,41 @@ function financeSettlementEditSheet(ctx, m) {
   return sheet({ title: isDiscount ? 'Corrigir desconto' : title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A correção não apaga o registro anterior: ele será estornado e o novo valor ficará no histórico.' }), field('Data', date), field('Valor correto', amount), !isDiscount && field('Forma', method), !isPayment && !isDiscount && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
 }
 
-MODALS['finance-settle'] = (ctx, m) => financeSettleSheet(ctx, m.id);
-function financeSettleSheet(ctx, id) {
+MODALS['finance-settle'] = (ctx, m) => financeSettleSheet(ctx, m.id, m.fullOnly);
+function financeSettleSheet(ctx, id, fullOnly = false) {
   const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title); if (!title || !state) return sheet({ title: 'Título não encontrado', rows: [] });
   const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const discount = moneyField(null, 'fin-settle-discount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
   const isReceivable = title.direction === 'receber';
   const canCredit = isReceivable && title.partyId && ctx.store.get('clients', title.partyId);
+  if (fullOnly) amount.input.readOnly = true;
   function save() {
     const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
-    if (!(value + discountValue > 0) || discountValue > state.balance + 0.005 || (!canCredit && value + discountValue > state.balance + 0.005)) { amount.input.focus(); return; }
+    const currentBalance = titleState(ctx.store, title).balance;
+    if (fullOnly && (Math.abs(value - currentBalance) > 0.005 || currentBalance <= 0.005)) {
+      amount.input.setCustomValidity('O saldo desta fatura mudou. Reabra a quitação para conferir o valor atual.'); amount.input.reportValidity(); return;
+    }
+    if (!fullOnly && (!(value + discountValue > 0) || discountValue > currentBalance + 0.005 || (!canCredit && value + discountValue > currentBalance + 0.005))) { amount.input.focus(); return; }
     ctx.actions.mutate((s) => {
       if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
       else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
       if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
     });
   }
-  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
+  return sheet({ title: fullOnly ? 'Quitar esta fatura' : isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && !fullOnly && field('Desconto concedido na quitação (opcional)', discount), isReceivable && !fullOnly && el('p', { class: 'pa-hint', text: canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save', saveLabel: fullOnly ? 'Quitar fatura' : undefined });
+}
+
+MODALS['finance-title-loss'] = (ctx, m) => financeTitleLossSheet(ctx, m.id);
+function financeTitleLossSheet(ctx, id) {
+  const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title);
+  if (!title || !state || title.direction !== 'receber' || title.cancelledAt || state.balance <= 0.005) return sheet({ title: 'Fatura sem saldo em aberto', rows: [] });
+  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-loss-date' });
+  const notes = el('textarea', { class: 'pa-input', rows: '2', placeholder: 'Motivo da perda (opcional)', 'data-testid': 'fin-loss-notes' });
+  function save() {
+    const current = titleState(ctx.store, title);
+    if (current.balance <= 0.005) return;
+    ctx.actions.mutate((store) => store.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: current.balance, kind: 'loss', notes: notes.value.trim() || 'Baixa por perda' }));
+  }
+  return sheet({ title: 'Registrar como perda', rows: [el('p', { class: 'pa-hint', text: `Fatura de ${title.partyName || 'cliente'} · ${title.description}. A perda encerrará apenas o saldo restante desta fatura, sem entrada no caixa.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo a baixar: ' }), el('strong', { text: brl(state.balance) })]), field('Data da perda', date), field('Motivo', notes)], onSave: save, saveTestid: 'fin-loss-save', saveLabel: 'Registrar perda' });
 }
 
 function presetRange(key) {
@@ -3414,9 +3442,10 @@ function financeiroPanel(ctx) {
   for (const v of store.state.variableCosts) movements.push({ id: v.id, at: v.at, type: 'custo', label: 'Custo antigo', description: v.note || '', amount: v.amount || 0, reversalKind: 'variableCost', reversed: store.isReversed('variableCost', v.id) });
   for (const st of store.state.financeSettlements) {
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
+    if (st.kind === 'client-payment-allocation' || st.kind === 'credit') continue;
     const kind = store.get('categories', title.categoryId)?.nature;
-    const discount = st.kind === 'discount';
-    movements.push({ id: st.id, at: st.at, type: discount ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.description, discount ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount });
+    const discount = st.kind === 'discount'; const loss = st.kind === 'loss';
+    movements.push({ id: st.id, at: st.at, type: discount || loss ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: loss ? 'Perda com cliente' : discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.partyName || title.description, discount || loss ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount || loss });
   }
   for (const title of store.state.financeTitles) {
     const state = titleState(store, title); if (title.cancelledAt || state.balance <= 0.005) continue;
@@ -3424,7 +3453,7 @@ function financeiroPanel(ctx) {
     movements.push({ id: `pending-${title.id}`, at: title.dueDate, type: title.direction === 'receber' ? 'receita' : nature === 'custo' ? 'custo' : 'despesa', label: title.partyName || title.description, description: `${state.status === 'vencido' ? 'Vencido' : 'Pendente'} · ${title.description}`, amount: state.balance, pending: true });
   }
   for (const loss of store.state.perdas) movements.push({ id: loss.id, at: loss.at, type: 'custo', label: 'Perda de produção', description: loss.note || 'Sem saída de caixa', amount: loss.amount || 0, reversalKind: 'perda', reversed: store.isReversed('perda', loss.id), noncash: true });
-  for (const a of store.state.cashAdjustments) movements.push({ id: a.id, at: a.at, type: a.direction === 'saida' ? 'despesa' : 'receita', label: a.kind === 'transfer' ? 'Transferência entre contas' : 'Ajuste financeiro', description: a.description || '', amount: a.amount || 0, reversalKind: 'cashAdjustment', reversed: store.isReversed('cashAdjustment', a.id), transfer: a.kind === 'transfer' });
+  for (const a of store.state.cashAdjustments) movements.push({ id: a.id, at: a.at, type: a.direction === 'saida' ? 'despesa' : 'receita', label: a.kind === 'transfer' ? 'Transferência entre contas' : a.kind === 'client-payment' ? 'Pagamento total de cliente' : 'Ajuste financeiro', description: a.description || '', amount: a.amount || 0, reversalKind: 'cashAdjustment', reversed: store.isReversed('cashAdjustment', a.id), transfer: a.kind === 'transfer' });
   let items = movements.filter((m) => monthOf(m.at) === month);
   if (type !== 'todos') items = items.filter((m) => m.type === type);
   items.sort((a, b) => (a.at < b.at ? 1 : -1));
