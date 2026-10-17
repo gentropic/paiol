@@ -95,6 +95,7 @@ export function ensureFinanceFoundation(store, idFactory = () => crypto.randomUU
   }
 
   for (const order of store.state.encomendas) changed += syncOrderReceivable(store, order, idFactory) ? 1 : 0;
+  changed += applyClientCredits(store, idFactory);
   if ((store.state.version || 0) < 2) { store.state.version = 2; changed++; }
   return changed;
 }
@@ -149,20 +150,73 @@ export function titleSettlements(store, title) {
 }
 
 export function titlePaid(store, title) {
-  return titleSettlements(store, title).filter((s) => s.kind !== 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+  return titleSettlements(store, title).filter((s) => s.kind !== 'discount' && s.kind !== 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 }
 
 export function titleState(store, title, today = financeDay(new Date().toISOString())) {
   const paid = Math.max(0, titlePaid(store, title));
   const discounted = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
-  const settled = paid + discounted;
+  const credited = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
+  const settled = paid + discounted + credited;
   const balance = Math.max(0, (Number(title.amount) || 0) - settled);
   let status = 'aberto';
   if (title.cancelledAt) status = 'cancelado';
   else if (balance <= 0.005) status = 'quitado';
   else if (financeDay(title.dueDate) < today) status = 'vencido';
   else if (settled > 0.005) status = 'parcial';
-  return { paid, discounted, settled, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
+  return { paid, discounted, credited, settled, balance, status, overdueDays: status === 'vencido' ? Math.max(1, Math.floor((new Date(`${today}T12:00:00`) - new Date(`${financeDay(title.dueDate)}T12:00:00`)) / 86400000)) : 0 };
+}
+
+/** Cash received beyond a client's titles, minus credit already used on later titles. */
+function clientCreditNet(store, clientId) {
+  let credit = 0;
+  for (const title of store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)) {
+    const settlements = titleSettlements(store, title);
+    const paid = settlements.filter((s) => s.kind !== 'discount' && s.kind !== 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+    const discounted = settlements.filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+    const applied = settlements.filter((s) => s.kind === 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+    const amount = Number(title.amount) || 0;
+    credit += Math.max(0, paid + applied + Math.min(discounted, Math.max(0, amount - applied)) - amount);
+    credit -= applied;
+  }
+  for (const entry of store.state.cashAdjustments) {
+    if (entry.kind === 'client-credit' && entry.clientId === clientId && !store.isReversed('cashAdjustment', entry.id)) credit += Number(entry.amount) || 0;
+  }
+  return Math.round(credit * 100) / 100;
+}
+
+export function clientCreditBalance(store, clientId) {
+  return Math.max(0, clientCreditNet(store, clientId));
+}
+
+/** Apply available credit once per title. Credit use changes debt, never cash flow. */
+export function applyClientCredits(store, idFactory = () => crypto.randomUUID()) {
+  let changed = 0;
+  for (const client of store.state.clients) {
+    // A corrected or reversed payment can remove credit that was already used. Reopen the
+    // affected title instead of leaving it marked as paid by credit that no longer exists.
+    const used = store.state.financeSettlements.filter((s) => s.kind === 'credit' && !store.isReversed('financeSettlement', s.id)
+      && store.get('financeTitles', s.titleId)?.partyId === client.id).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    for (const settlement of used) {
+      if (clientCreditNet(store, client.id) >= -0.005) break;
+      store.addReversal({ id: idFactory(), at: new Date().toISOString(), kind: 'financeSettlement', refId: settlement.id });
+      changed++;
+    }
+    let available = clientCreditBalance(store, client.id);
+    if (available < 0.005) continue;
+    const titles = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === client.id && !t.cancelledAt)
+      .sort((a, b) => String(a.issuedAt || '').localeCompare(String(b.issuedAt || '')));
+    for (const title of titles) {
+      if (available < 0.005) break;
+      const balance = titleState(store, title).balance;
+      if (balance < 0.005) continue;
+      const amount = Math.round(Math.min(available, balance) * 100) / 100;
+      store.addFinanceSettlement({ id: idFactory(), at: new Date().toISOString(), titleId: title.id, amount, kind: 'credit', notes: 'Crédito do cliente aplicado automaticamente' });
+      available = Math.round((available - amount) * 100) / 100;
+      changed++;
+    }
+  }
+  return changed;
 }
 
 export function listTitles(store, filters = {}) {
@@ -194,7 +248,7 @@ export function cashMovements(store) {
   for (const v of store.state.variableCosts) if (!store.isReversed('variableCost', v.id)) out.push({ id: `variableCost:${v.id}`, at: v.at, direction: 'saida', amount: Number(v.amount) || 0, label: v.description || v.note || 'Custo antigo', sourceType: 'variableCost', sourceId: v.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'outros-custos')?.id });
   for (const st of store.state.financeSettlements) {
     if (store.isReversed('financeSettlement', st.id)) continue;
-    if (st.kind === 'discount') continue;
+    if (st.kind === 'discount' || st.kind === 'credit') continue;
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
     out.push({ id: `financeSettlement:${st.id}`, at: st.at, direction: title.direction === 'receber' ? 'entrada' : 'saida', amount: Number(st.amount) || 0, label: title.description, method: st.method, sourceType: 'financeSettlement', sourceId: st.id, titleId: title.id, accountId: st.accountId || fallbackAccount, categoryId: title.categoryId });
   }

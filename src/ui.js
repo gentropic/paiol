@@ -2035,10 +2035,11 @@ function paymentStatus(store, e) {
   const finance = title ? titleState(store, title) : null;
   const paid = finance ? finance.paid : store.paidFor(e.id);
   const discounted = finance ? finance.discounted : 0;
+  const credited = finance ? finance.credited : 0;
   const saldo = finance ? finance.balance : Math.max(0, (e.total || 0) - paid);
-  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, discounted, saldo: 0 };
-  if (paid + discounted > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, discounted, saldo };
-  return { label: 'não pago', cls: 'pa-warn', paid, discounted, saldo };
+  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, discounted, credited, saldo: 0 };
+  if (paid + discounted + credited > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, discounted, credited, saldo };
+  return { label: 'não pago', cls: 'pa-warn', paid, discounted, credited, saldo };
 }
 
 function encomendaRow(ctx, e) {
@@ -2046,7 +2047,7 @@ function encomendaRow(ctx, e) {
   const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
   const resumo = encomendaItemsResumo(store, e);
   const st = paymentStatus(store, e);
-  const paymentLabel = st.saldo <= 0.005 ? 'pago' : (st.paid > 0.005 ? 'parcial · a pagar' : 'a pagar');
+  const paymentLabel = st.saldo <= 0.005 ? 'pago' : (st.paid + st.credited > 0.005 ? 'parcial · a pagar' : 'a pagar');
   const deliveryLabel = (e.deliveryMethod || 'retirada') === 'motoboy' ? 'Motoboy' : 'Retirada';
   const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
   const urg = !e.desistenciaAt && el('button', { class: 'pa-btn pa-ghost pa-sm pa-urg-btn', title: e.urgente ? 'Tirar urgência' : 'Marcar urgente', onclick: stop(() => ctx.actions.mutate((s) => s.upsertEncomenda({ ...e, urgente: !e.urgente }))) }, e.urgente ? '⭐' : '☆');
@@ -2787,14 +2788,47 @@ function commercialDocumentSheet(ctx, modal = {}) {
 }
 
 MODALS['client-statement'] = (ctx, m) => clientStatementSheet(ctx, m);
+MODALS['client-statement-payment'] = (ctx, m) => clientStatementPaymentSheet(ctx, m.clientId);
+
+function clientStatementPaymentSheet(ctx, clientId) {
+  const { store } = ctx; const client = store.get('clients', clientId);
+  if (!client) return sheet({ title: 'Cliente não encontrado', rows: [] });
+  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'client-payment-date' });
+  const amount = moneyField(null, 'client-payment-amount');
+  const method = paymentMethodSelect(store, 'client-payment-method');
+  const account = el('select', { class: 'pa-input', 'data-testid': 'client-payment-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
+  const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
+  function save() {
+    const value = Math.round((parseNum(amount.input.value) || 0) * 100) / 100;
+    if (value <= 0) { amount.input.focus(); return; }
+    const at = dateIso(date.value);
+    ctx.actions.persist((s) => {
+      let remaining = value;
+      const titles = s.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
+        .sort((a, b) => String(a.issuedAt || '').localeCompare(String(b.issuedAt || '')));
+      for (const title of titles) {
+        if (remaining < 0.005) break;
+        const due = titleState(s, title).balance;
+        const applied = Math.round(Math.min(remaining, due) * 100) / 100;
+        if (applied < 0.005) continue;
+        if (title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at, encomendaId: title.sourceId, valor: applied, forma: method.value });
+        else s.addFinanceSettlement({ id: uuid(), at, titleId: title.id, amount: applied, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
+        remaining = Math.round((remaining - applied) * 100) / 100;
+      }
+      if (remaining > 0.005) s.addCashAdjustment({ id: uuid(), at, kind: 'client-credit', direction: 'entrada', clientId, amount: remaining, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Crédito de ${clientLabel(client)}` });
+    });
+    ctx.actions.openModal({ kind: 'client-statement', clientId });
+  }
+  return sheet({ title: 'Registrar pagamento do cliente', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. O pagamento quita os valores em aberto; o excedente vira crédito para uma próxima compra.` }), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
+}
 
 function clientStatementSheet(ctx, modal = {}) {
   const { store } = ctx;
   const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
   if (!clients.length) return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-empty', text: 'Cadastre um cliente primeiro para consultar sua ficha financeira.' })] });
 
-  const initialId = clients.some((c) => c.id === modal.clientId) ? modal.clientId : clients[0].id;
-  const client = el('select', { class: 'pa-input', 'data-testid': 'client-statement-client' }, clients.map((c) => el('option', { value: c.id, text: `${clientLabel(c)}${c.inactive ? ' (inativo)' : ''}`, ...(c.id === initialId ? { selected: 'selected' } : {}) })));
+  let clientId = clients.some((c) => c.id === modal.clientId) ? modal.clientId : '';
+  const clientPicker = el('div', { class: 'pa-cli-picker', 'data-testid': 'client-statement-client' });
   const mode = el('select', { class: 'pa-input', 'data-testid': 'client-statement-mode' }, [el('option', { value: 'geral', text: 'Geral — todo o histórico' }), el('option', { value: 'periodo', text: 'Período específico' })]);
   const start = el('input', { class: 'pa-input', 'data-testid': 'client-statement-start', type: 'date', value: ctx.view.finStart || '' });
   const end = el('input', { class: 'pa-input', 'data-testid': 'client-statement-end', type: 'date', value: ctx.view.finEnd || '' });
@@ -2802,13 +2836,13 @@ function clientStatementSheet(ctx, modal = {}) {
   const preview = el('div', { 'data-testid': 'client-statement-preview' });
   const print = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'client-statement-pdf' }, 'Gerar PDF A4 para imprimir');
 
-  const currentStatement = () => clientFinancialStatement(store, client.value, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
+  const currentStatement = () => clientFinancialStatement(store, clientId, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
   const movementRow = (row) => {
-    const purchase = row.type === 'purchase'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount';
+    const purchase = row.type === 'purchase'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount'; const creditRow = row.type === 'credit-application';
     return el('section', { class: 'pa-detail-card', 'data-testid': `client-statement-${row.type}` }, [
       el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
-        el('strong', { class: payment ? 'pa-positive' : discountRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow ? '− ' : ''}${brl(row.amount)}` }),
+        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quitação' : creditRow ? 'Crédito utilizado' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
+        el('strong', { class: payment ? 'pa-positive' : discountRow || creditRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow || creditRow ? '− ' : ''}${brl(row.amount)}` }),
       ]),
       purchase && el('ul', { class: 'pa-list pa-tight' }, row.items.map((item) => el('li', { class: 'pa-list-item' }, [
         el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)}× ${item.name}` }),
@@ -2821,23 +2855,42 @@ function clientStatementSheet(ctx, modal = {}) {
       !payment && !discountRow && el('div', { class: 'pa-row' }, [
         el('span', { class: 'pa-muted pa-grow', text: `Recebido ${brl(row.paid)}` }),
         row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
+        row.credited > 0.005 && el('span', { class: 'pa-muted', text: `Crédito usado ${brl(row.credited)}` }),
         el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : 'quitado' }),
-        row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: client.value, orderId: row.orderId }) }, 'Gerar recibo'),
+        row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId, orderId: row.orderId }) }, 'Gerar recibo'),
         row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
       ].filter(Boolean)),
     ].filter(Boolean));
   };
   function renderStatement() {
+    details.style.display = clientId ? '' : 'none';
+    if (!clientId) return;
     period.style.display = mode.value === 'periodo' ? '' : 'none';
     const statement = currentStatement();
     const label = mode.value === 'periodo' ? 'no período' : 'no histórico geral';
     preview.replaceChildren(
-      el('div', { class: 'pa-statgrid' }, [statCard(`Compras ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statCard('Saldo do filtro', brl(statement.periodBalance), statement.periodBalance > 0.005 ? 'warn' : 'soft'), statCard('Saldo atual geral', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok')]),
-      el('p', { class: 'pa-hint', text: 'O saldo atual geral considera toda a vida financeira do cliente, mesmo quando a visualização está limitada a um período.' }),
+      el('div', { class: 'pa-statgrid' }, [statCard(`Compras ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), statCard('Crédito disponível', brl(statement.creditBalance), 'ok')]),
+      el('p', { class: 'pa-hint', text: 'O saldo atual e o crédito disponível consideram todo o histórico, mesmo quando a visualização está limitada a um período.' }),
       statement.movements.length ? el('div', {}, statement.movements.slice().reverse().map(movementRow)) : el('p', { class: 'pa-empty', text: 'Nenhuma compra ou pagamento com este filtro.' }),
     );
   }
-  client.addEventListener('change', renderStatement); mode.addEventListener('change', renderStatement); start.addEventListener('change', renderStatement); end.addEventListener('change', renderStatement);
+  function renderClientPicker() {
+    const selected = clientId && store.get('clients', clientId);
+    if (selected) {
+      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } }, '✕')]));
+      return;
+    }
+    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do cliente…', 'data-testid': 'client-statement-search' });
+    const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
+    search.addEventListener('input', () => {
+      const query = norm(search.value);
+      const matches = query ? clients.filter((c) => norm(clientSearchText(c)).includes(query)).slice(0, 8) : [];
+      results.style.display = matches.length ? '' : 'none';
+      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { clientId = c.id; renderClientPicker(); renderStatement(); } }, clientLabel(c))));
+    });
+    clientPicker.replaceChildren(search, results);
+  }
+  mode.addEventListener('change', renderStatement); start.addEventListener('change', renderStatement); end.addEventListener('change', renderStatement);
   print.addEventListener('click', async () => {
     const statement = currentStatement(); const original = print.textContent; print.textContent = 'Gerando PDF…'; print.disabled = true;
     try {
@@ -2847,9 +2900,12 @@ function clientStatementSheet(ctx, modal = {}) {
     } catch (error) { window.alert('Não foi possível gerar a ficha financeira: ' + ((error && error.message) || error)); }
     finally { print.textContent = original; print.disabled = false; }
   });
-  const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: client.value }) }, 'Novo recibo para o cliente');
+  const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId }) }, 'Novo recibo para o cliente');
+  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId }) }, 'Registrar pagamento / crédito');
+  const details = el('div', {}, [field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
+  renderClientPicker();
   renderStatement();
-  return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-hint', text: 'Consulte compras, produtos e pagamentos. A impressão detalhada permite recuperar posteriormente o histórico de uma encomenda.' }), field('Cliente', client), field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [receipt, print])] });
+  return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-hint', text: 'Busque um cliente para consultar suas compras, pagamentos e crédito.' }), field('Cliente', clientPicker), details] });
 }
 
 MODALS['finance-title-add'] = (ctx, m) => financeTitleAddSheet(ctx, m.direction || 'pagar');
@@ -2873,15 +2929,15 @@ function financeTitleDetailSheet(ctx, id) {
   const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'Título não encontrado', rows: [] }); const state = titleState(ctx.store, title); const settlements = titleSettlements(ctx.store, title); const cat = title.categoryId ? ctx.store.get('categories', title.categoryId) : null;
   const history = settlements.length ? el('ul', { class: 'pa-list pa-tight' }, settlements.slice().sort((a, b) => a.at < b.at ? 1 : -1).map((s) => {
     const correctionKind = s.legacyKind === 'payment' ? 'payment' : ctx.store.get('financeSettlements', s.id) ? 'financeSettlement' : null;
-    const isDiscount = s.kind === 'discount';
-    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), correctionKind && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
+    const isDiscount = s.kind === 'discount'; const isCredit = s.kind === 'credit';
+    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quitação' : isCredit ? 'Crédito do cliente utilizado' : (s.method || 'Forma não informada') })]), el('strong', { class: isDiscount || isCredit ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), correctionKind && !isCredit && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
   })) : el('p', { class: 'pa-empty', text: 'Nenhuma baixa registrada.' });
   const editAction = title.sourceType === 'manual' && !title.cancelledAt
     ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-title-edit', id: title.id }) }, 'Editar valor e dados')
     : title.sourceType === 'encomenda' && title.sourceId
       ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: title.sourceId }) }, 'Editar encomenda')
       : null;
-  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
+  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emissão' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quitação' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), state.credited > 0.005 && el('tr', {}, [el('td', { text: 'Crédito utilizado' }), el('td', { class: 'pa-num', text: brl(state.credited) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id }) }, title.direction === 'receber' ? 'Registrar recebimento' : 'Registrar pagamento'), el('h3', { class: 'pa-h3', text: 'Histórico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O vínculo evita lançamentos duplicados.` })].filter(Boolean);
   return sheet({ title: title.direction === 'receber' ? 'Detalhe a receber' : 'Detalhe a pagar', rows, danger: !title.cancelledAt && state.balance > 0.005 ? { label: 'Cancelar título', testid: 'fin-title-cancel', onClick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Cancelar título?', message: 'O histórico e as baixas já realizadas serão preservados.', yesLabel: 'Cancelar título', onYes: () => ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, cancelledAt: nowIso() })) }) } : null });
 }
 
@@ -2940,14 +2996,14 @@ function financeSettleSheet(ctx, id) {
   const isReceivable = title.direction === 'receber';
   function save() {
     const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
-    if (!(value + discountValue > 0) || value + discountValue > state.balance + 0.005) { amount.input.focus(); return; }
+    if (!(value + discountValue > 0) || discountValue > state.balance + 0.005 || (!isReceivable && value + discountValue > state.balance + 0.005)) { amount.input.focus(); return; }
     ctx.actions.mutate((s) => {
       if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
       else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
       if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
     });
   }
-  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: 'O valor recebido entra no caixa. O desconto apenas reduz o saldo do cliente e ficará identificado no histórico.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
+  return sheet({ title: isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && field('Desconto concedido na quitação (opcional)', discount), isReceivable && el('p', { class: 'pa-hint', text: 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save' });
 }
 
 function presetRange(key) {

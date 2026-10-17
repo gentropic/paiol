@@ -383,8 +383,8 @@ export async function generateClientStatementPdf(statement) {
   const summary = [
     ['Compras no filtro', statement.periodPurchases, navy],
     ['Pagamentos no filtro', statement.periodPayments, good],
-    ['Saldo do filtro', statement.periodBalance, statement.periodBalance > 0.005 ? bad : navy],
-    ['Saldo atual geral', statement.currentBalance, statement.currentBalance > 0.005 ? bad : good],
+    ['Saldo atual', statement.currentBalance, statement.currentBalance > 0.005 ? bad : good],
+    ['Crédito disponível', statement.creditBalance || 0, good],
   ];
   const boxW = (right - M - 12) / 2; const boxH = 42;
   summary.forEach(([label, value, color], index) => {
@@ -397,12 +397,13 @@ export async function generateClientStatementPdf(statement) {
   page.drawText('MOVIMENTAÇÕES', { x: M, y, size: 8.5, font: bold, color: navy }); y -= 13;
 
   for (const movement of statement.movements || []) {
-    if (movement.type === 'payment' || movement.type === 'discount') {
+    if (movement.type === 'payment' || movement.type === 'discount' || movement.type === 'credit-application') {
       const discount = movement.type === 'discount';
+      const credit = movement.type === 'credit-application';
       ensure(38);
       page.drawLine({ start: { x: M, y: y + 5 }, end: { x: right, y: y + 5 }, thickness: 0.5, color: line });
-      page.drawText(`${ptDate(movement.at)}  ${discount ? 'DESCONTO NA QUITAÇÃO' : 'PAGAMENTO'}`, { x: M, y: y - 8, size: 9, font: bold, color: discount ? navy : good });
-      rightText(page, money(movement.amount), right, y - 8, 10, bold, discount ? navy : good);
+      page.drawText(`${ptDate(movement.at)}  ${discount ? 'DESCONTO NA QUITAÇÃO' : credit ? 'CRÉDITO UTILIZADO' : 'PAGAMENTO'}`, { x: M, y: y - 8, size: 9, font: bold, color: discount || credit ? navy : good });
+      rightText(page, money(movement.amount), right, y - 8, 10, bold, discount || credit ? navy : good);
       y -= 21;
       page.drawText(trunc(`${movement.description}${movement.method ? ` - ${movement.method}` : ''}`, 82), { x: M + 12, y, size: 8.5, font, color: soft });
       y -= 17;
@@ -447,9 +448,10 @@ export async function generateClientStatementPdf(statement) {
     }
     ensure(17);
     const discountText = movement.discounted > 0.005 ? `  -  Desconto ${money(movement.discounted)}` : '';
+    const creditText = movement.credited > 0.005 ? `  -  Crédito ${money(movement.credited)}` : '';
     const status = movement.balance > 0.005
-      ? `Recebido ${money(movement.paid)}${discountText}  -  Em aberto ${money(movement.balance)}`
-      : `Recebido ${money(movement.paid)}${discountText}  -  QUITADO`;
+      ? `Recebido ${money(movement.paid)}${discountText}${creditText}  -  Em aberto ${money(movement.balance)}`
+      : `Recebido ${money(movement.paid)}${discountText}${creditText}  -  QUITADO`;
     page.drawText(status, { x: M + 12, y, size: 8.5, font: bold, color: movement.balance > 0.005 ? bad : good });
     y -= 19;
   }

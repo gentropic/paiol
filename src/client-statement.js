@@ -1,7 +1,7 @@
 // Detailed client financial statement. It joins operational orders with their append-only
 // payments and manual receivables without duplicating the finance title generated for an order.
 
-import { titleSettlements, titleState } from './finance.js';
+import { clientCreditBalance, titleSettlements, titleState } from './finance.js';
 import { bundleCompositionText } from './bundles.js';
 
 const statementDate = (iso) => String(iso || '').slice(0, 10);
@@ -32,7 +32,7 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     allMovements.push({
       id: `order:${order.id}`, type: 'purchase', at: order.deliveryDate || order.at,
       orderId: order.id, description: 'Compra / encomenda', amount: total, items,
-      paid: Math.min(total, paid), discounted: state?.discounted || 0, balance: state ? state.balance : Math.max(0, total - paid),
+      paid: Math.min(total, paid), discounted: state?.discounted || 0, credited: state?.credited || 0, balance: state ? state.balance : Math.max(0, total - paid),
       deliveryMethod: order.deliveryMethod || 'retirada', freight: Number(order.frete) || 0, discount: Number(order.discount) || 0, notes: order.notes,
     });
     for (const payment of store.state.payments.filter((p) => p.encomendaId === order.id && !store.isReversed('payment', p.id))) {
@@ -42,8 +42,8 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
         amount: Number(payment.valor) || 0, method: payment.forma,
       });
     }
-    for (const settlement of title ? titleSettlements(store, title).filter((row) => row.kind === 'discount') : []) {
-      allMovements.push({ id: `discount:${settlement.id}`, type: 'discount', at: settlement.at, orderId: order.id, description: 'Desconto concedido na quitação', amount: Number(settlement.amount) || 0 });
+    for (const settlement of title ? titleSettlements(store, title).filter((row) => ['discount', 'credit'].includes(row.kind)) : []) {
+      allMovements.push({ id: `${settlement.kind}:${settlement.id}`, type: settlement.kind === 'credit' ? 'credit-application' : 'discount', at: settlement.at, orderId: order.id, description: settlement.kind === 'credit' ? 'Crédito aplicado na encomenda' : 'Desconto concedido na quitação', amount: Number(settlement.amount) || 0 });
     }
   }
 
@@ -52,25 +52,30 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
   for (const title of store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && t.sourceType !== 'encomenda' && !t.cancelledAt)) {
     const amount = Number(title.amount) || 0;
     const settlements = titleSettlements(store, title);
-    const paid = settlements.filter((row) => row.kind !== 'discount').reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-    const discounted = settlements.filter((row) => row.kind === 'discount').reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+    const state = titleState(store, title);
+    const paid = state.paid;
+    const discounted = state.discounted;
     allMovements.push({
       id: `title:${title.id}`, type: 'charge', at: title.issuedAt || title.competenceDate || title.dueDate,
       titleId: title.id, description: title.description || 'Valor a receber', amount,
-      paid: Math.min(amount, paid), discounted, balance: Math.max(0, amount - paid - discounted), dueDate: title.dueDate,
+      paid: Math.min(amount, paid), discounted, credited: state.credited, balance: state.balance, dueDate: title.dueDate,
     });
     for (const settlement of settlements) {
       allMovements.push({
-        id: `settlement:${settlement.id}`, type: settlement.kind === 'discount' ? 'discount' : 'payment', at: settlement.at, titleId: title.id,
-        description: settlement.kind === 'discount' ? 'Desconto concedido na quitação' : `Pagamento de ${title.description || 'valor a receber'}`,
+        id: `settlement:${settlement.id}`, type: settlement.kind === 'discount' ? 'discount' : settlement.kind === 'credit' ? 'credit-application' : 'payment', at: settlement.at, titleId: title.id,
+        description: settlement.kind === 'discount' ? 'Desconto concedido na quitação' : settlement.kind === 'credit' ? 'Crédito aplicado no valor a receber' : `Pagamento de ${title.description || 'valor a receber'}`,
         amount: Number(settlement.amount) || 0, method: settlement.method,
       });
     }
   }
 
+  for (const entry of store.state.cashAdjustments.filter((a) => a.kind === 'client-credit' && a.clientId === clientId && !store.isReversed('cashAdjustment', a.id))) {
+    allMovements.push({ id: `client-credit:${entry.id}`, type: 'payment', at: entry.at, description: entry.description || 'Pagamento recebido como crédito', amount: Number(entry.amount) || 0, method: entry.method });
+  }
+
   allMovements.sort((a, b) => String(a.at).localeCompare(String(b.at)) || (a.type === 'payment' ? 1 : -1));
   const movements = allMovements.filter((row) => statementInPeriod(row.at, start, end));
-  const charges = (rows) => rows.filter((row) => !['payment', 'discount'].includes(row.type)).reduce((sum, row) => sum + row.amount, 0);
+  const charges = (rows) => rows.filter((row) => ['purchase', 'charge'].includes(row.type)).reduce((sum, row) => sum + row.amount, 0);
   const payments = (rows) => rows.filter((row) => row.type === 'payment').reduce((sum, row) => sum + row.amount, 0);
   const discounts = (rows) => rows.filter((row) => row.type === 'discount').reduce((sum, row) => sum + row.amount, 0);
   const totalCharged = charges(allMovements);
@@ -82,6 +87,9 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     periodPayments: payments(movements),
     periodDiscounts: discounts(movements),
     periodBalance: charges(movements) - payments(movements) - discounts(movements),
-    totalCharged, totalPaid, totalDiscounted: discounts(allMovements), currentBalance: Math.max(0, totalCharged - totalPaid - discounts(allMovements)),
+    totalCharged, totalPaid, totalDiscounted: discounts(allMovements),
+    currentBalance: store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt).reduce((sum, t) => sum + titleState(store, t).balance, 0)
+      + allMovements.filter((row) => row.type === 'purchase' && !store.state.financeTitles.some((t) => t.sourceType === 'encomenda' && t.sourceId === row.orderId)).reduce((sum, row) => sum + row.balance, 0),
+    creditBalance: clientCreditBalance(store, clientId),
   };
 }
