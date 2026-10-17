@@ -288,7 +288,7 @@ export function renderApp(root, ctx) {
       el('button', { class: 'pa-btn pa-sm', 'data-testid': 'update-apply', onclick: () => ctx.actions.applyUpdate() }, 'Atualizar'),
     ]));
   }
-  if (section.screens.length > 1) {
+  if (section.screens.length > 1 && section.id !== 'financeiro') {
     content.push(el('div', { class: 'pa-modulebar', 'aria-label': `Módulos de ${section.label}` }, section.screens.map(([sid, label]) =>
       el('button', { class: 'pa-modulebtn' + (sid === tab ? ' active' : ''), 'data-screen': sid, onclick: () => ctx.actions.setTab(sid) }, label))));
   }
