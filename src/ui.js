@@ -294,7 +294,7 @@ export function renderApp(root, ctx) {
   }
   content.push((panels[tab] || inicioPanel)(ctx));
 
-  root.replaceChildren(...[
+  const shell = [
     el('header', { class: 'pa-header' }, [
       el('div', { class: 'pa-brand pa-grow' }, [
         el('img', { class: 'pa-brand-logo', src: './brand-logo.png', alt: 'Quitutes do Paiol' }),
@@ -315,8 +315,14 @@ export function renderApp(root, ctx) {
         el('span', { class: 'pa-navico', text: sec.icon }),
         el('span', { class: 'pa-navlbl', text: sec.label }),
       ]))),
-    ctx.view.modal && modalOverlay(ctx),
-  ].filter(Boolean)); // drop the falsy modal slot — replaceChildren would coerce it to a "null" text node
+  ];
+  const existingBackdrop = root.querySelector(':scope > .pa-backdrop');
+  if (ctx.view.modal && existingBackdrop?.paiolModal === ctx.view.modal) {
+    // Data may sync while a form is open. Keep the same dialog node so its fields and focus survive.
+    const oldShell = [...root.children].filter((child) => child !== existingBackdrop);
+    existingBackdrop.before(...shell);
+    for (const child of oldShell) child.remove();
+  } else root.replaceChildren(...shell, ...(ctx.view.modal ? [modalOverlay(ctx)] : []));
 }
 
 /**
@@ -339,6 +345,7 @@ function modalOverlay(ctx) {
   const build = MODALS[m.kind];
   const body = build ? build(ctx, m) : el('div');
   const backdrop = el('div', { class: 'pa-backdrop' });
+  backdrop.paiolModal = m;
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) ctx.actions.closeModal(); });
   backdrop.append(el('div', { class: 'pa-sheet', role: 'dialog' }, body));
   return backdrop;
@@ -2870,7 +2877,7 @@ function clientStatementPaymentSheet(ctx, clientId) {
     const value = Math.round((parseNum(amount.input.value) || 0) * 100) / 100;
     if (value <= 0) { amount.input.focus(); return; }
     const at = dateIso(date.value);
-    ctx.actions.persist((s) => {
+    ctx.actions.mutate((s) => {
       let remaining = value;
       const titles = s.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
         .sort((a, b) => String(a.issuedAt || '').localeCompare(String(b.issuedAt || '')));
