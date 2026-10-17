@@ -30,7 +30,7 @@ export async function boot(root) {
     dashboardPreset: 'mes', dashboardStart: initialStart, dashboardEnd: initialMonthEnd,
     fiadoStart: initialStart, fiadoEnd: initialEnd, fiadoStatus: 'aberto',
     finStart: initialStart, finEnd: initialMonthEnd, finStatus: 'aberto', finProjected: true,
-    finReceiveStart: '', finReceiveEnd: '',
+    finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '',
     finDirection: 'receber', finAccountId: '', finCategoryId: '', finFlowPreset: 'mes',
     finPartyId: '', finMethod: '', finTitleCategory: '',
     modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
