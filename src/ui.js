@@ -483,7 +483,7 @@ function inicioPanel(ctx) {
   const payableTodayTotal = payableToday.reduce((total, row) => total + row.balance, 0);
   const openPayablesToday = () => {
     ctx.actions.setFinanceView({
-      finStart: today, finEnd: today, finStatus: 'aberto',
+      finPayPeriod: 'custom', finPayStart: today, finPayEnd: today, finStatus: 'aberto',
       finPartyId: '', finTitleCategory: '', finMethod: '',
     });
     ctx.actions.setTab('fin-pagar');
@@ -2591,10 +2591,14 @@ function financeDashboardPanel(ctx) {
 }
 
 function financeTitlePanel(ctx, direction) {
-  const { store } = ctx; const status = direction === 'receber' && ctx.view.finStatus === 'parcial' ? 'aberto' : ctx.view.finStatus || 'aberto';
+  const { store } = ctx;
+  const requestedStatus = ctx.view.finStatus === 'parcial' ? 'aberto' : ctx.view.finStatus || 'aberto';
+  const status = direction === 'pagar' && !['aberto', 'vencido', 'quitado', 'todos'].includes(requestedStatus) ? 'aberto' : requestedStatus;
   const receivePeriod = ctx.view.finReceivePeriod || 'all';
-  const start = direction === 'receber' && receivePeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveStart || '' : ctx.view.finStart;
-  const end = direction === 'receber' && receivePeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveEnd || '' : ctx.view.finEnd;
+  const payPeriod = ctx.view.finPayPeriod || 'all';
+  const selectedPeriod = direction === 'receber' ? receivePeriod : payPeriod;
+  const start = selectedPeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveStart || '' : ctx.view.finPayStart || '';
+  const end = selectedPeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveEnd || '' : ctx.view.finPayEnd || '';
   const receivedMethod = direction === 'receber' ? ctx.view.finMethod || '' : '';
   const parties = direction === 'receber' ? store.state.clients : store.state.suppliers;
   const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name }]));
@@ -2604,11 +2608,22 @@ function financeTitlePanel(ctx, direction) {
   }
   const partyChoices = [...partyMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   const personKey = (title) => `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
-  const financeCategories = direction === 'pagar' ? activeFinanceCategories(store, direction) : [];
+  const financeCategoryMap = new Map();
+  if (direction === 'pagar') for (const title of store.state.financeTitles.filter((t) => t.direction === 'pagar' && !t.cancelledAt)) {
+    const category = title.categoryId ? store.get('categories', title.categoryId) : null;
+    const name = category?.name || 'Sem categoria';
+    const key = category ? norm(name) : '__sem_categoria__';
+    if (!financeCategoryMap.has(key)) financeCategoryMap.set(key, { key, name });
+  }
+  const financeCategories = [...financeCategoryMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   const selectedParty = partyChoices.some((p) => p.key === ctx.view.finPartyId) ? ctx.view.finPartyId : undefined;
   const selectedPersonKey = direction === 'receber' && selectedParty ? selectedParty.startsWith('name:') ? selectedParty : `name:${norm(store.get('clients', selectedParty)?.name || partyMap.get(selectedParty)?.name)}` : '';
-  const selectedCategory = financeCategories.some((c) => c.id === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : undefined;
-  let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status, categoryId: selectedCategory });
+  const selectedCategory = financeCategories.some((c) => c.key === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : '';
+  let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status });
+  if (selectedCategory) rows = rows.filter((row) => {
+    const category = row.title.categoryId ? store.get('categories', row.title.categoryId) : null;
+    return (category ? norm(category.name) : '__sem_categoria__') === selectedCategory;
+  });
   if (direction === 'receber') rows = rows.filter((r) => !r.title.cancelledAt);
   const methodReceipts = (title) => titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
   if (receivedMethod) rows = rows.map((r) => ({ ...r, methodPaid: methodReceipts(r.title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0) })).filter((r) => r.methodPaid > 0.005);
@@ -2668,8 +2683,35 @@ function financeTitlePanel(ctx, direction) {
       picker.append(search, suggestions);
     }
     return picker;
-  })() : el('select', { class: 'pa-input', 'data-testid': `fin-${direction}-party`, onchange: (e) => ctx.actions.setFinanceView({ finPartyId: e.target.value }) }, [el('option', { value: '', text: 'Todos os fornecedores' }), ...partyChoices.map((p) => el('option', { value: p.key, text: p.name, ...(selectedParty === p.key ? { selected: 'selected' } : {}) }))]);
-  const catFilter = direction === 'pagar' && el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finTitleCategory: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...financeCategories.map((c) => el('option', { value: c.id, text: c.name, ...(selectedCategory === c.id ? { selected: 'selected' } : {}) }))]);
+  })() : (() => {
+    const picker = el('div', { class: 'pa-cli-picker', 'data-testid': 'fin-pagar-party' });
+    const selected = partyChoices.find((p) => p.key === selectedParty);
+    const showAll = () => ctx.actions.setFinanceView({ finPartyId: '' });
+    if (selected) {
+      picker.append(el('div', { class: 'pa-cli-chip' }, [
+        el('span', { class: 'pa-grow', text: selected.name }),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os fornecedores', 'aria-label': 'Mostrar todos os fornecedores', onclick: showAll }, '✕'),
+      ]));
+    } else {
+      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os fornecedores — digite um nome…', 'data-testid': 'fin-pagar-party-search' });
+      const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
+      const selectParty = (key) => ctx.actions.setFinanceView({ finPartyId: key });
+      const option = (label, key, testid) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': testid, onclick: () => selectParty(key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectParty(key); } } }, label);
+      const update = () => {
+        const query = norm(search.value);
+        const all = !query || query === 'todos' || query === 'todas' || query.startsWith('todos os fornecedores');
+        const matches = all ? [] : partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8);
+        suggestions.replaceChildren(...(all ? [option('Todos os fornecedores', '', 'fin-pagar-party-all')] : []), ...matches.map((p) => option(p.name, p.key, 'fin-pagar-party-suggestion')));
+        suggestions.style.display = all || matches.length ? '' : 'none';
+      };
+      search.addEventListener('focus', update);
+      search.addEventListener('input', update);
+      search.addEventListener('keydown', (event) => { if (event.key === 'Escape') suggestions.style.display = 'none'; });
+      picker.append(search, suggestions);
+    }
+    return picker;
+  })();
+  const catFilter = direction === 'pagar' && el('select', { class: 'pa-input', 'data-testid': 'fin-pagar-category', onchange: (e) => ctx.actions.setFinanceView({ finTitleCategory: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...financeCategories.map((c) => el('option', { value: c.key, text: c.name, ...(selectedCategory === c.key ? { selected: 'selected' } : {}) }))]);
   const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && !['discount', 'credit', 'loss'].includes(s.kind)).map((s) => s.method), ...store.state.cashAdjustments.filter((a) => a.kind === 'client-payment' && !store.isReversed('cashAdjustment', a.id)).map((a) => a.method)].filter(Boolean))];
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
@@ -2679,20 +2721,21 @@ function financeTitlePanel(ctx, direction) {
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
     el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Cada pessoa aparece uma vez, com o valor total do filtro. Clique no nome para ver a ficha financeira, os lançamentos e os pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
-    direction === 'receber' && el('div', { class: 'pa-chiprow' }, [
-      el('button', { class: 'pa-chip' + (receivePeriod === 'all' ? ' pa-chip-on' : ''), 'data-testid': 'fin-receber-period-all', onclick: () => ctx.actions.setFinanceView({ finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }) }, 'Período completo'),
-      el('button', { class: 'pa-chip' + (receivePeriod === 'custom' ? ' pa-chip-on' : ''), 'data-testid': 'fin-receber-period-custom', onclick: () => ctx.actions.setFinanceView({ finReceivePeriod: 'custom' }) }, 'Selecionar datas'),
+    el('div', { class: 'pa-chiprow' }, [
+      el('button', { class: 'pa-chip' + (selectedPeriod === 'all' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-all`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' } : { finPayPeriod: 'all', finPayStart: '', finPayEnd: '' }) }, 'Período completo'),
+      el('button', { class: 'pa-chip' + (selectedPeriod === 'custom' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-custom`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'custom' } : { finPayPeriod: 'custom' }) }, 'Selecionar datas'),
     ]),
-    (direction === 'pagar' || receivePeriod === 'custom') && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finStart: s, finEnd: e }), `fin-${direction}`),
-    direction === 'receber' && receivePeriod === 'custom' && !receivedMethod && el('p', { class: 'pa-hint', text: 'As datas limitam a lista aos títulos com vencimento no período escolhido.' }),
+    selectedPeriod === 'custom' && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finPayStart: s, finPayEnd: e }), `fin-${direction}`),
+    selectedPeriod === 'custom' && !receivedMethod && el('p', { class: 'pa-hint', text: 'As datas limitam a lista aos títulos com vencimento no período escolhido.' }),
     receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda não quitadas, escolha “Em aberto” ou “Todos”.` }),
     el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
-    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), direction === 'pagar' && chip('parcial', 'Parciais'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), direction === 'receber' && chip('perda', 'Perdas'), chip('todos', 'Todos')].filter(Boolean)),
+    direction === 'pagar' && el('p', { class: 'pa-hint', text: 'Em aberto inclui contas pendentes, parcialmente pagas e vencidas.' }),
+    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), direction === 'receber' && chip('perda', 'Perdas'), chip('todos', 'Todos')].filter(Boolean)),
     direction === 'receber' && (receivePeriod === 'custom' || status !== 'aberto' || receivedMethod) && el('p', { class: 'pa-hint', text: `Saldo em aberto em todo o histórico: ${brl(currentClientBalance)}. Esse valor não muda com os filtros de datas, situação ou forma recebida.` }),
     el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'perda' ? 'Perdas no filtro' : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
     direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes no filtro (${filteredClients.length})` }),
     direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes…', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente com lançamentos neste filtro.' })),
-    direction === 'pagar' && (rows.length ? el('div', {}, [searchInput('Buscar fornecedor…', ul, `fin-${direction}-search`), ul]) : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
+    direction === 'pagar' && (rows.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
   ]);
 }
 const financeReceivablePanel = (ctx) => financeTitlePanel(ctx, 'receber');
