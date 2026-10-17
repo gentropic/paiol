@@ -32,7 +32,7 @@ export async function boot(root) {
     finStart: initialStart, finEnd: initialMonthEnd, finStatus: 'aberto', finProjected: true,
     finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '',
     finDirection: 'receber', finAccountId: '', finCategoryId: '', finFlowPreset: 'mes',
-    finPartyId: '', finMethod: '', finTitleCategory: '',
+    finPartyId: '', finMethod: '', finTitleCategory: '', finStatementClientId: '',
     modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
   };
 
@@ -122,6 +122,7 @@ export async function boot(root) {
     setFinanceMonth(month) { view.financeMonth = month; rerender(); },
     setFinanceType(type) { view.financeType = type; rerender(); },
     setFinanceView(partial) { Object.assign(view, partial); rerender(); },
+    openClientStatement(clientId = '') { view.finStatementClientId = clientId; view.tab = 'fin-ficha'; view.modal = null; rerender(); requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' })); },
     setDashboardView(partial) { Object.assign(view, partial); rerender(); },
     setLogMonth(month) { view.logMonth = month; rerender(); },
     setComandaDate(date) { view.comandaDate = date; rerender(); },

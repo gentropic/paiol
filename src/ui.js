@@ -37,7 +37,7 @@ const SECTIONS = [
   { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas']] },
   { id: 'producao', label: 'Produção', icon: '◇', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
   { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
-  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento'], ['simulador', 'Simulador']] },
+  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-ficha', 'Ficha do cliente'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙', screens: [['ajustes', 'Ajustes']] },
 ];
 const SECTION_OF = {};
@@ -274,7 +274,7 @@ export function renderApp(root, ctx) {
     insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel, funcionarios: funcionariosPanel,
     precos: precosPanel, vendas: vendasPanel,
     encomendas: encomendasPanel, comanda: comandaPeriodPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
-    'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-pagar': financePayablePanel,
+    'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-ficha': financeClientStatementPanel, 'fin-pagar': financePayablePanel,
     'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
@@ -2524,12 +2524,12 @@ function dashboardProductVolume(rows) {
 }
 
 function financeHomePanel(ctx) {
-  const quick = (icon, label, tab, tone = '') => el('button', { class: `pa-fin-home-link ${tone}`, onclick: () => ctx.actions.setTab(tab) }, [el('span', { class: 'pa-fin-home-icon', text: icon }), el('strong', { text: label })]);
+  const quick = (icon, label, tab, tone = '') => el('button', { class: `pa-fin-home-link ${tone}`, onclick: () => tab === 'fin-ficha' ? ctx.actions.openClientStatement() : ctx.actions.setTab(tab) }, [el('span', { class: 'pa-fin-home-icon', text: icon }), el('strong', { text: label })]);
   return el('section', { class: 'pa-card pa-fin-home' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Central financeira' }), el('h2', { text: 'O que você quer consultar?' })])]),
     el('p', { class: 'pa-hint', text: 'Todos os atalhos financeiros ficam reunidos aqui. Cada função aparece uma única vez.' }),
     el('div', { class: 'pa-fin-home-grid' }, [
-      quick('▦', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('↓', 'Contas a receber', 'fin-receber'), quick('↑', 'Contas a pagar', 'fin-pagar'),
+      quick('▦', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('↓', 'Contas a receber', 'fin-receber'), quick('👤', 'Ficha do cliente', 'fin-ficha'), quick('↑', 'Contas a pagar', 'fin-pagar'),
       quick('↔', 'Fluxo de caixa', 'fin-fluxo'), quick('＋', 'Lançamentos', 'financeiro'), quick('▤', 'Recibo / Orçamento', 'fin-documentos'),
       quick('🛒', 'Compras', 'fin-compras'), quick('☷', 'Plano de Contas', 'fin-plano'), quick('▥', 'Relatórios financeiros', 'fin-relatorios'),
       quick('⌁', 'Relatório gerencial', 'relatorios'), quick('R$', 'Preços e custos', 'precos'), quick('≈', 'Simular preço', 'simulador'),
@@ -2630,7 +2630,7 @@ function financeTitlePanel(ctx, direction) {
   }
   const filteredClients = [...filteredGroups.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   const filteredClientList = direction === 'receber' && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, filteredClients.map((p) => el('li', {
-    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openModal({ kind: 'client-statement', clientId: p.key }); } },
+    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openClientStatement(p.key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openClientStatement(p.key); } },
   }, [el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? 'Último recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` · ${p.count} lançamentos` : ''}` : 'Sem lançamentos' })]),
     el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
   const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
@@ -2666,7 +2666,7 @@ function financeTitlePanel(ctx, direction) {
   const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && s.kind !== 'discount' && s.kind !== 'credit').map((s) => s.method)].filter(Boolean))];
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
-    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: selectedParty }) }, 'Ficha do cliente'),
+    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openClientStatement(selectedParty || '') }, 'Ficha do cliente'),
     el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': `fin-${direction}-new`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction }) }, direction === 'receber' ? '+ Nova entrada' : '+ Nova saída'),
   ].filter(Boolean));
   return el('section', { class: 'pa-card' }, [
@@ -2885,18 +2885,26 @@ function clientStatementPaymentSheet(ctx, clientId) {
       }
       if (remaining > 0.005) s.addCashAdjustment({ id: uuid(), at, kind: 'client-credit', direction: 'entrada', clientId, amount: remaining, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Crédito de ${clientLabel(client)}` });
     });
-    ctx.actions.openModal({ kind: 'client-statement', clientId });
+    if (ctx.view.tab !== 'fin-ficha') ctx.actions.openModal({ kind: 'client-statement', clientId });
   }
   return sheet({ title: 'Registrar pagamento do cliente', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. O pagamento quita os valores em aberto; o excedente vira crédito para uma próxima compra.` }), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
 }
 
-function clientStatementSheet(ctx, modal = {}) {
+function financeClientStatementPanel(ctx) {
+  return clientStatementSheet(ctx, { clientId: ctx.view.finStatementClientId }, true);
+}
+
+function clientStatementSheet(ctx, modal = {}, inline = false) {
   const { store } = ctx;
+  const statementView = (rows) => inline ? el('section', { class: 'pa-card', 'data-testid': 'fin-client-statement-panel' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Clientes e receitas' }), el('h2', { text: 'Ficha do cliente' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('fin-receber') }, '← Contas a receber')]),
+    ...rows,
+  ]) : sheet({ title: 'Ficha financeira do cliente', rows });
   const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
   const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
     .filter(([key]) => !clients.some((c) => `name:${norm(c.name)}` === key))
     .map(([id, name]) => ({ id, name }));
-  if (!clients.length && !namedParties.length) return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance um valor a receber para consultar a ficha financeira.' })] });
+  if (!clients.length && !namedParties.length) return statementView([el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance um valor a receber para consultar a ficha financeira.' })]);
 
   const hasNamedParty = (id) => String(id || '').startsWith('name:') && (clients.some((c) => `name:${norm(c.name)}` === id) || namedParties.some((p) => p.id === id));
   let clientId = clients.some((c) => c.id === modal.clientId) || hasNamedParty(modal.clientId) ? modal.clientId : '';
@@ -2954,7 +2962,7 @@ function clientStatementSheet(ctx, modal = {}) {
   function renderClientPicker() {
     const selected = clientId && (store.get('clients', clientId) || (clientId.startsWith('name:') ? { name: clients.find((c) => `name:${norm(c.name)}` === clientId)?.name || namedParties.find((p) => p.id === clientId)?.name || clientId.slice(5) } : null));
     if (selected) {
-      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } }, '✕')]));
+      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: '' }); else { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } } }, '✕')]));
       return;
     }
     const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do cliente…', 'data-testid': 'client-statement-search' });
@@ -2963,7 +2971,7 @@ function clientStatementSheet(ctx, modal = {}) {
       const query = norm(search.value);
       const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
       results.style.display = matches.length ? '' : 'none';
-      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { clientId = c.id; renderClientPicker(); renderStatement(); } }, clientLabel(c))));
+      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: c.id }); else { clientId = c.id; renderClientPicker(); renderStatement(); } } }, clientLabel(c))));
     });
     clientPicker.replaceChildren(search, results);
   }
@@ -2982,7 +2990,7 @@ function clientStatementSheet(ctx, modal = {}) {
   const details = el('div', {}, [field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
   renderClientPicker();
   renderStatement();
-  return sheet({ title: 'Ficha financeira do cliente', rows: [el('p', { class: 'pa-hint', text: 'Busque um cliente para consultar suas compras, pagamentos e crédito.' }), field('Cliente', clientPicker), details] });
+  return statementView([el('p', { class: 'pa-hint', text: 'Busque um cliente para consultar suas compras, pagamentos e crédito.' }), field('Cliente', clientPicker), details]);
 }
 
 MODALS['finance-title-add'] = (ctx, m) => financeTitleAddSheet(ctx, m.direction || 'pagar');
