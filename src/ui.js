@@ -36,8 +36,8 @@ const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '⌂', screens: [['inicio', 'Início']] },
   { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas']] },
   { id: 'producao', label: 'Produção', icon: '◇', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
-  { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['simulador', 'Simulador'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
-  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento']] },
+  { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
+  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento'], ['simulador', 'Simulador']] },
   { id: 'ajustes', label: 'Ajustes', icon: '⚙', screens: [['ajustes', 'Ajustes']] },
 ];
 const SECTION_OF = {};
@@ -56,7 +56,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'receitas', icon: '📖', label: 'Receitas', paras: [
     'Aqui fica a ficha técnica completa: ingredientes/insumos, rendimento, tempos, embalagem, margem e o produto vendido relacionado.',
-    'O app soma ingredientes, mão de obra, gás e custos fixos. Use o Simulador ao lado para testar rendimento, custo, lucro e viabilidade sem alterar a receita original.',
+    'O app soma ingredientes, mão de obra, gás e custos fixos. Em Financeiro, use o Simulador para testar rendimento, custo, lucro e viabilidade sem alterar a receita original.',
   ] },
   { id: 'produtos', icon: '🎂', label: 'Produtos', paras: [
     'É a lista simples do que aparece nas comandas e vendas: nome, unidade ou peso e valor de venda.',
@@ -3761,6 +3761,8 @@ function simuladorBody(ctx, recipe, config) {
     const simIngredientsTotal = simBreak.ingredients * simYield;
     const baseLaborIndicator = baseBreak.labor * baseYield;
     const simLaborIndicator = simBreak.labor * simYield;
+    // The recipe roll-up includes ingredients, gas, and proportional fixed costs. Add each
+    // sellable product's packaging/complements so the displayed batch total is fully loaded.
     const baseTotalCost = baseRecipeTotal + registeredExtras * baseProductUnits;
     const simTotalCost = simRecipeTotal + extras * simProductUnits;
     const baseRevenue = p * baseProductUnits;
@@ -3773,19 +3775,23 @@ function simuladorBody(ctx, recipe, config) {
     const profitHour = (profit, minutes) => minutes > 0 ? profit / (minutes / 60) : null;
     const divisor = 1 - salesRate - target;
     const simCostPerProduct = simProductUnits > 0 ? simTotalCost / simProductUnits : 0;
+    const baseCostPerProduct = baseProductUnits > 0 ? baseTotalCost / baseProductUnits : 0;
+    const baseProfitPerProduct = baseProductUnits > 0 ? baseProfit / baseProductUnits : 0;
+    const simProfitPerProduct = simProductUnits > 0 ? simProfit / simProductUnits : 0;
     const targetPrice = divisor > 0 ? simCostPerProduct / divisor : null;
     const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
     const reachedTarget = margin(simRevenue, simTotalCost) + 0.0001 >= target;
     results.replaceChildren(el('table', { class: 'pa-kv pa-sim' }, [
       el('tr', { class: 'pa-sim-head' }, [el('td', {}), el('td', { class: 'pa-num', text: 'Atual' }), el('td', { class: 'pa-num', text: `${fmtNum(f)}×` })]),
       el('tr', {}, [el('td', { text: 'Rendimento da receita' }), ...col(baseYield, simYield, (v) => `${fmtNum(v)} ${recipe.yieldUnit}`)]),
-      el('tr', {}, [el('td', { text: 'Produtos obtidos' }), ...col(baseProductUnits, simProductUnits, fmtNum)]),
       el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), ...col(baseIngredientsTotal, simIngredientsTotal, brl)]),
-      el('tr', {}, [el('td', { text: 'Custo total da receita' }), ...col(baseRecipeTotal, simRecipeTotal, brl)]),
+      el('tr', {}, [el('td', { text: 'Custo total da receita (gás, fixos e embalagem incluídos)' }), ...col(baseTotalCost, simTotalCost, brl)]),
+      el('tr', {}, [el('td', { text: 'Custo por produto' }), ...col(baseCostPerProduct, simCostPerProduct, brl)]),
       el('tr', {}, [el('td', { text: 'Mão de obra direta (indicador)' }), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
       el('tr', {}, [el('td', { text: 'Preço de venda total da receita' }), ...col(baseRevenue, simRevenue, brl)]),
       el('tr', {}, [el('td', { text: `Margem a ${brl(p)}` }), el('td', { class: 'pa-num', text: pctStr(margin(baseRevenue, baseTotalCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simRevenue, simTotalCost)) })]),
       el('tr', {}, [el('td', { text: 'Lucro total da receita' }), ...col(baseProfit, simProfit, brl)]),
+      el('tr', {}, [el('td', { text: 'Lucro por produto' }), ...col(baseProfitPerProduct, simProfitPerProduct, brl)]),
       el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), ...col(profitHour(baseProfit, baseProductionMinutes), profitHour(simProfit, t), fmtHora)]),
       el('tr', { class: 'pa-kv-total' }, [el('td', { text: `Preço para margem alvo de ${pctStr(target)}` }), el('td', { class: 'pa-num', text: '—' }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inválida' : brl(targetPrice) })]),
     ]), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simulação alcança a margem desejada com o preço informado.' : `A margem ficou abaixo da meta. Considere preço próximo de ${targetPrice == null ? '—' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
@@ -3799,7 +3805,7 @@ function simuladorBody(ctx, recipe, config) {
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Escala' }), factor, el('span', { class: 'pa-lab', text: '× a receita' })]),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção (min)' }), production]),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'Ajuste livremente rendimento, tempo, embalagem, margem e preço. Minutos ativos mostram o custo direto de trabalho como indicador, sem duplicá-lo no custo do produto.' }),
+    el('p', { class: 'pa-hint', text: 'O custo total inclui ingredientes, gás do forno, custos fixos proporcionais ao tempo de produção e embalagem/complementos por produto. Minutos ativos mostram a mão de obra como indicador, sem duplicar salários que já estão nos custos fixos.' }),
     el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada (%)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
     el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão consideradas na simulação: ${pctStr(salesRate)}.` }),
