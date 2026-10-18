@@ -56,7 +56,7 @@ const HELP_SCREENS = [
   ] },
   { id: 'receitas', icon: '📖', label: 'Receitas', paras: [
     'Aqui fica a ficha técnica completa: ingredientes/insumos, rendimento, tempos, embalagem, margem e o produto vendido relacionado.',
-    'O app soma ingredientes, mão de obra, gás e custos fixos. Em Financeiro, use o Simulador para testar rendimento, custo, lucro e viabilidade sem alterar a receita original.',
+    'O custo soma ingredientes, gás, embalagem e custos fixos proporcionais. A mão de obra aparece como indicador, pois salários e pró-labore devem estar nos custos fixos. Em Financeiro, use o Simulador para testar rendimento, custo e lucro sem alterar a receita original.',
   ] },
   { id: 'produtos', icon: '🎂', label: 'Produtos', paras: [
     'É a lista simples do que aparece nas comandas e vendas: nome, unidade ou peso e valor de venda.',
@@ -67,7 +67,7 @@ const HELP_SCREENS = [
     'Ao abrir um cliente, você vê o histórico dele: total comprado, total pago, saldo pendente, as compras e os pagamentos. No fim da tela você gera as fichas em PDF (3 por folha, pra imprimir e arquivar): todas as vendas, só as em aberto (com saldo) ou só as pagas — sempre com uma prévia pra conferir antes.',
   ] },
   { id: 'precos', icon: '💰', label: 'Preços', paras: [
-    'O coração do app: pra cada produto mostra quanto custa fazer (ingredientes, sua mão de obra, gás, custos fixos e embalagem) e sugere um preço de venda já com a sua margem.',
+    'Para cada produto, mostra o custo de ingredientes, gás, custos fixos proporcionais e embalagem. A mão de obra é apenas indicador; salários já entram nos custos fixos. O preço sugerido considera também taxas de pagamento, comissão e margem desejada.',
     'Se aparecer “sem preço”, é porque falta cadastrar o preço de algum insumo usado.',
   ] },
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
@@ -110,14 +110,14 @@ const HELP_SCREENS = [
     'Compare a margem e o lucro a um preço fixo. Ajuda a decidir se mantém, adapta ou tira um produto do cardápio.',
   ] },
   { id: 'ajustes', icon: '⚙️', label: 'Ajustes', paras: [
-    'Compare suas bases manuais com o que o sistema consegue calcular pelos lançamentos dos últimos meses. Nada é substituído sem você apertar o botão de aplicar.',
+    'Os valores manuais salvos já entram na precificação. Compare-os com as estimativas dos últimos meses completos; elas só substituem seus valores quando você escolher adotá-las.',
     'Aqui também ficam o histórico das notificações, a lista de compras, a lixeira, o backup e a importação/exportação. Você pode criar lembretes datados e acrescentar itens livres à lista.',
   ] },
 ];
 const HELP_CONCEPTS = [
   { q: 'Por que um produto fica “sem preço”?', a: 'Quando algum insumo que ele usa ainda não tem preço cadastrado. Cadastre o preço em Insumos e o preço do produto aparece sozinho.' },
   { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir preços, e os dados reais (vendas e o que você produziu na comanda) pra mostrar a verdade nos relatórios.' },
-  { q: 'Margem e taxa', a: 'Margem é o lucro que você quer sobre o custo; taxa é o que a maquininha/pagamento cobra. O preço sugerido já considera as duas.' },
+  { q: 'Margem e taxa', a: 'Margem é a parcela desejada do preço de venda que sobra após custos e taxas. A taxa de pagamento é a parcela cobrada pela maquininha ou plataforma. O preço sugerido considera ambas.' },
   { q: 'Meus dados estão seguros?', a: 'Ficam salvos no seu aparelho. Conecte o Dropbox em Ajustes pra ter backup e poder usar em mais de um lugar.' },
 ];
 
@@ -4422,12 +4422,15 @@ function simuladorBody(ctx, recipe, config) {
 function automaticConfigSuggestions(store) {
   const today = new Date();
   const months = [];
-  for (let i = 2; i >= 0; i--) {
+  // An unfinished month understates recurring expenses and production capacity.
+  // Use up to the last three completed calendar months for every suggestion.
+  for (let i = 3; i >= 1; i--) {
     const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
     months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
   }
   const start = `${months[0]}-01`;
-  const end = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const lastCompleteDay = new Date(today.getFullYear(), today.getMonth(), 0);
+  const end = `${lastCompleteDay.getFullYear()}-${String(lastCompleteDay.getMonth() + 1).padStart(2, '0')}-${String(lastCompleteDay.getDate()).padStart(2, '0')}`;
   const actual = cashMovements(store).filter((m) => !m.transfer && dateOnly(m.at) >= start && dateOnly(m.at) <= end);
   const category = (m) => m.categoryId ? store.get('categories', m.categoryId) : null;
   const fixedExcluded = new Set(['tarifas']);
@@ -4523,8 +4526,8 @@ const SETTINGS_HELPERS = {
   },
   custosFixosMes: {
     title: 'Somar os custos fixos do mês', configKey: 'custosFixosMes', suffix: 'R$/mês',
-    intro: 'Preencha somente o que existe no seu negócio. Campos vazios contam como zero.',
-    fields: [['rent', 'Aluguel, condomínio e IPTU'], ['utilities', 'Água e energia administrativa'], ['internet', 'Internet e telefone'], ['payroll', 'Salários, pró-labore e encargos'], ['accounting', 'Contador'], ['taxes', 'DAS, licenças e taxas fixas'], ['systems', 'Sistemas e assinaturas'], ['other', 'Outros custos fixos']],
+    intro: 'Informe a média mensal de cada gasto apenas uma vez. Inclua energia da produção aqui se ela ainda não entrar em outro custo. Campos vazios contam como zero.',
+    fields: [['rent', 'Aluguel, condomínio e IPTU'], ['utilities', 'Água e energia de toda a operação'], ['internet', 'Internet e telefone'], ['payroll', 'Salários, pró-labore, diaristas e encargos'], ['accounting', 'Contador'], ['taxes', 'DAS, licenças e taxas fixas'], ['cleaning', 'Limpeza e higiene'], ['maintenance', 'Manutenção e reposição de equipamentos'], ['systems', 'Sistemas e assinaturas'], ['other', 'Outros custos fixos']],
     calculate: (v) => Object.values(v).reduce((sum, value) => sum + Math.max(0, value || 0), 0),
     explanation: 'soma dos custos fixos informados',
   },
@@ -4601,6 +4604,19 @@ function ajustesPanel(ctx) {
   };
 
   function save() {
+    const labels = {
+      valorHora: 'valor da hora', taxaGas: 'gás por minuto', custosFixosMes: 'custos fixos',
+      expected: 'minutos de produção', margin: 'margem', fee: 'taxa de pagamento', commission: 'comissão',
+    };
+    for (const [key, label] of Object.entries(labels)) {
+      if (!Object.hasOwn(draft, key)) continue;
+      const value = parseNum(f[key].value);
+      if (value == null || value < 0 || (key === 'expected' && value === 0)) {
+        window.alert(`Informe um valor válido para ${label}${key === 'expected' ? ' (maior que zero)' : ''}.`);
+        f[key].focus();
+        return;
+      }
+    }
     const next = {
       valorHora: parseNum(f.valorHora.value) ?? c.valorHora,
       taxaGas: parseNum(f.taxaGas.value) ?? c.taxaGas,
@@ -4631,28 +4647,15 @@ function ajustesPanel(ctx) {
     el('strong', { class: value == null ? 'pa-muted' : 'pa-positive', text: value == null ? 'dados insuficientes' : (unit === 'R$' ? brl(value) : `${fmtNum(value)} ${unit}`) }),
   ]));
   const applicable = Object.fromEntries(Object.entries(automatic.values).filter(([, value]) => value != null && Number.isFinite(value)));
-  const applyAutomatic = () => ctx.actions.setConfig({ ...applicable });
-  const automaticMargin = el('input', {
-    class: 'pa-input pa-narrow', 'data-testid': 'automatic-target-margin', type: 'text', inputmode: 'decimal',
-    value: ctx.view.automaticMarginDraft ?? String(pct(c.targetMarginPct)).replace('.', ','), 'aria-label': 'Margem alvo dos cálculos (%)',
-  });
-  automaticMargin.addEventListener('input', () => { ctx.view.automaticMarginDraft = automaticMargin.value; });
-  const saveAutomaticMargin = () => {
-    const value = parseNum(automaticMargin.value);
-    const feePct = Number(c.paymentFeePct) || 0;
-    const commissionPct = Number(c.commissionPct) || 0;
-    if (value == null || value < 0 || value / 100 + feePct + commissionPct >= 1) {
-      window.alert(`Informe uma margem válida. Somada à taxa de pagamento (${pctStr(feePct)}) e à comissão (${pctStr(commissionPct)}), ela precisa ficar abaixo de 100%.`);
-      return;
-    }
-    ctx.view.automaticMarginDraft = null;
-    ctx.actions.setConfig({ targetMarginPct: value / 100 });
+  const applyAutomatic = () => {
+    ctx.view.settingsDraft = null;
+    ctx.actions.setConfig({ ...applicable });
   };
 
   return el('section', {}, [
     el('section', { class: 'pa-card' }, [
       el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Custos e formação de preço' }), el('h2', { text: 'Ajustes' })])]),
-      el('p', { class: 'pa-hint', text: 'Compare o que você definiu manualmente com os dados registrados. O sistema nunca substitui seus valores sozinho.' }),
+      el('p', { class: 'pa-hint', text: 'Os valores salvos à esquerda já são usados para calcular custos e preços. Compare com os dados registrados antes de decidir se quer substituí-los.' }),
       el('div', { class: 'pa-settings-grid' }, [
         el('section', { class: 'pa-settings-column' }, [
           el('h3', { class: 'pa-h3', text: 'Seus valores atuais' }),
@@ -4663,20 +4666,15 @@ function ajustesPanel(ctx) {
           field('margin', 'Margem alvo (%)', pct(c.targetMarginPct), null, 'margin'),
           field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct), null, 'fee'),
           field('commission', 'Comissão sobre vendas (%)', pct(c.commissionPct || 0), 'Entra na formação do preço da mesma forma que a taxa de pagamento.', 'commission'),
-          el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar valores manuais')]),
+          el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar e usar valores manuais')]),
         ]),
         el('aside', { class: 'pa-settings-column pa-auto-card', 'data-testid': 'automatic-settings' }, [
           el('h3', { class: 'pa-h3', text: 'Calculado pelo sistema' }),
-          el('p', { class: 'pa-hint', text: `Base: valores efetivamente pagos e produção registrada de ${automatic.period}.` }),
+          el('p', { class: 'pa-hint', text: `Estimativas a partir dos pagamentos e da produção registrados entre ${automatic.period} (meses completos). Confira se todos os gastos foram lançados.` }),
           ...autoRows,
           el('div', { class: 'pa-auto-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: 'Taxa financeira observada' }), el('span', { class: 'pa-muted', text: 'tarifas ÷ recebimentos; apenas comparação' })]), el('strong', { class: automatic.observedFeePct == null ? 'pa-muted' : '', text: automatic.observedFeePct == null ? 'dados insuficientes' : pctStr(automatic.observedFeePct) })]),
-          el('div', { class: 'pa-auto-row' }, [
-            el('div', { class: 'pa-grow' }, [el('strong', { text: 'Margem alvo dos cálculos' }), el('span', { class: 'pa-muted', text: 'definida por você; afeta preços e indicadores' })]),
-            el('div', { class: 'pa-row' }, [automaticMargin, el('span', { class: 'pa-muted', text: '%' })]),
-          ]),
-          el('button', { class: 'pa-btn', 'data-testid': 'save-automatic-target-margin', onclick: saveAutomaticMargin }, 'Atualizar margem dos cálculos'),
-          el('button', { class: 'pa-btn pa-primary', 'data-testid': 'apply-automatic-settings', disabled: Object.keys(applicable).length === 0, onclick: applyAutomatic }, 'Usar valores calculados disponíveis'),
-          el('p', { class: 'pa-hint', text: 'Custos só são atualizados quando há dados suficientes. Margem, taxa de pagamento e comissão só mudam quando você confirmar.' }),
+          el('button', { class: 'pa-btn pa-primary', 'data-testid': 'apply-automatic-settings', disabled: Object.keys(applicable).length === 0, onclick: applyAutomatic }, 'Adotar valores calculados na precificação'),
+          el('p', { class: 'pa-hint', text: 'Este botão substitui apenas os valores calculáveis acima: custo fixo mensal, gás, tempo de produção e valor da hora (indicador). A margem, a taxa de pagamento e a comissão continuam como você salvou à esquerda.' }),
         ]),
       ]),
     ]),
