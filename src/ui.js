@@ -3570,7 +3570,29 @@ function financeReportsPanel(ctx) {
   const start = view.finStart; const end = view.finEnd;
   const direction = view.finReportDirection || 'todos';
   const selectedCategory = view.finReportCategoryId || '';
-  const allMovements = cashMovements(store).filter((m) => !m.transfer);
+  const purchaseExtras = [['freight', 'frete-compras', 'Frete'], ['taxes', 'impostos-compras', 'Impostos'], ['interest', 'juros-compras', 'Juros'], ['fees', 'encargos-compras', 'Encargos']];
+  const allMovements = cashMovements(store).filter((m) => !m.transfer).flatMap((movement) => {
+    if (movement.sourceType !== 'financeSettlement' || movement.direction !== 'saida') return [movement];
+    const title = store.get('financeTitles', movement.titleId);
+    const purchase = title?.sourceType === 'compra' ? store.get('purchases', title.sourceId) : null;
+    if (!purchase) return [movement];
+    const extras = purchaseExtras.map(([field, key, label]) => ({ key, label, cents: Math.round((Number(purchase[field]) || 0) * 100) })).filter((part) => part.cents > 0);
+    if (!extras.length) return [movement];
+    const purchaseCents = Math.round((Number(purchase.total) || 0) * 100);
+    const extraCents = extras.reduce((sum, part) => sum + part.cents, 0);
+    if (purchaseCents < extraCents || purchaseCents <= 0) return [movement];
+    const parts = [{ key: 'items', label: 'Itens', cents: purchaseCents - extraCents, categoryId: movement.categoryId },
+      ...extras.map((part) => ({ ...part, categoryId: categoryByKey(store, part.key)?.id || movement.categoryId }))];
+    const paidCents = Math.round(movement.amount * 100);
+    let cumulative = 0; let assigned = 0;
+    return parts.map((part, index) => {
+      cumulative += part.cents;
+      const nextAssigned = index === parts.length - 1 ? paidCents : Math.round(paidCents * cumulative / purchaseCents);
+      const amount = (nextAssigned - assigned) / 100;
+      assigned = nextAssigned;
+      return { ...movement, id: `${movement.id}:${part.key}`, label: `${movement.label} · ${part.label}`, amount, categoryId: part.categoryId };
+    }).filter((part) => part.amount > 0);
+  });
   const categoryId = (movement) => canonicalCategoryId(store, movement.categoryId) || '__sem__';
   const categoryName = (id) => id === '__sem__' ? 'Sem categoria' : store.get('categories', id)?.name || 'Categoria antiga';
   const categories = new Map();
@@ -3631,7 +3653,7 @@ function financeReportsPanel(ctx) {
         ...categoryOptions.map(([id, category]) => el('option', { value: id, text: `${category?.code ? `${category.code} · ` : ''}${categoryName(id)}`, ...(selectedCategory === id ? { selected: 'selected' } : {}) })),
       ])),
     ]),
-    el('p', { class: 'pa-hint', text: 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto não entram neste total. Cada compra aparece na categoria escolhida ao registrá-la.' }),
+    el('p', { class: 'pa-hint', text: 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto não entram neste total. Nas compras, frete, impostos, juros e encargos aparecem em contas próprias; os itens permanecem na categoria escolhida no registro.' }),
     el('div', { class: 'pa-statgrid' }, [statCard('Entradas recebidas', brl(inTotal), 'ok'), statCard('Saídas pagas', brl(outTotal), outTotal ? 'warn' : 'soft'), statCard('Saldo do filtro', brl(inTotal - outTotal), inTotal - outTotal >= 0 ? 'navy' : 'bad')]),
     el('h3', { class: 'pa-h3', text: 'Total por plano de conta' }),
     categoryRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Plano de conta' }), el('td', { class: 'pa-num', text: 'Receitas' }), el('td', { class: 'pa-num', text: 'Despesas / saídas' })]), ...categoryRows])) : el('p', { class: 'pa-empty', text: 'Nenhuma movimentação encontrada para estes filtros.' }),
