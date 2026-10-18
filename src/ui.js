@@ -1174,26 +1174,33 @@ function precosPanel(ctx) {
       const margin = effectiveMargin(es, p.id, config);
       const ownMargin = p.targetMarginPct != null;
       const price = priceFromCost(unitCost, { ...config, targetMarginPct: margin });
-      // Per-unit profit and per-hour metrics (her spreadsheet's decision numbers).
+      const practicedPrice = p.salePrice != null && p.salePrice !== '' && Number.isFinite(Number(p.salePrice)) && Number(p.salePrice) >= 0
+        ? Number(p.salePrice) : null;
+      // Profit and practiced margin use the catalog sale price, never the suggested price.
       const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
-      const lucroUnit = price - unitCost - price * salesRate;
+      const lucroUnit = practicedPrice == null ? null : practicedPrice - unitCost - practicedPrice * salesRate;
+      const practicedMargin = practicedPrice > 0 ? lucroUnit / practicedPrice : null;
       const activeHoursPerUnit = config.valorHora > 0 ? b.labor / config.valorHora : 0;
-      const lucroHora = activeHoursPerUnit > 0 ? lucroUnit / activeHoursPerUnit : null;
+      const lucroHora = activeHoursPerUnit > 0 && lucroUnit != null ? lucroUnit / activeHoursPerUnit : null;
       const custoHora = activeHoursPerUnit > 0 ? unitCost / activeHoursPerUnit : null;
       const kv = (label, v, cls) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (cls === 'pa-kv-total' ? '' : ''), text: brl(v) })]);
       return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
         el('div', { class: 'pa-row' }, [
           el('strong', { class: 'pa-grow', text: p.name }),
-          el('span', { class: 'pa-price', text: brl(price) }),
+          el('span', { class: 'pa-price', text: practicedPrice == null ? `Sugerido ${brl(price)}` : `Praticado ${brl(practicedPrice)}` }),
         ]),
         el('table', { class: 'pa-kv' }, [
           ...parts.map(([label, v]) => kv(label, v)),
           kv('Custo unitário', unitCost, 'pa-kv-total'),
           el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(config.paymentFeePct)}%, comissão ${pct(config.commissionPct || 0)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
-          el('tr', {}, [el('td', { text: 'Lucro por unidade' }), el('td', { class: 'pa-num' + (lucroUnit >= 0 ? '' : ' pa-bad'), text: brl(lucroUnit) })]),
-          lucroHora != null && el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho' }), el('td', { class: 'pa-num' + (lucroHora >= 0 ? '' : ' pa-bad'), text: brl(lucroHora) })]),
+          el('tr', {}, [el('td', { text: 'Preço de venda praticado' }), el('td', { class: 'pa-num pa-strong', text: practicedPrice == null ? 'Não informado' : brl(practicedPrice) })]),
+          practicedPrice != null && el('tr', {}, [el('td', { text: 'Diferença entre praticado e sugerido' }), el('td', { class: `pa-num${practicedPrice < price - 0.005 ? ' pa-bad' : ' pa-positive'}`, text: Math.abs(practicedPrice - price) < 0.005 ? brl(0) : `${practicedPrice < price ? '− ' : '+ '}${brl(Math.abs(practicedPrice - price))}` })]),
+          el('tr', {}, [el('td', { text: 'Lucro por unidade (preço praticado)' }), el('td', { class: `pa-num${lucroUnit != null && lucroUnit < 0 ? ' pa-bad' : ''}`, text: lucroUnit == null ? '—' : brl(lucroUnit) })]),
+          el('tr', {}, [el('td', { text: 'Margem praticada' }), el('td', { class: `pa-num${practicedMargin != null && practicedMargin < 0 ? ' pa-bad' : ''}`, text: practicedMargin == null ? '—' : `${(practicedMargin * 100).toFixed(1).replace('.', ',')}%` })]),
+          el('tr', {}, [el('td', { text: 'Lucro por hora de trabalho (preço praticado)' }), el('td', { class: `pa-num${lucroHora != null && lucroHora < 0 ? ' pa-bad' : ''}`, text: lucroHora == null ? '—' : brl(lucroHora) })]),
           custoHora != null && el('tr', {}, [el('td', { text: 'Custo por hora de trabalho' }), el('td', { class: 'pa-num', text: brl(custoHora) })]),
         ].filter(Boolean)),
+        practicedPrice == null && el('p', { class: 'pa-hint', text: 'Cadastre o valor de venda em Produtos para calcular o lucro e a margem praticada.' }),
       ]);
     } catch (e) {
       return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
@@ -1206,6 +1213,7 @@ function precosPanel(ctx) {
   const cardsEl = el('div', {}, cards);
   return el('section', { class: 'pa-card' }, [
     el('h2', { text: 'Preços' }),
+    el('p', { class: 'pa-hint', text: 'Compare o preço sugerido com o preço de venda cadastrado em Produtos. Lucro e margem praticada consideram esse preço, a taxa de pagamento e a comissão configuradas.' }),
     activeProducts.length === 0
       ? el('p', { class: 'pa-empty', text: 'Ative um produto para ver custos e preços sugeridos.' })
       : el('div', {}, [searchInput('Buscar produto…', cardsEl, 'preco-search'), cardsEl]),
