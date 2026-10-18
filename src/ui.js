@@ -2603,11 +2603,12 @@ function financeTitlePanel(ctx, direction) {
   const parties = direction === 'receber' ? store.state.clients : store.state.suppliers;
   const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name }]));
   for (const title of store.state.financeTitles.filter((t) => t.direction === direction && t.partyName)) {
-    const key = title.partyId || `name:${norm(title.partyName)}`;
-    if (!partyMap.has(key)) partyMap.set(key, { key, name: title.partyName });
+    const origin = direction === 'receber' && title.partyType === 'origem';
+    const key = origin ? `origin:${norm(title.partyName)}` : title.partyId || `name:${norm(title.partyName)}`;
+    if (!partyMap.has(key)) partyMap.set(key, { key, name: origin ? `Origem: ${title.partyName}` : title.partyName });
   }
   const partyChoices = [...partyMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  const personKey = (title) => `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
+  const personKey = (title) => title.partyType === 'origem' ? `origin:${norm(title.partyName || 'Sem origem')}` : `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
   const financeCategoryMap = new Map();
   if (direction === 'pagar') for (const title of store.state.financeTitles.filter((t) => t.direction === 'pagar' && !t.cancelledAt)) {
     const category = title.categoryId ? store.get('categories', title.categoryId) : null;
@@ -2617,7 +2618,7 @@ function financeTitlePanel(ctx, direction) {
   }
   const financeCategories = [...financeCategoryMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
   const selectedParty = partyChoices.some((p) => p.key === ctx.view.finPartyId) ? ctx.view.finPartyId : undefined;
-  const selectedPersonKey = direction === 'receber' && selectedParty ? selectedParty.startsWith('name:') ? selectedParty : `name:${norm(store.get('clients', selectedParty)?.name || partyMap.get(selectedParty)?.name)}` : '';
+  const selectedPersonKey = direction === 'receber' && selectedParty ? selectedParty.startsWith('name:') || selectedParty.startsWith('origin:') ? selectedParty : `name:${norm(store.get('clients', selectedParty)?.name || partyMap.get(selectedParty)?.name)}` : '';
   const selectedCategory = financeCategories.some((c) => c.key === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : '';
   let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status });
   if (selectedCategory) rows = rows.filter((row) => {
@@ -2635,12 +2636,12 @@ function financeTitlePanel(ctx, direction) {
     for (const client of store.state.clients) {
       const key = `name:${norm(client.name)}`;
       if (selectedPersonKey && key !== selectedPersonKey) continue;
-      if (!filteredGroups.has(key)) filteredGroups.set(key, { key, name: client.name, amount: 0, count: 0, date: '' });
+      if (!filteredGroups.has(key)) filteredGroups.set(key, { key, name: client.name, kind: 'cliente', amount: 0, count: 0, date: '' });
     }
   }
   if (direction === 'receber') for (const row of rows) {
     const key = personKey(row.title);
-    const group = filteredGroups.get(key) || { key, name: store.get('clients', row.title.partyId)?.name || row.title.partyName || 'Sem cliente', amount: 0, count: 0, date: '' };
+    const group = filteredGroups.get(key) || { key, name: store.get('clients', row.title.partyId)?.name || row.title.partyName || 'Sem cliente', kind: row.title.partyType === 'origem' ? 'origem' : 'cliente', amount: 0, count: 0, date: '' };
     group.amount += receivedMethod ? row.methodPaid : status === 'quitado' ? row.paid : status === 'perda' ? row.writtenOff : row.balance;
     group.count++;
     const receiptDates = receivedMethod || status === 'quitado'
@@ -2653,7 +2654,7 @@ function financeTitlePanel(ctx, direction) {
   const filteredClients = [...filteredGroups.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   const filteredClientList = direction === 'receber' && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, filteredClients.map((p) => el('li', {
     class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openClientStatement(p.key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openClientStatement(p.key); } },
-  }, [el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? 'Último recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` · ${p.count} lançamentos` : ''}` : 'Sem lançamentos' })]),
+  }, [el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-row' }, [el('strong', { text: p.name }), p.kind === 'origem' && el('span', { class: 'pa-badge', text: 'Outra origem' })].filter(Boolean)), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? 'Último recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` · ${p.count} lançamentos` : ''}` : 'Sem lançamentos' })]),
     el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: status === 'perda' ? 'Perda' : receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '›' })])));
   const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
     el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('strong', { text: r.title.partyName || r.title.description }), titleBadge(r.status)]), el('span', { class: 'pa-muted', text: `${fmtDate(r.title.dueDate)} · ${r.title.description}${r.overdueDays ? ` · ${r.overdueDays} dia(s) em atraso` : ''}` })]),
@@ -2666,17 +2667,17 @@ function financeTitlePanel(ctx, direction) {
     if (selected) {
       picker.append(el('div', { class: 'pa-cli-chip' }, [
         el('span', { class: 'pa-grow', text: selected.name }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes', 'aria-label': 'Mostrar todos os clientes', onclick: () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }) }, '✕'),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes e origens', 'aria-label': 'Mostrar todos os clientes e origens', onclick: () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }) }, '✕'),
       ]));
     } else {
-      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os clientes — digite um nome…', 'data-testid': 'fin-receber-party-search' });
+      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos — digite cliente ou origem…', 'data-testid': 'fin-receber-party-search' });
       const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:240px;overflow-y:auto' });
       search.addEventListener('input', () => {
         const query = norm(search.value);
-        const all = query === 'todos' || query === 'todas' || query.startsWith('todos os clientes');
+        const all = query === 'todos' || query === 'todas' || query.startsWith('todos os clientes') || query.startsWith('todas as origens');
         const matches = all ? partyChoices : query ? partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
         const showAll = () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' });
-        const allOption = all ? [el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-all', onclick: showAll, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showAll(); } } }, 'Todos os clientes — mostrar o total por pessoa')] : [];
+        const allOption = all ? [el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-all', onclick: showAll, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showAll(); } } }, 'Todos os clientes e origens — mostrar totais')] : [];
         suggestions.replaceChildren(...allOption, ...matches.map((p) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-suggestion', onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.setFinanceView({ finPartyId: p.key }); } } }, p.name)));
         suggestions.style.display = allOption.length || matches.length ? '' : 'none';
       });
@@ -2715,12 +2716,12 @@ function financeTitlePanel(ctx, direction) {
   const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && !['discount', 'credit', 'loss'].includes(s.kind)).map((s) => s.method), ...store.state.cashAdjustments.filter((a) => a.kind === 'client-payment' && !store.isReversed('cashAdjustment', a.id)).map((a) => a.method)].filter(Boolean))];
   const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
   const headerActions = el('div', { class: 'pa-row pa-form' }, [
-    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openClientStatement(selectedParty || '') }, 'Ficha do cliente'),
+    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openClientStatement(selectedParty || '') }, selectedPersonKey.startsWith('origin:') ? 'Ficha da origem' : 'Ficha do cliente'),
     el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': `fin-${direction}-new`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction }) }, direction === 'receber' ? '+ Nova entrada' : '+ Nova saída'),
   ].filter(Boolean));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
-    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Cada pessoa aparece uma vez, com o valor total do filtro. Clique no nome para ver a ficha financeira, os lançamentos e os pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
+    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Cada cliente ou origem aparece uma vez, com o valor total do filtro. Clique no nome para ver os lançamentos e pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando você escolher criar a conta a pagar no lançamento.' }),
     el('div', { class: 'pa-chiprow' }, [
       el('button', { class: 'pa-chip' + (selectedPeriod === 'all' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-all`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' } : { finPayPeriod: 'all', finPayStart: '', finPayEnd: '' }) }, 'Período completo'),
       el('button', { class: 'pa-chip' + (selectedPeriod === 'custom' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-custom`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'custom' } : { finPayPeriod: 'custom' }) }, 'Selecionar datas'),
@@ -2728,13 +2729,13 @@ function financeTitlePanel(ctx, direction) {
     selectedPeriod === 'custom' && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finPayStart: s, finPayEnd: e }), `fin-${direction}`),
     selectedPeriod === 'custom' && !receivedMethod && el('p', { class: 'pa-hint', text: 'As datas limitam a lista aos títulos com vencimento no período escolhido.' }),
     receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda não quitadas, escolha “Em aberto” ou “Todos”.` }),
-    el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
+    el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente ou origem' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
     direction === 'pagar' && el('p', { class: 'pa-hint', text: 'Em aberto inclui contas pendentes, parcialmente pagas e vencidas.' }),
     el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), direction === 'receber' && chip('perda', 'Perdas'), chip('todos', 'Todos')].filter(Boolean)),
     direction === 'receber' && (receivePeriod === 'custom' || status !== 'aberto' || receivedMethod) && el('p', { class: 'pa-hint', text: `Saldo em aberto em todo o histórico: ${brl(currentClientBalance)}. Esse valor não muda com os filtros de datas, situação ou forma recebida.` }),
     el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'perda' ? 'Perdas no filtro' : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
-    direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes no filtro (${filteredClients.length})` }),
-    direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes…', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente com lançamentos neste filtro.' })),
+    direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes e origens no filtro (${filteredClients.length})` }),
+    direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes e origens…', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente ou origem com lançamentos neste filtro.' })),
     direction === 'pagar' && (rows.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhum título com este filtro.' })),
   ]);
 }
@@ -2952,19 +2953,22 @@ function financeClientStatementPanel(ctx) {
 
 function clientStatementSheet(ctx, modal = {}, inline = false) {
   const { store } = ctx;
+  let clientId = '';
   const statementView = (rows) => inline ? el('section', { class: 'pa-card', 'data-testid': 'fin-client-statement-panel' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Clientes e receitas' }), el('h2', { text: 'Ficha do cliente' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('fin-receber') }, '← Contas a receber')]),
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Clientes e receitas' }), el('h2', { text: clientId.startsWith('origin:') ? 'Ficha da origem' : 'Ficha do cliente' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('fin-receber') }, '← Contas a receber')]),
     ...rows,
-  ]) : sheet({ title: 'Ficha financeira do cliente', rows });
+  ]) : sheet({ title: clientId.startsWith('origin:') ? 'Ficha financeira da origem' : 'Ficha financeira do cliente', rows });
   const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
-  const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
+  const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyType !== 'origem' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
     .filter(([key]) => !clients.some((c) => `name:${norm(c.name)}` === key))
     .map(([id, name]) => ({ id, name }));
-  if (!clients.length && !namedParties.length) return statementView([el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance um valor a receber para consultar a ficha financeira.' })]);
+  const originParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyType === 'origem' && t.partyName && !t.cancelledAt).map((t) => [`origin:${norm(t.partyName)}`, t.partyName])).entries()]
+    .map(([id, name]) => ({ id, name }));
+  if (!clients.length && !namedParties.length && !originParties.length) return statementView([el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance uma entrada para consultar a ficha financeira.' })]);
 
   const hasNamedParty = (id) => String(id || '').startsWith('name:') && (clients.some((c) => `name:${norm(c.name)}` === id) || namedParties.some((p) => p.id === id));
-  let clientId = clients.some((c) => c.id === modal.clientId) || hasNamedParty(modal.clientId) ? modal.clientId : '';
-  const registeredClientIds = () => clientId.startsWith('name:') ? clients.filter((c) => `name:${norm(c.name)}` === clientId).map((c) => c.id) : clientId ? [clientId] : [];
+  clientId = clients.some((c) => c.id === modal.clientId) || hasNamedParty(modal.clientId) || originParties.some((p) => p.id === modal.clientId) ? modal.clientId : '';
+  const registeredClientIds = () => clientId.startsWith('origin:') ? [] : clientId.startsWith('name:') ? clients.filter((c) => `name:${norm(c.name)}` === clientId).map((c) => c.id) : clientId ? [clientId] : [];
   const clientPicker = el('div', { class: 'pa-cli-picker', 'data-testid': 'client-statement-client' });
   const mode = el('select', { class: 'pa-input', 'data-testid': 'client-statement-mode' }, [el('option', { value: 'geral', text: 'Geral — todo o histórico' }), el('option', { value: 'periodo', text: 'Período específico' })]);
   const start = el('input', { class: 'pa-input', 'data-testid': 'client-statement-start', type: 'date', value: ctx.view.finStart || '' });
@@ -3013,24 +3017,24 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
     const statement = currentStatement();
     const label = mode.value === 'periodo' ? 'no período' : 'no histórico geral';
     preview.replaceChildren(
-      el('div', { class: 'pa-statgrid' }, [statCard(`Compras ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statement.periodLosses > 0.005 && statCard(`Perdas ${label}`, brl(statement.periodLosses), 'bad'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), statCard('Crédito disponível', brl(statement.creditBalance), 'ok')].filter(Boolean)),
-      el('p', { class: 'pa-hint', text: 'O saldo atual e o crédito disponível consideram todo o histórico, mesmo quando a visualização está limitada a um período.' }),
-      statement.movements.length ? el('div', {}, statement.movements.slice().reverse().map(movementRow)) : el('p', { class: 'pa-empty', text: 'Nenhuma compra ou pagamento com este filtro.' }),
+      el('div', { class: 'pa-statgrid' }, [statCard(`${statement.isOrigin ? 'Lançamentos' : 'Compras'} ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statement.periodLosses > 0.005 && statCard(`Perdas ${label}`, brl(statement.periodLosses), 'bad'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), !statement.isOrigin && statCard('Crédito disponível', brl(statement.creditBalance), 'ok')].filter(Boolean)),
+      el('p', { class: 'pa-hint', text: statement.isOrigin ? 'O saldo atual considera todo o histórico, mesmo quando a visualização está limitada a um período.' : 'O saldo atual e o crédito disponível consideram todo o histórico, mesmo quando a visualização está limitada a um período.' }),
+      statement.movements.length ? el('div', {}, statement.movements.slice().reverse().map(movementRow)) : el('p', { class: 'pa-empty', text: statement.isOrigin ? 'Nenhum lançamento ou pagamento com este filtro.' : 'Nenhuma compra ou pagamento com este filtro.' }),
     );
   }
   function renderClientPicker() {
-    const selected = clientId && (store.get('clients', clientId) || (clientId.startsWith('name:') ? { name: clients.find((c) => `name:${norm(c.name)}` === clientId)?.name || namedParties.find((p) => p.id === clientId)?.name || clientId.slice(5) } : null));
+    const selected = clientId && (store.get('clients', clientId) || (clientId.startsWith('origin:') ? { name: `Origem: ${originParties.find((p) => p.id === clientId)?.name || clientId.slice(7)}` } : clientId.startsWith('name:') ? { name: clients.find((c) => `name:${norm(c.name)}` === clientId)?.name || namedParties.find((p) => p.id === clientId)?.name || clientId.slice(5) } : null));
     if (selected) {
-      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: '' }); else { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } } }, '✕')]));
+      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente ou origem', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: '' }); else { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } } }, '✕')]));
       return;
     }
-    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do cliente…', 'data-testid': 'client-statement-search' });
+    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite cliente ou origem…', 'data-testid': 'client-statement-search' });
     const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
     search.addEventListener('input', () => {
       const query = norm(search.value);
-      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
+      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query)), ...originParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
       results.style.display = matches.length ? '' : 'none';
-      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: c.id }); else { clientId = c.id; renderClientPicker(); renderStatement(); } } }, clientLabel(c))));
+      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: c.id }); else { clientId = c.id; renderClientPicker(); renderStatement(); } } }, c.id.startsWith('origin:') ? `Origem: ${c.name}` : clientLabel(c))));
     });
     clientPicker.replaceChildren(search, results);
   }
@@ -3049,23 +3053,75 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
   const details = el('div', {}, [field('Visualização', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
   renderClientPicker();
   renderStatement();
-  return statementView([el('p', { class: 'pa-hint', text: 'Busque um cliente para consultar suas compras, pagamentos e crédito.' }), field('Cliente', clientPicker), details]);
+  return statementView([el('p', { class: 'pa-hint', text: 'Busque um cliente ou uma origem para consultar os lançamentos e pagamentos.' }), field('Cliente ou origem', clientPicker), details]);
+}
+
+function financeClientPicker(store, initialId = '', testid = 'fin-title-client') {
+  const clients = store.state.clients.filter((client) => !client.inactive || client.id === initialId)
+    .sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
+  let clientId = clients.some((client) => client.id === initialId) ? initialId : '';
+  const picker = el('div', { class: 'pa-cli-picker', 'data-testid': testid });
+  const render = () => {
+    const selected = clients.find((client) => client.id === clientId);
+    if (selected) {
+      picker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [
+        el('span', { class: 'pa-grow', text: clientLabel(selected) }),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', title: 'Trocar cliente', 'aria-label': 'Trocar cliente', onclick: () => { clientId = ''; render(); } }, '✕'),
+      ]));
+      return;
+    }
+    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do cliente…', 'data-testid': `${testid}-search` });
+    const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
+    search.addEventListener('input', () => {
+      const query = norm(search.value);
+      const matches = query ? clients.filter((client) => norm(clientSearchText(client)).includes(query)).slice(0, 8) : [];
+      suggestions.replaceChildren(...matches.map((client) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': `${testid}-suggestion`, onclick: () => { clientId = client.id; render(); }, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); clientId = client.id; render(); } } }, clientLabel(client))));
+      suggestions.style.display = matches.length ? '' : 'none';
+    });
+    picker.replaceChildren(search, suggestions);
+  };
+  render();
+  return { element: picker, selected: () => clients.find((client) => client.id === clientId), focus: () => picker.querySelector('input')?.focus() };
 }
 
 MODALS['finance-title-add'] = (ctx, m) => financeTitleAddSheet(ctx, m.direction || 'pagar');
 function financeTitleAddSheet(ctx, direction) {
   const { store } = ctx; const isReceive = direction === 'receber';
   const issue = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-title-issue' }); const due = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-title-due' });
-  const parties = isReceive ? store.state.clients.filter((c) => !c.inactive) : store.state.suppliers.filter((s) => !s.archived);
-  const party = el('select', { class: 'pa-input', 'data-testid': 'fin-title-party' }, [el('option', { value: '', text: isReceive ? 'Sem cliente / outro' : 'Sem fornecedor / outro' }), ...parties.map((p) => el('option', { value: p.id, text: isReceive ? clientLabel(p) : p.name }))]);
+  const suppliers = store.state.suppliers.filter((s) => !s.archived);
+  const supplier = el('select', { class: 'pa-input', 'data-testid': 'fin-title-party' }, [el('option', { value: '', text: 'Sem fornecedor / outro' }), ...suppliers.map((p) => el('option', { value: p.id, text: p.name }))]);
+  const sourceType = el('select', { class: 'pa-input', 'data-testid': 'fin-title-source-type' }, [el('option', { value: 'cliente', text: 'Cliente cadastrado' }), el('option', { value: 'origem', text: 'Outra origem' })]);
+  const clientPicker = financeClientPicker(store);
+  const originName = el('input', { class: 'pa-input', type: 'text', placeholder: 'Ex.: feira, curso, parceria', 'data-testid': 'fin-title-origin-name' });
+  const sourceFields = el('div', {}, [field('Cliente', clientPicker.element), el('p', { class: 'pa-hint', text: 'Digite o nome e escolha uma sugestão para vincular ao cadastro.' })]);
+  const originFields = el('div', { style: 'display:none' }, [field('Nome da origem', originName), el('p', { class: 'pa-hint', text: 'Identifique de onde virá o valor. Esta entrada ficará separada das fichas de clientes.' })]);
+  const sourceError = el('p', { class: 'pa-sheet-msg', role: 'alert' });
+  sourceType.addEventListener('change', () => {
+    sourceError.textContent = '';
+    sourceFields.style.display = sourceType.value === 'cliente' ? '' : 'none';
+    originFields.style.display = sourceType.value === 'origem' ? '' : 'none';
+  });
   const description = el('input', { class: 'pa-input', type: 'text', placeholder: isReceive ? 'Ex.: encomenda especial' : 'Ex.: conta de energia', 'data-testid': 'fin-title-desc' }); const amount = moneyField(null, 'fin-title-amount');
   const categories = activeFinanceCategories(store, direction); const preferred = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas');
   const category = el('select', { class: 'pa-input', 'data-testid': 'fin-title-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(preferred?.id === c.id ? { selected: 'selected' } : {}) })));
   const situation = el('select', { class: 'pa-input', 'data-testid': 'fin-title-situation' }, [el('option', { value: 'pendente', text: isReceive ? 'Ainda não recebi' : 'Ainda não paguei' }), el('option', { value: 'quitado', text: isReceive ? 'Já foi recebido' : 'Já foi pago' })]);
   const method = paymentMethodSelect(store, 'fin-title-method');
   const account = el('select', { class: 'pa-input', 'data-testid': 'fin-title-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('textarea', { class: 'pa-input', rows: '2', placeholder: 'Observações (opcional)' });
-  function save() { const value = parseNum(amount.input.value); if (!(value > 0)) { amount.input.focus(); return; } const selectedParty = parties.find((p) => p.id === party.value); const id = uuid(); ctx.actions.mutate((s) => { s.upsertFinanceTitle({ id, direction, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || (isReceive ? 'Receita manual' : 'Conta manual'), categoryId: category.value || undefined, partyType: isReceive ? 'cliente' : 'fornecedor', partyId: selectedParty?.id, partyName: selectedParty?.name || (isReceive ? 'Outro cliente' : 'Outro fornecedor'), expectedMethod: method.value, sourceType: 'manual', notes: notes.value.trim() || undefined }); if (situation.value === 'quitado') s.addFinanceSettlement({ id: uuid(), at: dateIso(issue.value), titleId: id, amount: value, method: method.value, accountId: account.value || undefined }); }); }
-  return sheet({ title: isReceive ? 'Nova entrada' : 'Nova saída', rows: [el('p', { class: 'pa-hint', text: isReceive ? 'Registre uma entrada recebida ou um valor que ainda vai entrar.' : 'Registre uma saída já paga ou uma conta que ainda será paga.' }), field('Data do lançamento', issue), field('Vencimento', due), field(isReceive ? 'Cliente / origem' : 'Fornecedor / destino', party), field('Descrição', description), field('Valor', amount), field('Categoria do plano de contas', category), field('Situação', situation), field('Forma de pagamento', method), field('Conta financeira', account), field('Observações', notes)], onSave: save, saveTestid: 'fin-title-save' });
+  function save() {
+    sourceError.textContent = '';
+    const value = parseNum(amount.input.value); if (!(value > 0)) { amount.input.focus(); return; }
+    const client = isReceive && sourceType.value === 'cliente' ? clientPicker.selected() : null;
+    const otherOrigin = isReceive && sourceType.value === 'origem' ? originName.value.trim() : '';
+    if (isReceive && sourceType.value === 'cliente' && !client) { sourceError.textContent = 'Digite o nome e selecione um cliente sugerido.'; clientPicker.focus(); return; }
+    if (isReceive && sourceType.value === 'origem' && !otherOrigin) { sourceError.textContent = 'Informe o nome da origem desta entrada.'; originName.focus(); return; }
+    const selectedSupplier = !isReceive ? suppliers.find((p) => p.id === supplier.value) : null;
+    const id = uuid();
+    ctx.actions.mutate((s) => {
+      s.upsertFinanceTitle({ id, direction, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || (isReceive ? 'Receita manual' : 'Conta manual'), categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || 'Outro fornecedor', expectedMethod: method.value, sourceType: 'manual', notes: notes.value.trim() || undefined });
+      if (situation.value === 'quitado') s.addFinanceSettlement({ id: uuid(), at: dateIso(issue.value), titleId: id, amount: value, method: method.value, accountId: account.value || undefined });
+    });
+  }
+  return sheet({ title: isReceive ? 'Nova entrada' : 'Nova saída', rows: [el('p', { class: 'pa-hint', text: isReceive ? 'Escolha se o valor vem de um cliente cadastrado ou de outra origem. Depois registre a situação da entrada.' : 'Registre uma saída já paga ou uma conta que ainda será paga.' }), field('Data do lançamento', issue), field('Vencimento', due), isReceive ? field('Origem da entrada', sourceType) : field('Fornecedor / destino', supplier), isReceive && sourceFields, isReceive && originFields, isReceive && sourceError, field('Descrição', description), field('Valor', amount), field('Categoria do plano de contas', category), field('Situação', situation), field('Forma de pagamento', method), field('Conta financeira', account), field('Observações', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-title-save' });
 }
 
 MODALS['finance-title-detail'] = (ctx, m) => financeTitleDetailSheet(ctx, m.id);
@@ -3091,8 +3147,16 @@ function financeTitleEditSheet(ctx, id) {
   const isReceive = title.direction === 'receber'; const state = titleState(ctx.store, title);
   const issue = el('input', { class: 'pa-input', type: 'date', value: dateOnly(title.issuedAt), 'data-testid': 'fin-edit-issue' });
   const due = el('input', { class: 'pa-input', type: 'date', value: dateOnly(title.dueDate), 'data-testid': 'fin-edit-due' });
-  const parties = isReceive ? ctx.store.state.clients.filter((c) => !c.inactive) : ctx.store.state.suppliers.filter((s) => !s.archived);
-  const party = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-party' }, [el('option', { value: '', text: isReceive ? 'Sem cliente / outro' : 'Sem fornecedor / outro', ...(!title.partyId ? { selected: 'selected' } : {}) }), ...parties.map((p) => el('option', { value: p.id, text: isReceive ? clientLabel(p) : p.name, ...(title.partyId === p.id ? { selected: 'selected' } : {}) }))]);
+  const suppliers = ctx.store.state.suppliers.filter((s) => !s.archived || s.id === title.partyId);
+  const supplier = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-party' }, [el('option', { value: '', text: 'Sem fornecedor / outro', ...(!title.partyId ? { selected: 'selected' } : {}) }), ...suppliers.map((p) => el('option', { value: p.id, text: p.name, ...(title.partyId === p.id ? { selected: 'selected' } : {}) }))]);
+  const initialSourceType = title.partyType === 'origem' || !title.partyId ? 'origem' : 'cliente';
+  const sourceType = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-source-type' }, [el('option', { value: 'cliente', text: 'Cliente cadastrado', ...(initialSourceType === 'cliente' ? { selected: 'selected' } : {}) }), el('option', { value: 'origem', text: 'Outra origem', ...(initialSourceType === 'origem' ? { selected: 'selected' } : {}) })]);
+  const clientPicker = financeClientPicker(ctx.store, title.partyId, 'fin-edit-client');
+  const originName = el('input', { class: 'pa-input', type: 'text', value: initialSourceType === 'origem' ? title.partyName || '' : '', placeholder: 'Ex.: feira, curso, parceria', 'data-testid': 'fin-edit-origin-name' });
+  const clientFields = el('div', { style: initialSourceType === 'cliente' ? '' : 'display:none' }, [field('Cliente', clientPicker.element)]);
+  const originFields = el('div', { style: initialSourceType === 'origem' ? '' : 'display:none' }, [field('Nome da origem', originName)]);
+  const sourceError = el('p', { class: 'pa-sheet-msg', role: 'alert' });
+  sourceType.addEventListener('change', () => { sourceError.textContent = ''; clientFields.style.display = sourceType.value === 'cliente' ? '' : 'none'; originFields.style.display = sourceType.value === 'origem' ? '' : 'none'; });
   const description = el('input', { class: 'pa-input', type: 'text', value: title.description || '', 'data-testid': 'fin-edit-desc' });
   const amount = moneyField(title.amount, 'fin-edit-amount'); const categories = activeFinanceCategories(ctx.store, title.direction);
   const category = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(title.categoryId === c.id ? { selected: 'selected' } : {}) })));
@@ -3100,11 +3164,16 @@ function financeTitleEditSheet(ctx, id) {
   const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
+    sourceError.textContent = '';
     const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.settled) { amount.input.setCustomValidity(`O valor não pode ser menor que o já baixado (${brl(state.settled)}).`); amount.input.reportValidity(); return; }
-    const selectedParty = parties.find((p) => p.id === party.value);
-    ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyId: selectedParty?.id, partyName: selectedParty?.name || title.partyName || (isReceive ? 'Outro cliente' : 'Outro fornecedor'), expectedMethod: method.value, notes: notes.value.trim() || undefined }));
+    const client = isReceive && sourceType.value === 'cliente' ? clientPicker.selected() : null;
+    const otherOrigin = isReceive && sourceType.value === 'origem' ? originName.value.trim() : '';
+    if (isReceive && sourceType.value === 'cliente' && !client) { sourceError.textContent = 'Digite o nome e selecione um cliente sugerido.'; clientPicker.focus(); return; }
+    if (isReceive && sourceType.value === 'origem' && !otherOrigin) { sourceError.textContent = 'Informe o nome da origem desta entrada.'; originName.focus(); return; }
+    const selectedSupplier = !isReceive ? suppliers.find((p) => p.id === supplier.value) : null;
+    ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || title.partyName || 'Outro fornecedor', expectedMethod: method.value, notes: notes.value.trim() || undefined }));
   }
-  return sheet({ title: 'Editar lançamento', rows: [el('p', { class: 'pa-hint', text: 'Altere o valor, as datas ou a classificação. Pagamentos já registrados permanecem no histórico.' }), field('Emissão', issue), field('Vencimento', due), field(isReceive ? 'Cliente' : 'Fornecedor', party), field('Descrição', description), field('Valor total', amount), field('Categoria', category), field('Forma prevista', method), field('Observações', notes)], onSave: save, saveTestid: 'fin-edit-save' });
+  return sheet({ title: 'Editar lançamento', rows: [el('p', { class: 'pa-hint', text: 'Altere o valor, as datas ou a classificação. Pagamentos já registrados permanecem no histórico.' }), field('Emissão', issue), field('Vencimento', due), isReceive ? field('Origem da entrada', sourceType) : field('Fornecedor', supplier), isReceive && clientFields, isReceive && originFields, isReceive && sourceError, field('Descrição', description), field('Valor total', amount), field('Categoria', category), field('Forma prevista', method), field('Observações', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-edit-save' });
 }
 
 MODALS['finance-settlement-edit'] = (ctx, m) => financeSettlementEditSheet(ctx, m);

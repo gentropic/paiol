@@ -16,13 +16,16 @@ const personName = (name) => String(name || '').normalize('NFD').replace(/[\u030
  */
 export function clientFinancialStatement(store, clientId, start = '', end = '') {
   const groupedName = String(clientId || '').startsWith('name:') ? String(clientId).slice(5) : '';
+  const originName = String(clientId || '').startsWith('origin:') ? String(clientId).slice(7) : '';
   const matchingClients = groupedName ? store.state.clients.filter((c) => personName(c.name) === groupedName) : [];
-  const matchingIds = new Set(groupedName ? matchingClients.map((c) => c.id) : [clientId]);
-  const matchesTitle = (title) => groupedName
-    ? (title.partyId && store.get('clients', title.partyId) ? matchingIds.has(title.partyId) : personName(title.partyName || 'Sem cliente') === groupedName)
+  const matchingIds = new Set(originName ? [] : groupedName ? matchingClients.map((c) => c.id) : [clientId]);
+  const matchesTitle = (title) => originName
+    ? title.partyType === 'origem' && personName(title.partyName) === originName
+    : groupedName
+    ? title.partyType !== 'origem' && (title.partyId && store.get('clients', title.partyId) ? matchingIds.has(title.partyId) : personName(title.partyName || 'Sem cliente') === groupedName)
     : title.partyId === clientId;
-  const namedTitle = groupedName && store.state.financeTitles.find((t) => t.direction === 'receber' && matchesTitle(t));
-  const client = groupedName ? (matchingClients[0] || { name: namedTitle?.partyName || groupedName }) : store.get('clients', clientId) || null;
+  const namedTitle = (groupedName || originName) && store.state.financeTitles.find((t) => t.direction === 'receber' && matchesTitle(t));
+  const client = originName ? { name: namedTitle?.partyName || originName } : groupedName ? (matchingClients[0] || { name: namedTitle?.partyName || groupedName }) : store.get('clients', clientId) || null;
   const allMovements = [];
 
   for (const order of store.state.encomendas.filter((e) => matchingIds.has(e.clienteId) && !e.desistenciaAt)) {
@@ -92,7 +95,7 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
   const totalPaid = payments(allMovements);
 
   return {
-    client, clientId, start, end, movements,
+    client, clientId, isOrigin: Boolean(originName), start, end, movements,
     periodPurchases: charges(movements),
     periodPayments: payments(movements),
     periodDiscounts: discounts(movements),

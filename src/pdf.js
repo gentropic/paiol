@@ -366,7 +366,7 @@ export async function generateClientStatementPdf(statement) {
   const newPage = () => {
     page = doc.addPage(A4); pageNo += 1; y = A4[1] - M;
     page.drawText('Quitutes do Paiol', { x: M, y: y - 12, size: 15, font: bold, color: navy });
-    rightText(page, 'FICHA FINANCEIRA DO CLIENTE', right, y - 11, 10, bold, teal);
+    rightText(page, statement.isOrigin ? 'FICHA FINANCEIRA DA ORIGEM' : 'FICHA FINANCEIRA DO CLIENTE', right, y - 11, 10, bold, teal);
     y -= 29;
     page.drawLine({ start: { x: M, y }, end: { x: right, y }, thickness: 2, color: teal });
     y -= 23;
@@ -381,10 +381,10 @@ export async function generateClientStatementPdf(statement) {
   newPage();
 
   const summary = [
-    ['Compras no filtro', statement.periodPurchases, navy],
+    [statement.isOrigin ? 'Lançamentos no filtro' : 'Compras no filtro', statement.periodPurchases, navy],
     ['Pagamentos no filtro', statement.periodPayments, good],
     ['Saldo atual', statement.currentBalance, statement.currentBalance > 0.005 ? bad : good],
-    ['Crédito disponível', statement.creditBalance || 0, good],
+    statement.isOrigin ? ['Perdas no filtro', statement.periodLosses || 0, bad] : ['Crédito disponível', statement.creditBalance || 0, good],
   ];
   const boxW = (right - M - 12) / 2; const boxH = 42;
   summary.forEach(([label, value, color], index) => {
