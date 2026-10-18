@@ -92,7 +92,9 @@ export async function boot(root) {
           // New orders from another device also need their receivable titles before the panel renders.
           if (ensureFinanceFoundation(store) > 0) { saver.schedule(); scheduleSync(); }
         }
-        if (meta.manual || res.pulledEvents || res.pulledMaster) rerender(); // refresh if data came in
+        // Keep an in-progress Ajustes form intact during background sync. The merged
+        // values appear on the next visit; pressing Salvar always re-renders immediately.
+        if (meta.manual || ((res.pulledEvents || res.pulledMaster) && view.tab !== 'ajustes')) rerender();
       } else {
         view.syncError = res.error;                  // surfaced quietly in Ajustes; not a nag
         if (meta.manual) { view.status = `Erro ao sincronizar: ${res.error}`; rerender(); }
@@ -151,7 +153,14 @@ export async function boot(root) {
       } else view.status = 'Este registro não está mais disponível para restauração.';
       rerender();
     },
-    setConfig(partial) { store.setConfig(partial); saver.schedule(); scheduleSync(); view.status = 'Ajustes salvos.'; rerender(); },
+    async setConfig(partial) {
+      store.setConfig(partial);
+      saver.schedule(); scheduleSync();
+      view.status = 'Salvando ajustes…'; rerender();
+      try { await saver.flushNow(); view.status = 'Ajustes salvos.'; }
+      catch (e) { view.status = `Não foi possível salvar os ajustes: ${String(e?.message || e)}`; }
+      rerender();
+    },
     importData(text) {
       const r = importYaml(store, text);
       saver.schedule();

@@ -4592,8 +4592,10 @@ function ajustesPanel(ctx) {
   const c = store.getConfig();
   const automatic = automaticConfigSuggestions(store);
   const f = {};
+  const draft = ctx.view.settingsDraft || (ctx.view.settingsDraft = {});
   const field = (key, label, value, hint, helperKey) => {
-    const input = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', value: String(value).replace('.', ',') });
+    const input = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', value: draft[key] ?? String(value).replace('.', ',') });
+    input.addEventListener('input', () => { draft[key] = input.value; });
     f[key] = input;
     return el('div', { class: 'pa-field' }, [el('label', { text: label }), el('div', { class: 'pa-row' }, [input, helperKey && el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', onclick: () => ctx.actions.openModal({ kind: 'settings-helper', key: helperKey }) }, 'Calcular comigo')].filter(Boolean)), hint && el('span', { class: 'pa-hint', text: hint })]);
   };
@@ -4608,11 +4610,15 @@ function ajustesPanel(ctx) {
       paymentFeePct: (parseNum(f.fee.value) ?? pct(c.paymentFeePct)) / 100,
       commissionPct: (parseNum(f.commission.value) ?? pct(c.commissionPct || 0)) / 100,
     };
-    if (next.targetMarginPct + next.paymentFeePct + next.commissionPct >= 1) {
+    const keys = { valorHora: 'valorHora', taxaGas: 'taxaGas', custosFixosMes: 'custosFixosMes', expected: 'expectedProductionMinutesMonth', margin: 'targetMarginPct', fee: 'paymentFeePct', commission: 'commissionPct' };
+    const changed = Object.fromEntries(Object.entries(keys).filter(([inputKey]) => Object.hasOwn(draft, inputKey)).map(([inputKey, configKey]) => [configKey, next[configKey]]));
+    const prospective = { ...store.getConfig(), ...changed };
+    if (prospective.targetMarginPct + prospective.paymentFeePct + prospective.commissionPct >= 1) {
       window.alert('Margem, taxa de pagamento e comissão precisam somar menos de 100%.');
       return;
     }
-    ctx.actions.setConfig(next);
+    ctx.view.settingsDraft = null;
+    ctx.actions.setConfig(changed);
   }
 
   const autoRows = [
@@ -4628,8 +4634,9 @@ function ajustesPanel(ctx) {
   const applyAutomatic = () => ctx.actions.setConfig({ ...applicable });
   const automaticMargin = el('input', {
     class: 'pa-input pa-narrow', 'data-testid': 'automatic-target-margin', type: 'text', inputmode: 'decimal',
-    value: String(pct(c.targetMarginPct)).replace('.', ','), 'aria-label': 'Margem alvo dos cálculos (%)',
+    value: ctx.view.automaticMarginDraft ?? String(pct(c.targetMarginPct)).replace('.', ','), 'aria-label': 'Margem alvo dos cálculos (%)',
   });
+  automaticMargin.addEventListener('input', () => { ctx.view.automaticMarginDraft = automaticMargin.value; });
   const saveAutomaticMargin = () => {
     const value = parseNum(automaticMargin.value);
     const feePct = Number(c.paymentFeePct) || 0;
@@ -4638,6 +4645,7 @@ function ajustesPanel(ctx) {
       window.alert(`Informe uma margem válida. Somada à taxa de pagamento (${pctStr(feePct)}) e à comissão (${pctStr(commissionPct)}), ela precisa ficar abaixo de 100%.`);
       return;
     }
+    ctx.view.automaticMarginDraft = null;
     ctx.actions.setConfig({ targetMarginPct: value / 100 });
   };
 
@@ -4684,10 +4692,12 @@ function ajustesPanel(ctx) {
 // Dados da empresa (Rev 06) — recibo header. Stored in config (synced/backed up), never in source.
 function empresaCard(ctx) {
   const emp = ctx.store.getConfig().empresa || {};
-  let logo = emp.logo || '';
+  const draft = ctx.view.companyDraft || (ctx.view.companyDraft = {});
+  let logo = draft.logo ?? emp.logo ?? '';
   const f = {};
   const tf = (key, label, ph) => {
-    const i = el('input', { class: 'pa-input', 'data-testid': `emp-${key}`, type: 'text', placeholder: ph || '', value: emp[key] || '' });
+    const i = el('input', { class: 'pa-input', 'data-testid': `emp-${key}`, type: 'text', placeholder: ph || '', value: draft[key] ?? emp[key] ?? '' });
+    i.addEventListener('input', () => { draft[key] = i.value; });
     f[key] = i;
     return el('div', { class: 'pa-field' }, [el('label', { text: label }), i]);
   };
@@ -4702,12 +4712,13 @@ function empresaCard(ctx) {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => { logo = String(reader.result); renderPreview(); };
+      reader.onload = () => { logo = String(reader.result); draft.logo = logo; renderPreview(); };
       reader.readAsDataURL(file);
       e.target.value = '';
     },
   });
   function save() {
+    ctx.view.companyDraft = null;
     ctx.actions.setConfig({ empresa: {
       nome: f.nome.value.trim(), cnpj: f.cnpj.value.trim(), endereco: f.endereco.value.trim(),
       telefone: f.telefone.value.trim(), responsavel: f.responsavel.value.trim(), logo,
@@ -4726,7 +4737,7 @@ function empresaCard(ctx) {
       preview,
       el('div', { class: 'pa-row pa-form' }, [
         el('button', { class: 'pa-btn pa-sm', 'data-testid': 'emp-logo-btn', onclick: () => fileInput.click() }, 'Escolher imagem'),
-        logo && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { logo = ''; renderPreview(); } }, 'Remover'),
+        logo && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { logo = ''; draft.logo = ''; renderPreview(); } }, 'Remover'),
       ].filter(Boolean)),
       fileInput,
     ]),

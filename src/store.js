@@ -83,6 +83,7 @@ const CONFIG_KEYS = Object.keys(DEFAULT_CONFIG);
  * @typedef {object} State
  * @property {number} version
  * @property {import('./domain.js').Config} config
+ * @property {Record<string, string>} configUpdatedAt
  * @property {import('./domain.js').Ingredient[]}  ingredients
  * @property {import('./domain.js').Recipe[]}      recipes
  * @property {import('./domain.js').Product[]}     products
@@ -96,6 +97,7 @@ export function emptyState() {
   return {
     version: SCHEMA_VERSION,
     config: { ...DEFAULT_CONFIG },
+    configUpdatedAt: {},
     ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
     suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], trashItems: [],
     notifications: [], shoppingItems: [],
@@ -113,6 +115,7 @@ export class PaiolStore {
     this.state.version = Math.max(Number(this.state.version) || 1, SCHEMA_VERSION);
     // Backfill config defaults for any missing key (forward-compatible loads).
     this.state.config = { ...DEFAULT_CONFIG, ...(this.state.config || {}) };
+    this.state.configUpdatedAt = { ...(this.state.configUpdatedAt || {}) };
     // Migrate legacy products (recipeId + portion) to the component-list shape.
     for (const p of this.state.products) {
       if (!Array.isArray(p.components)) {
@@ -164,7 +167,15 @@ export class PaiolStore {
   getConfig() { return this.state.config; }
 
   /** Patch config in place. @param {Partial<import('./domain.js').Config>} partial */
-  setConfig(partial) { Object.assign(this.state.config, partial); this._rev++; return this.state.config; }
+  setConfig(partial) {
+    const updatedAt = new Date().toISOString();
+    for (const [key, value] of Object.entries(partial)) {
+      this.state.config[key] = value;
+      this.state.configUpdatedAt[key] = updatedAt;
+    }
+    this._rev++;
+    return this.state.config;
+  }
 
   /** Latest price for an ingredient (BRL per stockUnit), or null if none recorded yet. */
   currentPrice(ingredientId) {
@@ -388,13 +399,38 @@ export class PaiolStore {
           if (local && String(local.updatedAt || '') > String(rec.updatedAt || '')) continue;
           if (local && JSON.stringify(local) === JSON.stringify(rec)) continue;
         }
+        if (JSON.stringify(this.get(c, rec.id)) === JSON.stringify(rec)) continue;
         this._upsert(c, rec);
         masterUpserted++;
       }
     }
     this._applyTrashSuppression();
-    // Config is a singleton: incoming wins (last-writer; v0.1 single-user, no vector clocks).
-    if (o.config) this.setConfig(o.config);
+    // Settings merge field by field. A stale Dropbox snapshot must not undo a local edit.
+    // Older backups have no timestamps: keep a non-default local value, but let a fresh
+    // device with defaults adopt the remote value. Stamp the chosen legacy value once.
+    if (o.config) for (const key of CONFIG_KEYS) {
+      if (o.config[key] === undefined) continue;
+      const localAt = String(this.state.configUpdatedAt[key] || '');
+      const remoteAt = String(o.configUpdatedAt?.[key] || '');
+      const localValue = this.state.config[key];
+      const remoteValue = o.config[key];
+      const localJson = JSON.stringify(localValue);
+      const remoteJson = JSON.stringify(remoteValue);
+      if (localAt === remoteAt && localJson === remoteJson) continue;
+      let takeRemote = remoteAt > localAt;
+      if (localAt === remoteAt) {
+        if (localAt) takeRemote = remoteJson > localJson; // deterministic tie-break
+        else takeRemote = localJson === JSON.stringify(DEFAULT_CONFIG[key]) && remoteJson !== JSON.stringify(DEFAULT_CONFIG[key]);
+      }
+      const chosenAt = localAt === remoteAt && !localAt
+        ? new Date().toISOString() : (takeRemote ? remoteAt : localAt);
+      if (takeRemote && localJson !== remoteJson) {
+        this.state.config[key] = remoteValue;
+        masterUpserted++;
+      }
+      if (chosenAt !== localAt) this.state.configUpdatedAt[key] = chosenAt;
+      if ((takeRemote && localJson !== remoteJson) || chosenAt !== localAt) this._rev++;
+    }
     return { eventsAdded, masterUpserted };
   }
 
@@ -408,7 +444,7 @@ export class PaiolStore {
    * the same data serialize to the same bytes.
    */
   toYaml() {
-    const ordered = { version: this.state.version, config: orderedConfig(this.state.config) };
+    const ordered = { version: this.state.version, config: orderedConfig(this.state.config), configUpdatedAt: orderedConfigUpdatedAt(this.state.configUpdatedAt) };
     for (const c of MASTER_COLLECTIONS) ordered[c] = sortBy(this.state[c], byId);
     for (const c of EVENT_COLLECTIONS) ordered[c] = sortBy(this.state[c], byAtThenId);
     return toYaml(ordered);
@@ -424,6 +460,7 @@ export class PaiolStore {
     const copy = emptyState();
     copy.version = this.state.version;
     copy.config = { ...this.state.config };
+    copy.configUpdatedAt = { ...this.state.configUpdatedAt };
     for (const c of ALL) copy[c] = this.state[c].slice();
     return new PaiolStore(copy);
   }
@@ -523,6 +560,11 @@ function trashRecordLabel(record) {
 function orderedConfig(config) {
   const out = {};
   for (const k of CONFIG_KEYS) if (config[k] !== undefined) out[k] = config[k];
+  return out;
+}
+function orderedConfigUpdatedAt(updatedAt) {
+  const out = {};
+  for (const key of CONFIG_KEYS) if (updatedAt[key]) out[key] = updatedAt[key];
   return out;
 }
 function sortBy(arr, cmp) { return arr.slice().sort(cmp); }

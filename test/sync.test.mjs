@@ -80,6 +80,58 @@ test('a newer remote product edit still updates an older local copy', () => {
   assert.equal(local.get('products', 'pao').salePrice, 22);
 });
 
+test('saved Ajustes survive an older Dropbox copy and reach another device', async () => {
+  const v = await remote();
+  const old = new PaiolStore({ config: { valorHora: 30, empresa: { nome: 'Paiol antigo' } } });
+  await syncOnce(old, v);
+  const local = PaiolStore.fromYaml(old.toYaml());
+  local.setConfig({ valorHora: 45, empresa: { nome: 'Quitutes do Paiol' } });
+
+  const result = await syncOnce(local, v);
+  assert.equal(local.getConfig().valorHora, 45);
+  assert.equal(local.getConfig().empresa.nome, 'Quitutes do Paiol');
+  assert.equal(result.pushed, true);
+  const fresh = new PaiolStore();
+  await syncOnce(fresh, v);
+  assert.equal(fresh.getConfig().valorHora, 45);
+  assert.equal(fresh.getConfig().empresa.nome, 'Quitutes do Paiol');
+});
+
+test('Ajustes merge each field by edit time and keep independent changes', () => {
+  const local = new PaiolStore({ config: { valorHora: 45, taxaGas: 0.12 }, configUpdatedAt: {
+    valorHora: '2026-10-18T12:00:00.000Z', taxaGas: '2026-10-17T12:00:00.000Z',
+  } });
+  const incoming = new PaiolStore({ config: { valorHora: 30, taxaGas: 0.18 }, configUpdatedAt: {
+    valorHora: '2026-10-17T12:00:00.000Z', taxaGas: '2026-10-18T12:00:00.000Z',
+  } });
+  local.merge(incoming);
+  assert.equal(local.getConfig().valorHora, 45);
+  assert.equal(local.getConfig().taxaGas, 0.18);
+  assert.equal(PaiolStore.fromYaml(local.toYaml()).state.configUpdatedAt.taxaGas, '2026-10-18T12:00:00.000Z');
+});
+
+test('legacy Ajustes favor filled values over untouched defaults', () => {
+  const local = new PaiolStore({ config: { valorHora: 42 } });
+  const olderRemote = new PaiolStore();
+  local.merge(olderRemote);
+  assert.equal(local.getConfig().valorHora, 42);
+  assert.ok(local.state.configUpdatedAt.valorHora);
+
+  const fresh = new PaiolStore();
+  fresh.merge(new PaiolStore({ config: { valorHora: 42 } }));
+  assert.equal(fresh.getConfig().valorHora, 42);
+});
+
+test('an unchanged remote record does not count as a pulled edit', async () => {
+  const v = await remote();
+  const local = new PaiolStore();
+  local.upsertIngredient({ id: 'sal', name: 'Sal', stockUnit: 'kg' });
+  await syncOnce(local, v);
+  const second = await syncOnce(local, v);
+  assert.equal(second.pulledMaster, 0);
+  assert.equal(second.pushed, false);
+});
+
 test('overwriting an existing remote writes a snapshot first', async () => {
   const v = await remote();
   const a = new PaiolStore();

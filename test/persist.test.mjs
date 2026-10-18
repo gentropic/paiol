@@ -59,3 +59,20 @@ test('debounced saver coalesces and flushNow forces a write', async () => {
   const back = await loadStore(v);
   assert.equal(back.get('ingredients', 'farinha').name, 'Farinha');
 });
+
+test('a failed local write can be retried instead of trapping later saves', async () => {
+  const v = await freshVfs();
+  const originalWrite = v.writeFile.bind(v);
+  let failOnce = true;
+  v.writeFile = async (...args) => {
+    if (failOnce) { failOnce = false; throw new Error('temporary write failure'); }
+    return originalWrite(...args);
+  };
+  const saver = createDebouncedSaver(v, () => seeded(), { delayMs: 10_000 });
+  saver.schedule();
+  await assert.rejects(saver.flushNow(), /temporary write failure/);
+  assert.equal(saver.pending, true);
+  await saver.flushNow();
+  assert.equal(saver.pending, false);
+  assert.ok(await v.exists(DEFAULT_PATH));
+});

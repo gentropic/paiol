@@ -69,9 +69,11 @@ export function createDebouncedSaver(vfs, getStore, opts = {}) {
 
   async function flush() {
     dirty = false;
-    inflight = saveStore(vfs, getStore(), path).then(() => {}, (e) => { dirty = true; throw e; });
-    await inflight;
-    inflight = null;
+    const write = saveStore(vfs, getStore(), path).then(() => {});
+    inflight = write;
+    try { await write; }
+    catch (e) { dirty = true; throw e; }
+    finally { if (inflight === write) inflight = null; }
   }
 
   return {
