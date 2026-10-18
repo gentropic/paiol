@@ -841,6 +841,7 @@ function receitaSheet(ctx, recipe) {
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
     el('h3', { class: 'pa-h3', text: 'Embalagem e rentabilidade' }),
     field('Custo da embalagem por produto', packaging),
+    el('p', { class: 'pa-hint', text: 'Se a embalagem já foi adicionada como insumo acima, seu custo vem do preço da compra. Use este campo apenas para embalagens ou complementos que ainda não estejam na lista, para não contar duas vezes.' }),
     field('Descrição da embalagem', packagingDesc),
     el('div', { class: 'pa-field' }, [el('label', { text: 'Margem desejada para esta receita (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'vazio = margem padrão dos Ajustes' })])]),
     result,
@@ -4437,10 +4438,18 @@ function automaticConfigSuggestions(store) {
   // These recurring operating costs have no separate per-recipe rate in the engine.
   // Include their monthly average in the same production-time allocation as overhead.
   const monthlyOverhead = new Set(['energia-producao', 'limpeza', 'manutencao']);
+  const isMonthlyOverhead = (category) => {
+    const seen = new Set();
+    for (let current = category; current && !seen.has(current.id); current = current.parentId ? store.get('categories', current.parentId) : null) {
+      if (monthlyOverhead.has(current.systemKey)) return true;
+      seen.add(current.id);
+    }
+    return false;
+  };
   const fixed = actual.filter((m) => {
     const c = category(m);
     return m.direction === 'saida' && c &&
-      (c.kind === 'despesaFixa' || c.behavior === 'fixa' || monthlyOverhead.has(c.systemKey)) &&
+      (c.kind === 'despesaFixa' || c.behavior === 'fixa' || isMonthlyOverhead(c)) &&
       !fixedExcluded.has(c.systemKey);
   });
   const fixedMonths = new Set(fixed.map((m) => dateOnly(m.at).slice(0, 7)));
