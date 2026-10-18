@@ -368,8 +368,13 @@
  * @property {string} id
  * @property {string} at
  * @property {string} [supplierId]
- * @property {Array<{ingredientId:string,qty:number,unitPrice:number}>} items
- * @property {number} total
+ * @property {Array<{ingredientId:string,qty:number,unitPrice:number,allocatedCharges?:number,totalCost?:number,landedUnitPrice?:number}>} items
+ * @property {number} [subtotal] // items before additional purchase costs
+ * @property {number} [freight]
+ * @property {number} [taxes]
+ * @property {number} [interest]
+ * @property {number} [fees]
+ * @property {number} total // items plus allocated additional costs
  * @property {string} [titleId]
  * @property {boolean} [financiallyTracked] // false = histórico/preço/estoque, sem Contas a Pagar/DRE
  * @property {string} [notes]

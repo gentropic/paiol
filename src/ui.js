@@ -3353,7 +3353,7 @@ function financePurchasesPanel(ctx) {
   const rows = ctx.store.state.purchases.slice().sort((a, b) => a.at < b.at ? 1 : -1);
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Fornecedores e insumos' }), el('h2', { text: 'Compras' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'purchase-new', onclick: () => ctx.actions.openModal({ kind: 'purchase-add' }) }, '+ Compra')]),
-    el('p', { class: 'pa-hint', text: 'Toda compra atualiza preço, fornecedor, histórico e estoque. Você decide no lançamento se ela também deve entrar no Contas a Pagar.' }),
+    el('p', { class: 'pa-hint', text: 'Toda compra atualiza o custo dos insumos, fornecedor, histórico e estoque. Frete, impostos, juros e encargos são rateados entre os itens. Você decide no lançamento se o total também deve entrar no Contas a Pagar.' }),
     rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows.map((purchase) => {
       const supplier = purchase.supplierId ? ctx.store.get('suppliers', purchase.supplierId) : null;
       const title = purchase.titleId ? ctx.store.get('financeTitles', purchase.titleId) : null;
@@ -3362,6 +3362,7 @@ function financePurchasesPanel(ctx) {
         el('div', { class: 'pa-grow' }, [
           el('div', { class: 'pa-enc-title' }, [el('strong', { text: supplier?.name || 'Sem fornecedor' }), state ? titleBadge(state.status) : el('span', { class: 'pa-badge', text: 'Somente estoque' })]),
           el('span', { class: 'pa-muted', text: `${fmtDate(purchase.at)} · ${(purchase.items || []).map((item) => ctx.store.get('ingredients', item.ingredientId)?.name).filter(Boolean).join(', ')}` }),
+          ['freight', 'taxes', 'interest', 'fees'].some((key) => Number(purchase[key]) > 0) && el('span', { class: 'pa-muted', text: [['Frete', purchase.freight], ['Impostos', purchase.taxes], ['Juros', purchase.interest], ['Encargos', purchase.fees]].filter(([, value]) => Number(value) > 0).map(([label, value]) => `${label}: ${brl(value)}`).join(' · ') }),
         ]),
         el('strong', { class: 'pa-num', text: brl(purchase.total) }),
         title && el('span', { class: 'pa-chev', text: '›' }),
@@ -3386,9 +3387,65 @@ function purchaseAddSheet(ctx) {
   const defaultCategory = preferredPurchaseCategory?.archived ? null : preferredPurchaseCategory;
   const payableCategories = activeFinanceCategories(store, 'pagar', defaultCategory?.id);
   const category = el('select', { class: 'pa-input', 'data-testid': 'purchase-category' }, payableCategories.map((item) => el('option', { value: item.id, text: `${item.code ? `${item.code} · ` : ''}${item.name}`, ...(item.id === defaultCategory?.id ? { selected: 'selected' } : {}) })));
-  const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = [];
-  function addLine() { const index = lines.length; const ing = el('select', { class: 'pa-input', 'data-testid': `purchase-item-${index}` }, ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` }))); const qty = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0.001', step: 'any', value: '1', 'data-testid': `purchase-qty-${index}` }); const price = moneyField(null, `purchase-price-${index}`); const line = { ing, qty, price, row: null }; line.row = el('div', { class: 'pa-detail-card' }, [field('Insumo/embalagem', ing), el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Preço por unidade de compra', price)]), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); } }, 'Remover item')]); lines.push(line); itemsBox.append(line.row); }
+  const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = []; let nextLineIndex = 0;
+  const freight = moneyField(0, 'purchase-freight');
+  const taxes = moneyField(0, 'purchase-taxes');
+  const interest = moneyField(0, 'purchase-interest');
+  const fees = moneyField(0, 'purchase-fees');
+  const extraFields = { freight, taxes, interest, fees };
+  const costPreview = el('section', { class: 'pa-detail-card', 'data-testid': 'purchase-cost-preview' });
+  const readItems = () => lines.map((line) => ({ ingredientId: line.ing.value, qty: parseNum(line.qty.value) || 0, unitPrice: parseNum(line.price.input.value) || 0 }));
+  const readExtras = () => Object.fromEntries(Object.entries(extraFields).map(([key, control]) => [key, control.input.value.trim() ? parseNum(control.input.value) : 0]));
+  function allocateCosts(items, extras) {
+    const baseCosts = items.map((item) => item.qty * item.unitPrice);
+    const subtotal = baseCosts.reduce((sum, value) => sum + value, 0);
+    const extraCents = Object.values(extras).reduce((sum, value) => sum + Math.round(value * 100), 0);
+    let cumulativeBase = 0; let allocated = 0;
+    const allocatedItems = items.map((item, index) => {
+      cumulativeBase += baseCosts[index];
+      const nextAllocated = index === items.length - 1 ? extraCents : Math.round(extraCents * cumulativeBase / subtotal);
+      const allocatedCharges = (nextAllocated - allocated) / 100;
+      allocated = nextAllocated;
+      return { ...item, allocatedCharges, totalCost: baseCosts[index] + allocatedCharges, landedUnitPrice: (baseCosts[index] + allocatedCharges) / item.qty };
+    });
+    return { items: allocatedItems, subtotal, total: Math.round(subtotal * 100 + extraCents) / 100 };
+  }
+  function renderCostPreview() {
+    const items = readItems().filter((item) => item.qty > 0 && item.unitPrice > 0);
+    const extras = readExtras();
+    if (!items.length || Object.values(extras).some((value) => value == null || value < 0)) {
+      costPreview.replaceChildren(el('p', { class: 'pa-hint', text: 'Informe os itens e valores positivos para ver o rateio.' }));
+      return;
+    }
+    const costs = allocateCosts(items, extras);
+    costPreview.replaceChildren(
+      el('h3', { class: 'pa-h3', text: 'Resumo e rateio da compra' }),
+      el('table', { class: 'pa-kv' }, [
+        el('tr', {}, [el('td', { text: 'Itens' }), el('td', { class: 'pa-num', text: brl(costs.subtotal) })]),
+        ...[['Frete', extras.freight], ['Impostos', extras.taxes], ['Juros', extras.interest], ['Encargos', extras.fees]].map(([label, value]) => el('tr', {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: brl(value) })])),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Total da compra' }), el('td', { class: 'pa-num', 'data-testid': 'purchase-total', text: brl(costs.total) })]),
+      ]),
+      el('p', { class: 'pa-hint', text: 'Custos adicionais distribuídos proporcionalmente ao valor de cada item:' }),
+      ...costs.items.map((item) => el('p', { class: 'pa-muted', text: `${store.get('ingredients', item.ingredientId)?.name || 'Insumo'} · adicional ${brl(item.allocatedCharges)} · custo R$ ${item.landedUnitPrice.toFixed(4).replace('.', ',')} por ${store.get('ingredients', item.ingredientId)?.stockUnit || 'unidade'}` })),
+    );
+  }
+  function addLine() {
+    const index = nextLineIndex++;
+    const ing = el('select', { class: 'pa-input', 'data-testid': `purchase-item-${index}` }, ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
+    const qty = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0.001', step: 'any', value: '1', 'data-testid': `purchase-qty-${index}` });
+    const price = moneyField(null, `purchase-price-${index}`);
+    const line = { ing, qty, price, row: null };
+    line.row = el('div', { class: 'pa-detail-card' }, [
+      field('Insumo/embalagem', ing),
+      el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Preço por unidade de compra', price)]),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); renderCostPreview(); } }, 'Remover item'),
+    ]);
+    lines.push(line); itemsBox.append(line.row);
+    [ing, qty, price.input].forEach((control) => { control.addEventListener('input', renderCostPreview); control.addEventListener('change', renderCostPreview); });
+    renderCostPreview();
+  }
   addLine();
+  Object.values(extraFields).forEach((control) => control.input.addEventListener('input', renderCostPreview));
   const financeFields = el('section', { class: 'pa-detail-card', 'data-testid': 'purchase-finance-fields' }, [
     field('Categoria no Plano de Contas', category),
     el('div', { class: 'pa-filtergrid' }, [field('Vencimento', due), field('Situação', situation)]),
@@ -3397,17 +3454,30 @@ function purchaseAddSheet(ctx) {
   const syncFinanceVisibility = () => { financeFields.style.display = financeChoice.value === 'sim' ? '' : 'none'; };
   financeChoice.addEventListener('change', syncFinanceVisibility); syncFinanceVisibility();
   function save() {
-    const items = lines.map((line) => ({ ingredientId: line.ing.value, qty: parseNum(line.qty.value) || 0, unitPrice: parseNum(line.price.input.value) || 0 })).filter((item) => item.qty > 0 && item.unitPrice > 0);
-    if (!items.length) return;
-    const total = items.reduce((sum, item) => sum + item.qty * item.unitPrice, 0); const purchaseId = uuid(); const financiallyTracked = financeChoice.value === 'sim'; const titleId = financiallyTracked ? uuid() : undefined; const selectedSupplier = store.get('suppliers', supplier.value);
+    const items = readItems();
+    if (!items.length || items.some((item) => !(item.qty > 0) || !(item.unitPrice > 0))) { window.alert('Informe quantidade e preço válidos em todos os itens da compra.'); return; }
+    const extras = readExtras();
+    if (Object.values(extras).some((value) => !Number.isFinite(value) || value < 0)) { window.alert('Frete, impostos, juros e encargos devem ter valores numéricos iguais ou maiores que zero.'); return; }
+    const costs = allocateCosts(items, extras);
+    const total = costs.total; const purchaseId = uuid(); const financiallyTracked = financeChoice.value === 'sim'; const titleId = financiallyTracked ? uuid() : undefined; const selectedSupplier = store.get('suppliers', supplier.value);
     ctx.actions.mutate((nextStore) => {
-      nextStore.upsertPurchase({ id: purchaseId, at: dateIso(date.value), supplierId: supplier.value, items, total, financiallyTracked, ...(titleId ? { titleId } : {}) });
+      nextStore.upsertPurchase({ id: purchaseId, at: dateIso(date.value), supplierId: supplier.value, items: costs.items, subtotal: costs.subtotal, ...extras, total, financiallyTracked, ...(titleId ? { titleId } : {}) });
       if (financiallyTracked) nextStore.upsertFinanceTitle({ id: titleId, direction: 'pagar', issuedAt: dateIso(date.value), competenceDate: dateIso(date.value), dueDate: dateIso(due.value), amount: total, description: `Compra · ${selectedSupplier?.name || 'Fornecedor'}`, categoryId: category.value || undefined, partyType: 'fornecedor', partyId: supplier.value, partyName: selectedSupplier?.name || 'Fornecedor', expectedMethod: method.value, sourceType: 'compra', sourceId: purchaseId });
-      for (const item of items) { const ingredient = nextStore.get('ingredients', item.ingredientId); nextStore.addPriceChange({ id: uuid(), at: dateIso(date.value), ingredientId: item.ingredientId, price: item.unitPrice }); if (ingredient) nextStore.upsertIngredient({ ...ingredient, lastSupplier: selectedSupplier?.name || ingredient.lastSupplier, shoppingHidden: false }); }
+      const byIngredient = new Map();
+      for (const item of costs.items) {
+        const sum = byIngredient.get(item.ingredientId) || { qty: 0, totalCost: 0 };
+        sum.qty += item.qty; sum.totalCost += item.totalCost;
+        byIngredient.set(item.ingredientId, sum);
+      }
+      for (const [ingredientId, sum] of byIngredient) {
+        const ingredient = nextStore.get('ingredients', ingredientId);
+        nextStore.addPriceChange({ id: uuid(), at: dateIso(date.value), ingredientId, price: sum.totalCost / sum.qty });
+        if (ingredient) nextStore.upsertIngredient({ ...ingredient, lastSupplier: selectedSupplier?.name || ingredient.lastSupplier, shoppingHidden: false });
+      }
       if (financiallyTracked && situation.value === 'quitado') nextStore.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId, amount: total, method: method.value, accountId: account.value || undefined });
     });
   }
-  return sheet({ title: 'Registrar compra', rows: [field('Fornecedor', supplier), field('Data da compra', date), itemsBox, el('button', { class: 'pa-btn', onclick: addLine }, '+ Adicionar item'), field('Entrar no Contas a Pagar?', financeChoice), financeFields, el('p', { class: 'pa-hint', text: 'Se escolher “Não”, a compra atualizará preço, fornecedor, histórico e estoque, mas não entrará no Contas a Pagar nem na DRE.' }), el('p', { class: 'pa-hint', text: 'Informe o preço por kg, litro ou unidade — a mesma unidade cadastrada no insumo.' })], onSave: save, saveTestid: 'purchase-save' });
+  return sheet({ title: 'Registrar compra', rows: [field('Fornecedor', supplier), field('Data da compra', date), itemsBox, el('button', { class: 'pa-btn', onclick: addLine }, '+ Adicionar item'), el('div', { class: 'pa-filtergrid' }, [field('Frete', freight), field('Impostos', taxes), field('Juros', interest), field('Encargos', fees)]), costPreview, field('Entrar no Contas a Pagar?', financeChoice), financeFields, el('p', { class: 'pa-hint', text: 'Se escolher “Não”, a compra atualizará custo, fornecedor, histórico e estoque, mas não entrará no Contas a Pagar nem na DRE.' }), el('p', { class: 'pa-hint', text: 'Informe o preço por kg, litro ou unidade — a mesma unidade cadastrada no insumo. Os custos adicionais são rateados pelo valor dos itens.' })], onSave: save, saveTestid: 'purchase-save' });
 }
 
 function financeChartPanel(ctx) {
