@@ -564,7 +564,7 @@ function inicioPanel(ctx) {
 function insumosPanel(ctx) {
   const { store } = ctx;
   const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.map((ing) => insumoRow(ctx, ing)));
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((ing) => insumoRow(ctx, ing)));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Insumos' }),
@@ -658,7 +658,6 @@ function receitasPanel(ctx) {
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Receitas' }),
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-simulator', onclick: () => ctx.actions.setTab('simulador') }, '⚖ Simulador'),
       el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'rec-new', onclick: () => ctx.actions.openModal({ kind: 'receita-add' }) }, '+ Novo'),
     ]),
     store.state.recipes.length === 0
@@ -690,6 +689,7 @@ MODALS['receita-edit'] = (ctx, m) => receitaSheet(ctx, ctx.store.get('recipes', 
 
 function receitaSheet(ctx, recipe) {
   const { store } = ctx;
+  const draftId = recipe?.id || uuid();
   // Local draft of the component list — committed atomically on Salvar (so a new recipe and its
   // items are created in one mutation, and Cancelar discards everything).
   const comps = recipe ? recipe.components.map((c) => ({ ref: { ...c.ref }, qty: c.qty, unit: c.unit })) : [];
@@ -708,28 +708,16 @@ function receitaSheet(ctx, recipe) {
     ['g', 'kg'].map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.weightUnit ? { selected: 'selected' } : {}) })));
   const tags = tagsInput(recipe && recipe.tags, 'rec-tags');
   const currentLinked = recipe ? linkedProductForRecipe(store, recipe.id) : null;
-  const productLink = el('select', { class: 'pa-input', 'data-testid': 'rec-product-link' }, [
-    el('option', { value: '', text: 'Nenhum produto relacionado' }),
-    ...store.state.products.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name))).map((p) => el('option', { value: p.id, text: p.name, ...(currentLinked?.id === p.id ? { selected: 'selected' } : {}) })),
-  ]);
   const initialPackaging = currentLinked ? currentLinked.packagingCost : recipe?.packagingCost;
   const initialPackagingDesc = currentLinked ? currentLinked.packagingDesc : recipe?.packagingDesc;
   const initialMargin = currentLinked && currentLinked.targetMarginPct != null ? currentLinked.targetMarginPct : recipe?.targetMarginPct;
   const packaging = moneyField(initialPackaging || 0, 'rec-pkg');
   const packagingDesc = el('input', { class: 'pa-input', 'data-testid': 'rec-pkgdesc', type: 'text', placeholder: 'Ex.: caixinha, boleira ou saco', value: initialPackagingDesc || '' });
   const margin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-margin', type: 'text', inputmode: 'decimal', placeholder: `padrão ${pct(store.getConfig().targetMarginPct)}`, value: initialMargin != null ? String(pct(initialMargin)).replace('.', ',') : '' });
-  productLink.addEventListener('change', () => {
-    const p = store.get('products', productLink.value);
-    if (!p) return;
-    packaging.input.value = fmtMoneyInput(p.packagingCost || 0);
-    packagingDesc.value = p.packagingDesc || '';
-    margin.value = p.targetMarginPct != null ? String(pct(p.targetMarginPct)).replace('.', ',') : '';
-  });
-
   // Component editor (insumos + other recipes, never itself).
   const options = [
-    ...store.state.ingredients.map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
-    ...store.state.recipes.filter((r) => !recipe || r.id !== recipe.id).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
+    ...store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
+    ...store.state.recipes.filter((r) => !recipe || r.id !== recipe.id).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-compqty', type: 'text', inputmode: 'decimal', placeholder: 'qtd' });
@@ -742,13 +730,31 @@ function receitaSheet(ctx, recipe) {
   refSel.addEventListener('change', fillUnits);
 
   const itemsList = el('ul', { class: 'pa-list pa-tight' });
+  const result = el('div', { 'data-testid': 'rec-result' });
+  const feedback = el('p', { class: 'pa-hint', 'data-testid': 'rec-catalog-feedback' });
+  function draftRecipe() {
+    const marginText = margin.value.trim();
+    return {
+      ...(recipe || { fermentMinutes: 0 }), id: draftId, name: name.value.trim(),
+      yieldNominal: parseNum(yieldQty.value) || 0, yieldUnit: yieldUnit.value,
+      activeMinutes: parseNum(active.value) || 0,
+      productionMinutes: parseNum(production.value) || 0,
+      ovenMinutes: parseNum(oven.value) || 0,
+      components: comps,
+      packagingCost: parseNum(packaging.input.value) || 0,
+      packagingDesc: packagingDesc.value.trim() || undefined,
+      targetMarginPct: marginText === '' ? undefined : (parseNum(marginText) || 0) / 100,
+    };
+  }
+  function renderResult() { result.replaceChildren(recipeProfitabilityCard(store, draftRecipe(), currentLinked)); }
   function renderItems() {
     itemsList.replaceChildren(...(comps.length
-      ? comps.map((c, idx) => el('li', { class: 'pa-list-item' }, [
+      ? comps.map((c, idx) => ({ c, idx })).sort((a, b) => refName(store, a.c.ref).localeCompare(refName(store, b.c.ref), 'pt-BR', { sensitivity: 'base' })).map(({ c, idx }) => el('li', { class: 'pa-list-item' }, [
           el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} — ${refName(store, c.ref)}` }),
           el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { comps.splice(idx, 1); renderItems(); } }, '✕'),
         ]))
       : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda.' })]));
+    renderResult();
   }
   renderItems();
 
@@ -761,42 +767,60 @@ function receitaSheet(ctx, recipe) {
     renderItems();
   }
 
-  function save() {
+  function save(destination = 'recipe') {
     const nm = name.value.trim();
     const y = parseNum(yieldQty.value);
     if (!nm || !(y > 0)) { name.focus(); return; }
     const obs = notes.value.trim();
     const w = parseNum(weight.value);
     const tg = tags.value();
-    const id = recipe ? recipe.id : uuid();
-    const packageValue = parseNum(packaging.input.value) || 0;
-    const packageDescription = packagingDesc.value.trim();
-    const marginText = margin.value.trim();
-    const marginValue = marginText === '' ? undefined : (parseNum(marginText) || 0) / 100;
-    ctx.actions.mutate((s) => {
-      const savedRecipe = {
-      ...(recipe || { fermentMinutes: 0 }), id, name: nm,
-      yieldNominal: y, yieldUnit: yieldUnit.value,
-      activeMinutes: parseNum(active.value) || 0,
-      productionMinutes: parseNum(production.value) || 0,
-      ovenMinutes: parseNum(oven.value) || 0,
-      components: comps, ...(obs ? { notes: obs } : { notes: undefined }),
+    const savedRecipe = {
+      ...draftRecipe(), notes: obs || undefined,
       weightTotal: w == null ? undefined : w, weightUnit: w == null ? undefined : weightUnit.value,
       tags: tg.length ? tg : undefined,
-      packagingCost: packageValue, packagingDesc: packageDescription || undefined,
-      targetMarginPct: marginValue,
-      };
-      s.upsertRecipe(savedRecipe);
-      if (currentLinked && currentLinked.id !== productLink.value) {
-        s.upsertProduct({ ...currentLinked, components: (currentLinked.components || []).filter((c) => !(c.kind === 'recipe' && c.id === id)) });
+    };
+    const config = store.getConfig();
+    const requestedMargin = savedRecipe.targetMarginPct ?? config.targetMarginPct;
+    if (requestedMargin < 0 || requestedMargin + (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0) >= 1) {
+      feedback.textContent = 'A margem desejada precisa ser positiva e deixar espaço para as taxas de venda.';
+      margin.focus();
+      return;
+    }
+    let suggestedPrice;
+    if (destination === 'catalog') {
+      const matches = store.state.products.filter((p) => norm(p.name) === norm(nm));
+      if (!currentLinked && matches.length > 1) {
+        feedback.textContent = 'Há mais de um produto com esse nome no catálogo. Ajuste os nomes duplicados antes de incluir a receita.';
+        return;
       }
-      const linked = productLink.value ? s.get('products', productLink.value) : null;
-      if (linked) {
-        const components = (linked.components || []).filter((c) => !(c.kind === 'recipe' && c.id === id));
-        components.push({ kind: 'recipe', id, qty: saleQtyInRecipeUnit(linked, savedRecipe) });
-        s.upsertProduct({ ...linked, components, packagingCost: packageValue, packagingDesc: packageDescription || undefined, targetMarginPct: marginValue });
+      if (!currentLinked && matches.length === 1 && (matches[0].components || []).some((c) => c.kind === 'recipe' && c.id !== draftId)) {
+        feedback.textContent = 'Esse nome já está ligado a outra receita. Ajuste o nome do produto antes de incluir.';
+        return;
+      }
+      try { suggestedPrice = recipePricing(store, savedRecipe, currentLinked).suggested; }
+      catch (e) { feedback.textContent = `Confira os custos antes de incluir no catálogo: ${friendlyError(e)}`; return; }
+    }
+    ctx.actions.mutate((s) => {
+      s.upsertRecipe(savedRecipe);
+      if (destination === 'catalog') {
+        const matches = s.state.products.filter((p) => norm(p.name) === norm(nm));
+        const linked = currentLinked || (matches.length === 1 ? matches[0] : null);
+        const component = { kind: 'recipe', id: draftId, qty: linked ? saleQtyInRecipeUnit(linked, savedRecipe) : 1 };
+        s.upsertProduct({
+          ...(linked || {}), id: linked?.id || uuid(), name: nm,
+          components: linked ? [...(linked.components || []).filter((c) => !(c.kind === 'recipe' && c.id === draftId)), component] : [component],
+          saleQty: linked?.saleQty || 1, saleUnit: linked?.saleUnit || savedRecipe.yieldUnit,
+          salePrice: linked?.salePrice != null ? linked.salePrice : suggestedPrice,
+          saleKind: linked?.saleKind || 'normal', active: linked?.active !== false,
+          packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc,
+          targetMarginPct: savedRecipe.targetMarginPct,
+        });
+      } else if (currentLinked) {
+        s.upsertProduct({ ...currentLinked, packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc, targetMarginPct: savedRecipe.targetMarginPct });
       }
     });
+    if (destination === 'simulator') { ctx.view.simRecipeId = draftId; ctx.actions.setTab('simulador'); }
+    if (destination === 'catalog') ctx.actions.setTab('produtos');
   }
 
   const rows = [
@@ -816,18 +840,25 @@ function receitaSheet(ctx, recipe) {
       : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit,
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
     el('h3', { class: 'pa-h3', text: 'Embalagem e rentabilidade' }),
-    field('Produto vendido relacionado (opcional)', productLink),
-    el('p', { class: 'pa-hint', text: 'Essa relação liga a ficha técnica ao item usado nas comandas, sem misturar os dois cadastros.' }),
     field('Custo da embalagem por produto', packaging),
     field('Descrição da embalagem', packagingDesc),
     el('div', { class: 'pa-field' }, [el('label', { text: 'Margem desejada para esta receita (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'vazio = margem padrão dos Ajustes' })])]),
-    recipeProfitabilityCard(store, recipe),
+    result,
+    el('button', { class: 'pa-btn', 'data-testid': 'rec-open-simulator', onclick: () => save('simulator') }, '⚖ Salvar e abrir simulador'),
+    el('button', { class: 'pa-btn pa-primary', 'data-testid': 'rec-add-catalog', onclick: () => save('catalog') }, currentLinked ? 'Atualizar produto no catálogo' : 'Salvar e incluir produto no catálogo'),
+    feedback,
   ];
+
+  [name, yieldQty, yieldUnit, active, production, oven, packaging.input, packagingDesc, margin].forEach((control) => {
+    control.addEventListener('input', renderResult);
+    control.addEventListener('change', renderResult);
+  });
+  renderResult();
 
   return sheet({
     title: recipe ? 'Editar receita' : 'Nova receita',
     rows,
-    onSave: save,
+    onSave: () => save(),
     saveTestid: 'rec-save',
     danger: recipe ? { label: '🗑 Excluir receita', testid: 'rec-delete', onClick: () => confirmRemove(ctx, `a receita "${recipe.name}"`, (s) => s.removeRecipe(recipe.id)) } : null,
   });
@@ -1667,57 +1698,56 @@ function saleQtyInRecipeUnit(product, recipe) {
   return 1;
 }
 
-function recipeProfitabilityCard(store, recipe) {
-  if (!recipe) return null;
-  const product = linkedProductForRecipe(store, recipe.id);
+function recipePricing(store, recipe, linkedProduct = null) {
   const config = store.getConfig();
+  const es = indexStore({ ...store.state, recipes: [...store.state.recipes.filter((r) => r.id !== recipe.id), recipe] });
+  const lens = estimateLens(config);
+  const breakdown = costBreakdown(es, recipe.id, config, lens);
+  const yieldQty = Number(recipe.yieldNominal) || 0;
+  const linkedQty = Number(linkedProduct?.components?.find((c) => c.kind === 'recipe' && c.id === recipe.id)?.qty) || 1;
+  const unitCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * linkedQty + (Number(recipe.packagingCost) || 0);
+  const targetMargin = recipe.targetMarginPct ?? config.targetMarginPct;
+  const suggested = Math.ceil(priceFromCost(unitCost, { ...config, targetMarginPct: targetMargin }) * 100 - 1e-9) / 100;
+  const productUnits = yieldQty / linkedQty;
+  const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+  const profitPerUnit = suggested * (1 - salesRate) - unitCost;
+  const productionHours = (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0)) / 60;
+  return { breakdown, yieldQty, linkedQty, productUnits, unitCost, targetMargin, suggested,
+    salesRate, profitPerUnit, totalCost: unitCost * productUnits, totalSale: suggested * productUnits,
+    totalProfit: profitPerUnit * productUnits, profitHour: productionHours > 0 ? profitPerUnit * productUnits / productionHours : null };
+}
+
+function recipeProfitabilityCard(store, recipe, linkedProduct = null) {
+  if (!(Number(recipe?.yieldNominal) > 0)) return el('p', { class: 'pa-hint', text: 'Informe o rendimento para ver o resultado da receita.' });
   try {
-    const es = store.toEngineStore();
-    const lens = estimateLens(config);
-    const breakdown = costBreakdown(es, recipe.id, config, lens);
-    const yieldQty = Number(recipe.yieldNominal) || 0;
-    const totalIngredients = breakdown.ingredients * yieldQty;
-    const totalRecipeCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * yieldQty;
-    const directLaborIndicator = breakdown.labor * yieldQty;
-    const rows = [
-      el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), el('td', { class: 'pa-num', text: brl(totalIngredients) })]),
-      el('tr', {}, [el('td', { text: 'Custo total da receita' }), el('td', { class: 'pa-num', text: brl(totalRecipeCost) })]),
-      el('tr', {}, [el('td', { text: 'Mão de obra direta (indicador)' }), el('td', { class: 'pa-num', text: brl(directLaborIndicator) })]),
-    ];
-    if (!product) return el('section', { class: 'pa-detail-card' }, [
-      el('strong', { text: 'Resultado da receita completa' }),
-      el('table', { class: 'pa-kv' }, rows),
-      el('span', { class: 'pa-muted', text: 'O indicador de mão de obra não é somado ao custo. Relacione um produto para calcular venda e lucro da receita.' }),
-    ]);
-    const unitCost = productUnitCost(es, product.id, config, lens);
-    const suggested = productPrice(es, product.id, config, lens).price;
-    const salePrice = Number(product.salePrice) || suggested;
-    const recipeComponent = (product.components || []).find((c) => c.kind === 'recipe' && c.id === recipe.id);
-    const recipeQtyPerProduct = Number(recipeComponent?.qty) || 1;
-    const productUnits = recipeQtyPerProduct > 0 ? yieldQty / recipeQtyPerProduct : 0;
-    const totalSale = salePrice * productUnits;
-    const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
-    const totalProductCost = unitCost * productUnits;
-    const profit = totalSale - totalProductCost - totalSale * salesRate;
-    const margin = totalSale > 0 ? profit / totalSale : 0;
-    const productionHours = (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0)) / 60;
-    const profitHour = productionHours > 0 ? profit / productionHours : null;
+    const p = recipePricing(store, recipe, linkedProduct);
+    const line = (label, value, tone = '') => el('tr', {}, [el('td', { text: label }), el('td', { class: `pa-num ${tone}`, text: value })]);
+    const practiced = Number(linkedProduct?.salePrice);
+    const practicedProfit = practiced * (1 - p.salesRate) - p.unitCost;
     return el('section', { class: 'pa-detail-card' }, [
-      el('strong', { text: `Resultado da receita completa · ${product.name}` }),
+      el('strong', { text: 'Resultado da receita completa' }),
       el('table', { class: 'pa-kv' }, [
-        ...rows,
-        el('tr', {}, [el('td', { text: `Produtos obtidos da receita` }), el('td', { class: 'pa-num', text: fmtNum(productUnits) })]),
-        el('tr', {}, [el('td', { text: 'Preço de venda total da receita' }), el('td', { class: 'pa-num', text: brl(totalSale) })]),
-        el('tr', {}, [el('td', { text: 'Preço sugerido por produto' }), el('td', { class: 'pa-num', text: brl(suggested) })]),
-        el('tr', {}, [el('td', { text: 'Lucro total da receita' }), el('td', { class: `pa-num ${profit >= 0 ? 'pa-positive' : 'pa-bad'}`, text: brl(profit) })]),
-        el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), el('td', { class: `pa-num ${profit >= 0 ? 'pa-positive' : 'pa-bad'}`, text: profitHour == null ? '—' : brl(profitHour) })]),
-        el('tr', {}, [el('td', { text: 'Margem estimada' }), el('td', { class: `pa-num ${margin >= 0 ? 'pa-positive' : 'pa-bad'}`, text: pctStr(margin) })]),
+        line('Rendimento', `${fmtNum(p.yieldQty)} ${recipe.yieldUnit}`),
+        line('Ingredientes', brl(p.breakdown.ingredients * p.yieldQty)),
+        line('Gás', brl(p.breakdown.gas * p.yieldQty)),
+        line('Custos fixos proporcionais', brl(p.breakdown.fixed * p.yieldQty)),
+        line('Embalagens', brl((Number(recipe.packagingCost) || 0) * p.productUnits)),
+        line('Custo total da receita', brl(p.totalCost)),
+        line('Custo por produto', brl(p.unitCost)),
+        line('Margem desejada', pctStr(p.targetMargin)),
+        line('Preço sugerido por produto', brl(p.suggested), 'pa-strong'),
+        line('Venda total da receita nesse preço', brl(p.totalSale)),
+        line('Lucro por produto', brl(p.profitPerUnit), p.profitPerUnit >= 0 ? 'pa-positive' : 'pa-bad'),
+        line('Lucro total da receita', brl(p.totalProfit), p.totalProfit >= 0 ? 'pa-positive' : 'pa-bad'),
+        line('Lucro por hora de produção', p.profitHour == null ? '—' : brl(p.profitHour)),
+        ...(practiced > 0 ? [
+          line('Preço praticado no catálogo', brl(practiced)),
+          line('Margem no preço praticado', pctStr(practicedProfit / practiced), practicedProfit >= 0 ? 'pa-positive' : 'pa-bad'),
+        ] : []),
       ]),
-      el('span', { class: 'pa-muted', text: `Taxa de pagamento e comissão descontadas: ${pctStr(salesRate)}. A mão de obra direta é apenas um indicador de esforço e não duplica salários já incluídos nos custos fixos.` }),
+      el('span', { class: 'pa-muted', text: `Valores recalculados conforme a margem digitada. Taxas de pagamento e comissão (${pctStr(p.salesRate)}) já descontadas do lucro. Mão de obra direta é apenas indicador, pois salários estão nos custos fixos.` }),
     ]);
-  } catch (e) {
-    return el('p', { class: 'pa-hint', text: friendlyError(e) });
-  }
+  } catch (e) { return el('p', { class: 'pa-hint', text: `Confira os custos para ver o resultado: ${friendlyError(e)}` }); }
 }
 
 MODALS['comanda-preview'] = (ctx, m) => {
@@ -4263,9 +4293,10 @@ function simuladorPanel(ctx) {
     return el('section', { class: 'pa-card' }, [el('h2', { text: 'Simulador' }), el('p', { class: 'pa-empty', text: 'Crie uma receita primeiro.' })]);
   }
   const sel = el('select', { class: 'pa-input', 'data-testid': 'sim-recipe' }, recipes.map((r) => el('option', { value: r.id, text: r.name })));
+  if (recipes.some((r) => r.id === ctx.view.simRecipeId)) sel.value = ctx.view.simRecipeId;
   const body = el('div', {});
   const rebuild = () => body.replaceChildren(simuladorBody(ctx, store.get('recipes', sel.value), config));
-  sel.addEventListener('change', rebuild);
+  sel.addEventListener('change', () => { ctx.view.simRecipeId = sel.value; rebuild(); });
   rebuild();
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Simulador' })]),
@@ -4284,7 +4315,7 @@ function simuladorBody(ctx, recipe, config) {
   const product = linkedProductForRecipe(store, recipe.id);
   const recipeComponent = product?.components?.find((component) => component.kind === 'recipe' && component.id === recipe.id);
   const recipeQty = Number(recipeComponent?.qty) || 1;
-  let registeredProductCost = baseRecipeCost * recipeQty;
+  let registeredProductCost = baseRecipeCost * recipeQty + (Number(recipe.packagingCost) || 0);
   if (product) {
     try { registeredProductCost = productUnitCost(store.toEngineStore(), product.id, config, estimateLens(config)); }
     catch { /* keep the recipe-only cost */ }
@@ -4298,8 +4329,9 @@ function simuladorBody(ctx, recipe, config) {
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
   const packaging = moneyField(registeredExtras, 'sim-packaging');
-  const targetMargin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-margin', type: 'text', inputmode: 'decimal', value: String(pct(product?.targetMarginPct ?? config.targetMarginPct)).replace('.', ',') });
-  const initialPrice = Number(product?.salePrice) > 0 ? Number(product.salePrice) : priceFromCost(registeredProductCost, config);
+  const initialMargin = product?.targetMarginPct ?? recipe.targetMarginPct ?? config.targetMarginPct;
+  const targetMargin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-margin', type: 'text', inputmode: 'decimal', value: String(pct(initialMargin)).replace('.', ',') });
+  const initialPrice = Number(product?.salePrice) > 0 ? Number(product.salePrice) : priceFromCost(registeredProductCost, { ...config, targetMarginPct: initialMargin });
   const price = moneyField(initialPrice, 'sim-price');
   const results = el('div', { 'data-testid': 'sim-results' });
 
