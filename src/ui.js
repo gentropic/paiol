@@ -877,6 +877,7 @@ function produtoRow(ctx, product) {
   const { store } = ctx;
   const semPreco = unpricedInProduct(store, product.id).length > 0;
   const active = productIsActive(product);
+  const savedSalePrice = product.salePrice != null && product.salePrice !== '' && Number.isFinite(Number(product.salePrice)) && Number(product.salePrice) >= 0;
   const toggle = (ev) => {
     ev.stopPropagation();
     ctx.actions.mutate((s) => s.upsertProduct({ ...product, active: !active }));
@@ -884,7 +885,7 @@ function produtoRow(ctx, product) {
   return el('li', { class: 'pa-row-item' + (active ? '' : ' pa-reversed'), 'data-search': `${product.name} ${(product.tags || []).join(' ')} ${active ? 'ativo' : 'inativo'}`, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
     el('div', { class: 'pa-grow' }, [
       el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), isBundleProduct(product) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })].filter(Boolean)),
-      el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} · venda ${brl(sellingPrice(store, product.id))}` }),
+      el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} · ${savedSalePrice ? 'venda' : 'sugerido'} ${brl(sellingPrice(store, product.id))}` }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
       tagChips(product.tags),
     ].filter(Boolean)),
@@ -944,6 +945,7 @@ function produtoSheet(ctx, product) {
     el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para o sistema contar o conjunto no indicador correto e pedir os produtos internos ao lançar a encomenda.' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Unidade ou peso vendido' }), saleQty, saleUnit]),
     field('Valor de venda', salePrice),
+    product && (product.salePrice == null || product.salePrice === '') && el('p', { class: 'pa-hint', text: 'Este valor foi sugerido automaticamente. Ajuste se necessário e salve o produto para defini-lo como preço de venda praticado.' }),
     packagingBox,
     el('label', { class: 'pa-check' }, [activeChk, el('span', { text: 'Ativo para venda' })]),
     el('p', { class: 'pa-hint', text: 'Se desativado, permanece cadastrado e ligado à receita, mas não aparece em novas vendas, encomendas, comandas avulsas ou estimativas.' }),
