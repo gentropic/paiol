@@ -57,6 +57,29 @@ test('a converged sync makes no redundant write', async () => {
   assert.equal(second.pulledEvents, 0);
 });
 
+test('an edited product price survives an older Dropbox copy and reaches the remote', async () => {
+  const v = await remote();
+  const original = new PaiolStore({ products: [{ id: 'pao', name: 'Pão de queijo', salePrice: 16.44, components: [] }] });
+  await syncOnce(original, v); // legacy remote product without updatedAt
+
+  const local = PaiolStore.fromYaml(original.toYaml());
+  local.upsertProduct({ ...local.get('products', 'pao'), salePrice: 20 });
+  const result = await syncOnce(local, v);
+
+  assert.equal(local.get('products', 'pao').salePrice, 20);
+  assert.equal(result.pushed, true);
+  const freshDevice = new PaiolStore();
+  await syncOnce(freshDevice, v);
+  assert.equal(freshDevice.get('products', 'pao').salePrice, 20);
+});
+
+test('a newer remote product edit still updates an older local copy', () => {
+  const local = new PaiolStore({ products: [{ id: 'pao', name: 'Pão de queijo', salePrice: 20, updatedAt: '2026-10-17T12:00:00.000Z' }] });
+  const remoteCopy = new PaiolStore({ products: [{ id: 'pao', name: 'Pão de queijo', salePrice: 22, updatedAt: '2026-10-18T12:00:00.000Z' }] });
+  local.merge(remoteCopy);
+  assert.equal(local.get('products', 'pao').salePrice, 22);
+});
+
 test('overwriting an existing remote writes a snapshot first', async () => {
   const v = await remote();
   const a = new PaiolStore();

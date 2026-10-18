@@ -193,7 +193,7 @@ export class PaiolStore {
   /** @param {import('./domain.js').Recipe} x */
   upsertRecipe(x) { return this._upsert('recipes', x); }
   /** @param {import('./domain.js').Product} x */
-  upsertProduct(x) { return this._upsert('products', normalizeProductSaleKind(x)); }
+  upsertProduct(x) { return this._upsert('products', { ...normalizeProductSaleKind(x), updatedAt: new Date().toISOString() }); }
   /** @param {import('./domain.js').Cliente} x */
   upsertClient(x) { return this._upsert('clients', x); }
   /** @param {object} x */
@@ -350,8 +350,9 @@ export class PaiolStore {
 
   /**
    * Merge another store/state into this one. Events union by id (immutable, so a shared
-   * id means identical content — duplicates are dropped). Master data: incoming replaces
-   * existing by id (last-writer; v0.1 single-user, no vector clocks yet).
+   * id means identical content — duplicates are dropped). Product edits use updatedAt so a
+   * stale Dropbox copy cannot undo a newly saved price. Other master data still use incoming
+   * replacement by id (v0.1 single-user, no vector clocks yet).
    * @param {PaiolStore | State} other
    * @returns {{ eventsAdded: number, masterUpserted: number }}
    */
@@ -380,6 +381,13 @@ export class PaiolStore {
     for (const c of BUSINESS_MASTER_COLLECTIONS) {
       for (const rec of o[c] || []) {
         if (this._trashBlocks(c, rec.id)) continue;
+        // A newly saved product must not be replaced by an older Dropbox copy.
+        // Legacy products without updatedAt remain compatible: a dated edit wins over them.
+        if (c === 'products') {
+          const local = this.get(c, rec.id);
+          if (local && String(local.updatedAt || '') > String(rec.updatedAt || '')) continue;
+          if (local && JSON.stringify(local) === JSON.stringify(rec)) continue;
+        }
         this._upsert(c, rec);
         masterUpserted++;
       }
