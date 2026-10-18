@@ -1170,7 +1170,7 @@ function precosPanel(ctx) {
         ['Custos fixos', b.fixed],
         ['Embalagem', b.packaging + p.packagingCost],
       ];
-      const unitCost = parts.reduce((s, [, v]) => s + v, 0);
+      const unitCost = productUnitCost(es, p.id, config, lens);
       const margin = effectiveMargin(es, p.id, config);
       const ownMargin = p.targetMarginPct != null;
       const price = priceFromCost(unitCost, { ...config, targetMarginPct: margin });
