@@ -2464,13 +2464,22 @@ MODALS['fiado-cliente'] = (ctx, m) => {
 
 const FIN_STATUS = { aberto: ['Em aberto', 'pa-warn'], parcial: ['Parcial', 'pa-warn'], vencido: ['Vencido', 'pa-bad'], quitado: ['Quitado', 'pa-ok'], perda: ['Perda', 'pa-bad'], cancelado: ['Cancelado', ''] };
 const titleBadge = (status) => el('span', { class: `pa-badge ${FIN_STATUS[status]?.[1] || ''}`, text: FIN_STATUS[status]?.[0] || status });
-const activeFinanceCategories = (store, direction) => store.state.categories.filter((c) => {
-  if (c.archived || !c.parentId || c.cashFlowGroup === 'nao-caixa') return false;
-  if (c.direction) return c.direction === direction;
-  return direction === 'receber'
-    ? (c.nature === 'receita' || c.kind === 'receita')
-    : (['custo', 'despesa', 'investimento'].includes(c.nature || '') || ['custo', 'despesaFixa', 'despesaVariavel'].includes(c.kind));
-}).sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
+const activeFinanceCategories = (store, direction, selectedId = '') => {
+  const categories = store.state.categories.filter((c) => {
+    if (c.archived || !c.parentId || c.cashFlowGroup === 'nao-caixa') return false;
+    if (c.direction) return c.direction === direction;
+    return direction === 'receber'
+      ? (c.nature === 'receita' || c.kind === 'receita')
+      : (['custo', 'despesa', 'investimento'].includes(c.nature || '') || ['custo', 'despesaFixa', 'despesaVariavel'].includes(c.kind));
+  }).sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
+  const unique = new Map();
+  for (const category of categories) {
+    const key = norm(category.name) || category.id;
+    const previous = unique.get(key);
+    if (!previous || category.id === selectedId || (previous.id !== selectedId && category.systemKey && !previous.systemKey)) unique.set(key, category);
+  }
+  return [...unique.values()];
+};
 const accountOptions = (store) => store.state.cashAccounts.filter((a) => !a.archived);
 const paymentMethodRecords = (store) => {
   const configured = store.getConfig().paymentMethods;
@@ -3102,7 +3111,7 @@ function financeTitleAddSheet(ctx, direction) {
     originFields.style.display = sourceType.value === 'origem' ? '' : 'none';
   });
   const description = el('input', { class: 'pa-input', type: 'text', placeholder: isReceive ? 'Ex.: encomenda especial' : 'Ex.: conta de energia', 'data-testid': 'fin-title-desc' }); const amount = moneyField(null, 'fin-title-amount');
-  const categories = activeFinanceCategories(store, direction); const preferred = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas');
+  const preferred = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas'); const categories = activeFinanceCategories(store, direction, preferred?.id);
   const category = el('select', { class: 'pa-input', 'data-testid': 'fin-title-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(preferred?.id === c.id ? { selected: 'selected' } : {}) })));
   const situation = el('select', { class: 'pa-input', 'data-testid': 'fin-title-situation' }, [el('option', { value: 'pendente', text: isReceive ? 'Ainda não recebi' : 'Ainda não paguei' }), el('option', { value: 'quitado', text: isReceive ? 'Já foi recebido' : 'Já foi pago' })]);
   const method = paymentMethodSelect(store, 'fin-title-method');
@@ -3158,7 +3167,7 @@ function financeTitleEditSheet(ctx, id) {
   const sourceError = el('p', { class: 'pa-sheet-msg', role: 'alert' });
   sourceType.addEventListener('change', () => { sourceError.textContent = ''; clientFields.style.display = sourceType.value === 'cliente' ? '' : 'none'; originFields.style.display = sourceType.value === 'origem' ? '' : 'none'; });
   const description = el('input', { class: 'pa-input', type: 'text', value: title.description || '', 'data-testid': 'fin-edit-desc' });
-  const amount = moneyField(title.amount, 'fin-edit-amount'); const categories = activeFinanceCategories(ctx.store, title.direction);
+  const amount = moneyField(title.amount, 'fin-edit-amount'); const categories = activeFinanceCategories(ctx.store, title.direction, title.categoryId);
   const category = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(title.categoryId === c.id ? { selected: 'selected' } : {}) })));
   const method = paymentMethodSelect(ctx.store, 'fin-edit-method', title.expectedMethod || '');
   const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
@@ -3370,8 +3379,8 @@ function purchaseAddSheet(ctx) {
   const situation = el('select', { class: 'pa-input', 'data-testid': 'purchase-situation' }, [el('option', { value: 'pendente', text: 'Pagar depois' }), el('option', { value: 'quitado', text: 'Pago agora' })]);
   const method = paymentMethodSelect(store, 'purchase-method');
   const account = el('select', { class: 'pa-input', 'data-testid': 'purchase-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
-  const payableCategories = activeFinanceCategories(store, 'pagar');
   const defaultCategory = categoryByKey(store, 'insumos');
+  const payableCategories = activeFinanceCategories(store, 'pagar', defaultCategory?.id);
   const category = el('select', { class: 'pa-input', 'data-testid': 'purchase-category' }, payableCategories.map((item) => el('option', { value: item.id, text: `${item.code ? `${item.code} · ` : ''}${item.name}`, ...(item.id === defaultCategory?.id ? { selected: 'selected' } : {}) })));
   const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = [];
   function addLine() { const index = lines.length; const ing = el('select', { class: 'pa-input', 'data-testid': `purchase-item-${index}` }, ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` }))); const qty = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0.001', step: 'any', value: '1', 'data-testid': `purchase-qty-${index}` }); const price = moneyField(null, `purchase-price-${index}`); const line = { ing, qty, price, row: null }; line.row = el('div', { class: 'pa-detail-card' }, [field('Insumo/embalagem', ing), el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Preço por unidade de compra', price)]), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); } }, 'Remover item')]); lines.push(line); itemsBox.append(line.row); }
