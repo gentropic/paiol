@@ -3566,30 +3566,78 @@ function financeMethodsSheet(ctx) {
 }
 
 function financeReportsPanel(ctx) {
-  const start = ctx.view.finStart; const end = ctx.view.finEnd;
-  const movements = cashMovements(ctx.store).filter((m) => inDateRange(m.at, start, end));
-  const inTotal = movements.filter((m) => m.direction === 'entrada' && !m.transfer).reduce((s, m) => s + m.amount, 0);
-  const outTotal = movements.filter((m) => m.direction === 'saida' && !m.transfer).reduce((s, m) => s + m.amount, 0);
-  const byCategory = new Map();
-  for (const m of movements.filter((x) => x.direction === 'saida' && !x.transfer)) {
-    const categoryId = canonicalCategoryId(ctx.store, m.categoryId) || '__sem__';
-    byCategory.set(categoryId, (byCategory.get(categoryId) || 0) + m.amount);
+  const { store, view } = ctx;
+  const start = view.finStart; const end = view.finEnd;
+  const direction = view.finReportDirection || 'todos';
+  const selectedCategory = view.finReportCategoryId || '';
+  const allMovements = cashMovements(store).filter((m) => !m.transfer);
+  const categoryId = (movement) => canonicalCategoryId(store, movement.categoryId) || '__sem__';
+  const categoryName = (id) => id === '__sem__' ? 'Sem categoria' : store.get('categories', id)?.name || 'Categoria antiga';
+  const categories = new Map();
+  const directions = direction === 'todos' ? ['receber', 'pagar'] : [direction === 'entrada' ? 'receber' : 'pagar'];
+  for (const value of directions) for (const category of activeFinanceCategories(store, value)) {
+    const id = canonicalCategoryId(store, category.id);
+    if (!categories.has(id)) categories.set(id, store.get('categories', id) || category);
   }
-  const overdue = listTitles(ctx.store, { direction: 'receber', status: 'vencido' });
-  const categoryRows = [...byCategory.entries()].sort((a, b) => b[1] - a[1]).map(([id, total]) => el('tr', {}, [
-    el('td', { text: id === '__sem__' ? 'Sem categoria' : ctx.store.get('categories', id)?.name || 'Categoria antiga' }),
-    el('td', { class: 'pa-num', text: brl(total) }),
+  for (const movement of allMovements) {
+    if (direction !== 'todos' && movement.direction !== direction) continue;
+    const id = categoryId(movement);
+    if (!categories.has(id)) categories.set(id, store.get('categories', id) || null);
+  }
+  const categoryOptions = [...categories.entries()].sort((a, b) => {
+    if (a[0] === '__sem__') return 1;
+    if (b[0] === '__sem__') return -1;
+    return String(a[1]?.code || '').localeCompare(String(b[1]?.code || ''), undefined, { numeric: true }) || categoryName(a[0]).localeCompare(categoryName(b[0]), 'pt-BR');
+  });
+  const movements = allMovements.filter((m) => inDateRange(m.at, start, end)
+    && (direction === 'todos' || m.direction === direction)
+    && (!selectedCategory || categoryId(m) === selectedCategory));
+  const inTotal = movements.filter((m) => m.direction === 'entrada').reduce((s, m) => s + m.amount, 0);
+  const outTotal = movements.filter((m) => m.direction === 'saida').reduce((s, m) => s + m.amount, 0);
+  const byCategory = new Map();
+  for (const movement of movements) {
+    const id = categoryId(movement);
+    const totals = byCategory.get(id) || { entrada: 0, saida: 0 };
+    totals[movement.direction] += movement.amount;
+    byCategory.set(id, totals);
+  }
+  const overdue = listTitles(store, { direction: 'receber', status: 'vencido' });
+  const categoryRows = [...byCategory.entries()].sort((a, b) => (b[1].entrada + b[1].saida) - (a[1].entrada + a[1].saida)).map(([id, totals]) => el('tr', {}, [
+    el('td', { text: categoryName(id) }),
+    el('td', { class: 'pa-num', text: brl(totals.entrada) }),
+    el('td', { class: 'pa-num', text: brl(totals.saida) }),
+  ]));
+  const movementRows = movements.map((movement) => el('tr', {}, [
+    el('td', { text: fmtDate(movement.at) }),
+    el('td', { text: movement.label }),
+    el('td', { text: categoryName(categoryId(movement)) }),
+    el('td', { class: `pa-num${movement.direction === 'saida' ? ' pa-bad' : ' pa-positive'}`, text: `${movement.direction === 'saida' ? '− ' : '+ '}${brl(movement.amount)}` }),
   ]));
   const overdueRows = overdue.map((r) => el('tr', {}, [
     el('td', { text: `${r.title.partyName || 'Sem cliente'} · ${r.overdueDays} dia(s)` }),
     el('td', { class: 'pa-num pa-bad', text: brl(r.balance) }),
   ]));
   return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Decisões com clareza' }), el('h2', { text: 'Relatórios financeiros' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => { const lines = [['Data', 'Tipo', 'Descrição', 'Categoria', 'Valor'], ...movements.map((m) => [dateOnly(m.at), m.direction === 'entrada' ? 'Entrada' : 'Saída', m.label, ctx.store.get('categories', m.categoryId)?.name || '', m.amount.toFixed(2).replace('.', ',')])]; downloadFile(`financeiro-${start}-${end}.csv`, lines.map((r) => r.map(csvCell).join(';')).join('\n'), 'text/csv'); } }, 'Exportar CSV')]),
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Decisões com clareza' }), el('h2', { text: 'Relatórios financeiros' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => { const lines = [['Data', 'Tipo', 'Descrição', 'Plano de conta', 'Valor'], ...movements.map((m) => [dateOnly(m.at), m.direction === 'entrada' ? 'Entrada' : 'Saída', m.label, categoryName(categoryId(m)), m.amount.toFixed(2).replace('.', ',')])]; downloadFile(`financeiro-${start || 'inicio'}-${end || 'fim'}.csv`, lines.map((r) => r.map(csvCell).join(';')).join('\n'), 'text/csv'); } }, 'Exportar CSV')]),
     periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), 'fin-report'),
-    el('div', { class: 'pa-statgrid' }, [statCard('Recebimentos', brl(inTotal), 'ok'), statCard('Pagamentos', brl(outTotal), outTotal ? 'warn' : 'soft'), statCard('Saldo de caixa', brl(inTotal - outTotal), inTotal - outTotal >= 0 ? 'navy' : 'bad')]),
-    el('h3', { class: 'pa-h3', text: 'Saídas por categoria' }), categoryRows.length ? el('table', { class: 'pa-kv pa-report' }, categoryRows) : el('p', { class: 'pa-empty', text: 'Sem saídas no período.' }),
-    el('h3', { class: 'pa-h3', text: 'Clientes inadimplentes' }), overdueRows.length ? el('table', { class: 'pa-kv pa-report' }, overdueRows) : el('p', { class: 'pa-empty', text: 'Nenhum cliente inadimplente.' }),
+    el('div', { class: 'pa-filtergrid' }, [
+      field('Tipo de movimentação', el('select', { class: 'pa-input', 'data-testid': 'fin-report-direction', onchange: (event) => ctx.actions.setFinanceView({ finReportDirection: event.target.value, finReportCategoryId: '' }) }, [
+        el('option', { value: 'todos', text: 'Todas as entradas e saídas', ...(direction === 'todos' ? { selected: 'selected' } : {}) }),
+        el('option', { value: 'entrada', text: 'Receitas e outras entradas', ...(direction === 'entrada' ? { selected: 'selected' } : {}) }),
+        el('option', { value: 'saida', text: 'Despesas e outras saídas', ...(direction === 'saida' ? { selected: 'selected' } : {}) }),
+      ])),
+      field('Plano de conta', el('select', { class: 'pa-input', 'data-testid': 'fin-report-category', onchange: (event) => ctx.actions.setFinanceView({ finReportCategoryId: event.target.value }) }, [
+        el('option', { value: '', text: 'Todos os planos de conta' }),
+        ...categoryOptions.map(([id, category]) => el('option', { value: id, text: `${category?.code ? `${category.code} · ` : ''}${categoryName(id)}`, ...(selectedCategory === id ? { selected: 'selected' } : {}) })),
+      ])),
+    ]),
+    el('p', { class: 'pa-hint', text: 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto não entram neste total. Cada compra aparece na categoria escolhida ao registrá-la.' }),
+    el('div', { class: 'pa-statgrid' }, [statCard('Entradas recebidas', brl(inTotal), 'ok'), statCard('Saídas pagas', brl(outTotal), outTotal ? 'warn' : 'soft'), statCard('Saldo do filtro', brl(inTotal - outTotal), inTotal - outTotal >= 0 ? 'navy' : 'bad')]),
+    el('h3', { class: 'pa-h3', text: 'Total por plano de conta' }),
+    categoryRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Plano de conta' }), el('td', { class: 'pa-num', text: 'Receitas' }), el('td', { class: 'pa-num', text: 'Despesas / saídas' })]), ...categoryRows])) : el('p', { class: 'pa-empty', text: 'Nenhuma movimentação encontrada para estes filtros.' }),
+    el('h3', { class: 'pa-h3', text: `Lançamentos do filtro (${movements.length})` }),
+    movementRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report', 'data-testid': 'fin-report-movements' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Data' }), el('td', { text: 'Descrição' }), el('td', { text: 'Plano de conta' }), el('td', { class: 'pa-num', text: 'Valor' })]), ...movementRows])) : el('p', { class: 'pa-empty', text: 'Nenhum lançamento encontrado para estes filtros.' }),
+    el('details', {}, [el('summary', { text: `Clientes inadimplentes (${overdueRows.length})` }), overdueRows.length ? el('table', { class: 'pa-kv pa-report' }, overdueRows) : el('p', { class: 'pa-empty', text: 'Nenhum cliente inadimplente.' }), el('p', { class: 'pa-hint', text: 'Consulta do saldo atual dos clientes; não segue os filtros deste relatório.' })]),
     el('p', { class: 'pa-hint', text: 'Saldo de caixa não é o mesmo que lucro. Perdas sem movimentação de dinheiro ficam fora deste relatório e continuam no relatório gerencial de produção.' }),
   ]);
 }

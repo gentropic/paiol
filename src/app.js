@@ -33,6 +33,7 @@ export async function boot(root) {
     finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '',
     finPayPeriod: 'all', finPayStart: '', finPayEnd: '',
     finDirection: 'receber', finAccountId: '', finCategoryId: '', finFlowPreset: 'mes',
+    finReportDirection: 'todos', finReportCategoryId: '',
     finPartyId: '', finMethod: '', finTitleCategory: '', finStatementClientId: '',
     modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
   };
