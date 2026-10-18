@@ -4434,9 +4434,14 @@ function automaticConfigSuggestions(store) {
   const actual = cashMovements(store).filter((m) => !m.transfer && dateOnly(m.at) >= start && dateOnly(m.at) <= end);
   const category = (m) => m.categoryId ? store.get('categories', m.categoryId) : null;
   const fixedExcluded = new Set(['tarifas']);
+  // These recurring operating costs have no separate per-recipe rate in the engine.
+  // Include their monthly average in the same production-time allocation as overhead.
+  const monthlyOverhead = new Set(['energia-producao', 'limpeza', 'manutencao']);
   const fixed = actual.filter((m) => {
     const c = category(m);
-    return m.direction === 'saida' && c && (c.kind === 'despesaFixa' || c.behavior === 'fixa') && !fixedExcluded.has(c.systemKey);
+    return m.direction === 'saida' && c &&
+      (c.kind === 'despesaFixa' || c.behavior === 'fixa' || monthlyOverhead.has(c.systemKey)) &&
+      !fixedExcluded.has(c.systemKey);
   });
   const fixedMonths = new Set(fixed.map((m) => dateOnly(m.at).slice(0, 7)));
   const fixedTotal = fixed.reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
