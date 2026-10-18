@@ -65,7 +65,65 @@ export const DEFAULT_CHART = [
 const LEGACY_CATEGORY_ALIASES = {
   vendas: ['vendas'], insumos: ['matéria-prima', 'materia-prima'], motoboy: ['frete'],
   'gas-producao': ['gás', 'gas'], 'outras-despesas': ['outras'], salarios: ['salários', 'salarios'],
+  aluguel: ['aluguel'], energia: ['energia elétrica'], internet: ['internet'],
+  'outras-receitas': ['outras receitas'], custos: ['custos de produção'],
 };
+
+const categoryUseCount = (store, id) => ['financeTitles', 'despesas', 'incomes', 'cashAdjustments']
+  .reduce((sum, collection) => sum + store.state[collection].filter((record) => record.categoryId === id).length, 0);
+
+const preferCategory = (store, left, right) => {
+  if (!left) return right;
+  const score = (category) => (category.duplicateOf ? 0 : 1000000)
+    + (category.archived ? 0 : 100000)
+    + categoryUseCount(store, category.id);
+  return score(right) > score(left) ? right : left;
+};
+
+/** Hide redundant categories without changing the category on past financial events. */
+export function consolidateFinanceCategories(store) {
+  let changed = 0;
+  const canonical = new Map();
+  const duplicates = [];
+  for (const category of store.state.categories) {
+    if (category.systemKey) canonical.set(category.systemKey, preferCategory(store, canonical.get(category.systemKey), category));
+  }
+  for (const category of store.state.categories) {
+    if (category.systemKey && canonical.get(category.systemKey)?.id !== category.id) {
+      duplicates.push([category, canonical.get(category.systemKey)]);
+    } else if (!category.systemKey && !category.archived) {
+      const spec = DEFAULT_CHART.find((entry) =>
+        (entry.direction === 'receber' || (!entry.direction && entry.nature === 'receita')) === (category.direction === 'receber' || (!category.direction && category.kind === 'receita'))
+        && [entry.name, ...(LEGACY_CATEGORY_ALIASES[entry.systemKey] || [])].some((name) => financeNorm(name) === financeNorm(category.name)));
+      const target = spec && canonical.get(spec.systemKey);
+      if (target && target.id !== category.id) duplicates.push([category, target]);
+    }
+  }
+  const duplicateIds = new Set(duplicates.map(([category]) => category.id));
+  const customByName = new Map();
+  for (const category of store.state.categories.filter((item) => !item.systemKey && !item.archived && !duplicateIds.has(item.id))) {
+    const key = `${category.kind}:${category.parentId || ''}:${financeNorm(category.name)}`;
+    const previous = customByName.get(key);
+    customByName.set(key, preferCategory(store, previous, category));
+  }
+  for (const category of store.state.categories.filter((item) => !item.systemKey && !item.archived && !duplicateIds.has(item.id))) {
+    const key = `${category.kind}:${category.parentId || ''}:${financeNorm(category.name)}`;
+    const target = customByName.get(key);
+    if (target && target.id !== category.id) duplicates.push([category, target]);
+  }
+  for (const [category, target] of duplicates) {
+    const current = store.get('categories', category.id);
+    if (!current.archived || current.duplicateOf !== target.id) {
+      store.upsertCategory({ ...current, archived: true, duplicateOf: target.id });
+      changed++;
+    }
+    for (const child of store.state.categories.filter((item) => item.parentId === category.id && item.id !== target.id)) {
+      store.upsertCategory({ ...child, parentId: target.id });
+      changed++;
+    }
+  }
+  return changed;
+}
 
 /** Seed/upgrade financial master data and keep one receivable title per active historical order. */
 export function ensureFinanceFoundation(store, idFactory = () => crypto.randomUUID()) {
@@ -75,24 +133,34 @@ export function ensureFinanceFoundation(store, idFactory = () => crypto.randomUU
     if (!account) { store.upsertCashAccount({ id: idFactory(), ...spec }); changed++; }
   }
 
-  const byKey = new Map(store.state.categories.filter((c) => c.systemKey).map((c) => [c.systemKey, c]));
+  const byKey = new Map();
+  for (const category of store.state.categories.filter((c) => c.systemKey)) {
+    byKey.set(category.systemKey, preferCategory(store, byKey.get(category.systemKey), category));
+  }
   for (const spec of DEFAULT_CHART) {
     let cat = byKey.get(spec.systemKey);
     if (!cat) {
       // Reuse a legacy category with the same name whenever possible, preserving its id/history.
       const aliases = [spec.name, ...(LEGACY_CATEGORY_ALIASES[spec.systemKey] || [])].map(financeNorm);
-      cat = store.state.categories.find((c) => !c.systemKey && aliases.includes(financeNorm(c.name)));
+      cat = store.state.categories.find((c) => !c.systemKey && !c.archived && aliases.includes(financeNorm(c.name)));
       const parentId = spec.parentKey ? byKey.get(spec.parentKey)?.id : undefined;
       const record = { ...(cat || {}), id: cat?.id || idFactory(), ...spec, ...(parentId ? { parentId } : {}) };
       delete record.parentKey;
       store.upsertCategory(record); byKey.set(spec.systemKey, record); changed++;
     } else {
       const parentId = spec.parentKey ? byKey.get(spec.parentKey)?.id : undefined;
-      const upgraded = { ...cat, ...spec, ...(parentId ? { parentId } : {}) };
+      const upgraded = { ...cat, ...spec, ...(cat.customName ? { name: cat.name } : {}), ...(cat.customCode ? { code: cat.code } : {}), ...(parentId ? { parentId } : {}) };
       delete upgraded.parentKey;
+      if (!spec.parentKey) delete upgraded.parentId;
       if (JSON.stringify(upgraded) !== JSON.stringify(cat)) { store.upsertCategory(upgraded); changed++; }
       byKey.set(spec.systemKey, upgraded);
     }
+  }
+
+  for (let pass = 0; pass < 3; pass++) {
+    const cleaned = consolidateFinanceCategories(store);
+    changed += cleaned;
+    if (!cleaned) break;
   }
 
   for (const order of store.state.encomendas) changed += syncOrderReceivable(store, order, idFactory) ? 1 : 0;
@@ -105,7 +173,7 @@ export function ensureFinanceFoundation(store, idFactory = () => crypto.randomUU
 export function syncOrderReceivable(store, order, idFactory = () => crypto.randomUUID()) {
   let title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === order.id);
   const client = order.clienteId ? store.get('clients', order.clienteId) : null;
-  const salesCat = store.state.categories.find((c) => c.systemKey === 'vendas');
+  const salesCat = categoryByKey(store, 'vendas');
   const record = {
     ...(title || {}), id: title?.id || idFactory(), direction: 'receber',
     issuedAt: order.at || order.deliveryDate, competenceDate: order.deliveryDate || order.at,
@@ -121,7 +189,20 @@ export function syncOrderReceivable(store, order, idFactory = () => crypto.rando
 }
 
 export function categoryByKey(store, key) {
-  return store.state.categories.find((c) => c.systemKey === key) || null;
+  return store.state.categories.find((c) => c.systemKey === key && !c.archived)
+    || store.state.categories.find((c) => c.systemKey === key) || null;
+}
+
+export function canonicalCategoryId(store, id) {
+  let current = id;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const next = store.get('categories', current)?.duplicateOf;
+    if (!next || !store.get('categories', next)) break;
+    current = next;
+  }
+  return current;
 }
 
 export function defaultCashAccount(store) {
@@ -235,7 +316,7 @@ export function listTitles(store, filters = {}) {
     else rows = rows.filter((r) => r.status === filters.status);
   }
   if (filters.partyId) rows = rows.filter((r) => r.title.partyId === filters.partyId);
-  if (filters.categoryId) rows = rows.filter((r) => r.title.categoryId === filters.categoryId);
+  if (filters.categoryId) rows = rows.filter((r) => canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId));
   if (filters.method) rows = rows.filter((r) => r.title.expectedMethod === filters.method || titleSettlements(store, r.title).some((s) => (s.method || '') === filters.method));
   return rows.sort((a, b) => financeDay(a.title.dueDate).localeCompare(financeDay(b.title.dueDate)) || a.title.description.localeCompare(b.title.description));
 }
@@ -268,7 +349,7 @@ export function cashMovements(store) {
 }
 
 function projectedMovements(store, start, end, filters = {}) {
-  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.accountId || true) && (!filters.categoryId || r.title.categoryId === filters.categoryId)).map((r) => ({
+  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.accountId || true) && (!filters.categoryId || canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId))).map((r) => ({
     id: `projected:${r.title.id}`, at: r.title.dueDate, direction: r.title.direction === 'receber' ? 'entrada' : 'saida', amount: r.balance,
     label: r.title.description, projected: true, titleId: r.title.id, categoryId: r.title.categoryId,
   }));
@@ -279,7 +360,7 @@ export function cashFlow(store, start, end, filters = {}) {
   const opening = allAccounts.reduce((sum, a) => sum + (Number(a.openingBalance) || 0), 0);
   // A transfer is relevant inside one selected account, but must disappear from the
   // consolidated company flow so it does not inflate both receipts and payments.
-  const actualAll = cashMovements(store).filter((m) => filters.accountId ? m.accountId === filters.accountId : !m.transfer).filter((m) => !filters.categoryId || m.categoryId === filters.categoryId);
+  const actualAll = cashMovements(store).filter((m) => filters.accountId ? m.accountId === filters.accountId : !m.transfer).filter((m) => !filters.categoryId || canonicalCategoryId(store, m.categoryId) === canonicalCategoryId(store, filters.categoryId));
   const prior = actualAll.filter((m) => financeDay(m.at) < start).reduce((sum, m) => sum + (m.direction === 'entrada' ? m.amount : -m.amount), opening);
   const movements = actualAll.filter((m) => inRange(m.at, start, end));
   const projected = filters.projected ? projectedMovements(store, start, end, filters) : [];

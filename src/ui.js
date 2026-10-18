@@ -14,7 +14,7 @@ import { exportYaml } from './exchange.js';
 import { generateFichasPdf, generateReciboPdf, generateCommercialDocumentPdf, generateComandaPdf, generateClientStatementPdf, generateDrePdf, savePdf } from './pdf.js';
 import { workbookBytes, parseInterchange, previewExchange } from './xlsx-exchange.js';
 import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend, salesPeriodSummary, businessPeriodSummary, businessProfitTrend } from './reports.js';
-import { listTitles, titleState, titleSettlements, cashMovements, cashFlow, financeDashboard, categoryByKey, defaultCashAccount } from './finance.js';
+import { DEFAULT_CHART, listTitles, titleState, titleSettlements, cashMovements, cashFlow, financeDashboard, categoryByKey, canonicalCategoryId, defaultCashAccount } from './finance.js';
 import { clientFinancialStatement } from './client-statement.js';
 import { managerialDre } from './dre.js';
 import { inventorySummary, ingredientInventory } from './inventory.js';
@@ -2466,6 +2466,7 @@ const FIN_STATUS = { aberto: ['Em aberto', 'pa-warn'], parcial: ['Parcial', 'pa-
 const titleBadge = (status) => el('span', { class: `pa-badge ${FIN_STATUS[status]?.[1] || ''}`, text: FIN_STATUS[status]?.[0] || status });
 const activeFinanceCategories = (store, direction, selectedId = '') => {
   const categories = store.state.categories.filter((c) => {
+    if (c.id === selectedId) return true;
     if (c.archived || !c.parentId || c.cashFlowGroup === 'nao-caixa') return false;
     if (c.direction) return c.direction === direction;
     return direction === 'receber'
@@ -2620,9 +2621,9 @@ function financeTitlePanel(ctx, direction) {
   const personKey = (title) => title.partyType === 'origem' ? `origin:${norm(title.partyName || 'Sem origem')}` : `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
   const financeCategoryMap = new Map();
   if (direction === 'pagar') for (const title of store.state.financeTitles.filter((t) => t.direction === 'pagar' && !t.cancelledAt)) {
-    const category = title.categoryId ? store.get('categories', title.categoryId) : null;
+    const category = title.categoryId ? store.get('categories', canonicalCategoryId(store, title.categoryId)) : null;
     const name = category?.name || 'Sem categoria';
-    const key = category ? norm(name) : '__sem_categoria__';
+    const key = category?.id || '__sem_categoria__';
     if (!financeCategoryMap.has(key)) financeCategoryMap.set(key, { key, name });
   }
   const financeCategories = [...financeCategoryMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
@@ -2631,8 +2632,8 @@ function financeTitlePanel(ctx, direction) {
   const selectedCategory = financeCategories.some((c) => c.key === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : '';
   let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status });
   if (selectedCategory) rows = rows.filter((row) => {
-    const category = row.title.categoryId ? store.get('categories', row.title.categoryId) : null;
-    return (category ? norm(category.name) : '__sem_categoria__') === selectedCategory;
+    const category = row.title.categoryId ? store.get('categories', canonicalCategoryId(store, row.title.categoryId)) : null;
+    return (category?.id || '__sem_categoria__') === selectedCategory;
   });
   if (direction === 'receber') rows = rows.filter((r) => !r.title.cancelledAt);
   const methodReceipts = (title) => titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
@@ -3111,7 +3112,9 @@ function financeTitleAddSheet(ctx, direction) {
     originFields.style.display = sourceType.value === 'origem' ? '' : 'none';
   });
   const description = el('input', { class: 'pa-input', type: 'text', placeholder: isReceive ? 'Ex.: encomenda especial' : 'Ex.: conta de energia', 'data-testid': 'fin-title-desc' }); const amount = moneyField(null, 'fin-title-amount');
-  const preferred = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas'); const categories = activeFinanceCategories(store, direction, preferred?.id);
+  const preferredCategory = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas');
+  const preferred = preferredCategory?.archived ? null : preferredCategory;
+  const categories = activeFinanceCategories(store, direction, preferred?.id);
   const category = el('select', { class: 'pa-input', 'data-testid': 'fin-title-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(preferred?.id === c.id ? { selected: 'selected' } : {}) })));
   const situation = el('select', { class: 'pa-input', 'data-testid': 'fin-title-situation' }, [el('option', { value: 'pendente', text: isReceive ? 'Ainda não recebi' : 'Ainda não paguei' }), el('option', { value: 'quitado', text: isReceive ? 'Já foi recebido' : 'Já foi pago' })]);
   const method = paymentMethodSelect(store, 'fin-title-method');
@@ -3168,7 +3171,7 @@ function financeTitleEditSheet(ctx, id) {
   sourceType.addEventListener('change', () => { sourceError.textContent = ''; clientFields.style.display = sourceType.value === 'cliente' ? '' : 'none'; originFields.style.display = sourceType.value === 'origem' ? '' : 'none'; });
   const description = el('input', { class: 'pa-input', type: 'text', value: title.description || '', 'data-testid': 'fin-edit-desc' });
   const amount = moneyField(title.amount, 'fin-edit-amount'); const categories = activeFinanceCategories(ctx.store, title.direction, title.categoryId);
-  const category = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(title.categoryId === c.id ? { selected: 'selected' } : {}) })));
+  const category = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}${c.archived ? ' (arquivada)' : ''}`.trim(), ...(title.categoryId === c.id ? { selected: 'selected' } : {}) })));
   const method = paymentMethodSelect(ctx.store, 'fin-edit-method', title.expectedMethod || '');
   const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
@@ -3266,7 +3269,7 @@ function financeCashFlowPanel(ctx) {
 
   let actual = cashMovements(store).filter((m) => inDateRange(m.at, start, end));
   actual = actual.filter((m) => view.finAccountId ? m.accountId === view.finAccountId : !m.transfer);
-  if (view.finCategoryId) actual = actual.filter((m) => m.categoryId === view.finCategoryId);
+  if (view.finCategoryId) actual = actual.filter((m) => canonicalCategoryId(store, m.categoryId) === canonicalCategoryId(store, view.finCategoryId));
   actual.sort((a, b) => dateOnly(a.at).localeCompare(dateOnly(b.at)) || a.label.localeCompare(b.label, 'pt-BR'));
 
   let pending = view.finProjected ? listTitles(store, { status: 'aberto', categoryId: view.finCategoryId || undefined }) : [];
@@ -3379,7 +3382,8 @@ function purchaseAddSheet(ctx) {
   const situation = el('select', { class: 'pa-input', 'data-testid': 'purchase-situation' }, [el('option', { value: 'pendente', text: 'Pagar depois' }), el('option', { value: 'quitado', text: 'Pago agora' })]);
   const method = paymentMethodSelect(store, 'purchase-method');
   const account = el('select', { class: 'pa-input', 'data-testid': 'purchase-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
-  const defaultCategory = categoryByKey(store, 'insumos');
+  const preferredPurchaseCategory = categoryByKey(store, 'insumos');
+  const defaultCategory = preferredPurchaseCategory?.archived ? null : preferredPurchaseCategory;
   const payableCategories = activeFinanceCategories(store, 'pagar', defaultCategory?.id);
   const category = el('select', { class: 'pa-input', 'data-testid': 'purchase-category' }, payableCategories.map((item) => el('option', { value: item.id, text: `${item.code ? `${item.code} · ` : ''}${item.name}`, ...(item.id === defaultCategory?.id ? { selected: 'selected' } : {}) })));
   const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = [];
@@ -3407,8 +3411,9 @@ function purchaseAddSheet(ctx) {
 }
 
 function financeChartPanel(ctx) {
-  const cats = ctx.store.state.categories.filter((c) => c.systemKey).slice().sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
-  return el('section', { class: 'pa-card' }, [el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Organização contábil da confeitaria' }), el('h2', { text: 'Plano de Contas' })]), el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cat-manage', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, 'Personalizar')]), el('p', { class: 'pa-hint', text: 'O plano separa receitas, custos diretos, despesas operacionais, investimentos e movimentações da proprietária. Isso deixa o caixa e a DRE mais confiáveis.' }), el('div', { class: 'pa-actiongrid' }, [el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-accounts' }) }, 'Contas e bancos'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-methods' }) }, 'Formas de pagamento'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Fornecedores')]), el('ul', { class: 'pa-list pa-tight' }, cats.map((c) => el('li', { class: 'pa-list-item' + (c.archived ? ' pa-reversed' : '') }, [el('span', { class: 'pa-num pa-muted', text: c.code || '' }), el('div', { class: 'pa-grow' }, [el('strong', { text: c.name }), el('span', { class: 'pa-muted', text: [c.nature, c.behavior, c.cashFlowGroup].filter(Boolean).join(' · ') })])])))]);
+  const cats = ctx.store.state.categories.filter((c) => !c.archived).slice()
+    .sort((a, b) => String(a.code || '99').localeCompare(String(b.code || '99'), undefined, { numeric: true }) || a.name.localeCompare(b.name, 'pt-BR'));
+  return el('section', { class: 'pa-card' }, [el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Organização contábil da confeitaria' }), el('h2', { text: 'Plano de Contas' })]), el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cat-manage', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, 'Organizar categorias')]), el('p', { class: 'pa-hint', text: 'O plano separa receitas, custos diretos, despesas operacionais, investimentos e movimentações da proprietária. Categorias repetidas são arquivadas sem alterar lançamentos antigos.' }), el('div', { class: 'pa-actiongrid' }, [el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-accounts' }) }, 'Contas e bancos'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-methods' }) }, 'Formas de pagamento'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Fornecedores')]), el('ul', { class: 'pa-list pa-tight' }, cats.map((c) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-num pa-muted', text: c.code || '' }), el('div', { class: 'pa-grow' }, [el('strong', { text: `${c.parentId ? '— ' : ''}${c.name}` }), el('span', { class: 'pa-muted', text: [c.nature || c.kind, c.behavior, c.cashFlowGroup].filter(Boolean).join(' · ') })]), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'category-edit', id: c.id }) }, 'Editar')])))]);
 }
 
 MODALS['finance-suppliers'] = (ctx) => financeSuppliersSheet(ctx);
@@ -3496,7 +3501,10 @@ function financeReportsPanel(ctx) {
   const inTotal = movements.filter((m) => m.direction === 'entrada' && !m.transfer).reduce((s, m) => s + m.amount, 0);
   const outTotal = movements.filter((m) => m.direction === 'saida' && !m.transfer).reduce((s, m) => s + m.amount, 0);
   const byCategory = new Map();
-  for (const m of movements.filter((x) => x.direction === 'saida' && !x.transfer)) byCategory.set(m.categoryId || '__sem__', (byCategory.get(m.categoryId || '__sem__') || 0) + m.amount);
+  for (const m of movements.filter((x) => x.direction === 'saida' && !x.transfer)) {
+    const categoryId = canonicalCategoryId(ctx.store, m.categoryId) || '__sem__';
+    byCategory.set(categoryId, (byCategory.get(categoryId) || 0) + m.amount);
+  }
   const overdue = listTitles(ctx.store, { direction: 'receber', status: 'vencido' });
   const categoryRows = [...byCategory.entries()].sort((a, b) => b[1] - a[1]).map(([id, total]) => el('tr', {}, [
     el('td', { text: id === '__sem__' ? 'Sem categoria' : ctx.store.get('categories', id)?.name || 'Categoria antiga' }),
@@ -3670,53 +3678,124 @@ function despesaSheet(ctx) {
 
 MODALS['categorias'] = (ctx) => categoriasSheet(ctx);
 
-// Manage categorias + subcategorias. CRUD happens in place (mutateModal) so the list updates without
-// closing the sheet. Archive (soft) keeps history labeled; hard-delete only when never used.
+const categoryNature = (kind) => kind === 'receita' ? 'receita' : kind === 'custo' || kind === 'perda' ? 'custo' : 'despesa';
+const categoryRootKey = (kind) => kind === 'receita' ? 'receitas' : kind === 'custo' || kind === 'perda' ? 'custos' : 'despesas';
+const categoryInUse = (store, id) => ['despesas', 'incomes', 'financeTitles', 'cashAdjustments']
+  .some((collection) => store.state[collection].some((record) => record.categoryId === id))
+  || store.state.categories.some((category) => category.parentId === id);
+const categoryDirection = (category) => category.direction || (category.nature === 'receita' || category.kind === 'receita' ? 'receber' : 'pagar');
+const categoryNameConflict = (store, name, direction, exceptId = '') => store.state.categories.some((category) =>
+  !category.archived && category.id !== exceptId && categoryDirection(category) === direction && norm(category.name) === norm(name));
+const categoryCodeConflict = (store, code, exceptId = '') => Boolean(code) && store.state.categories.some((category) =>
+  !category.archived && category.id !== exceptId && String(category.code || '').trim() === code);
+const categoryParents = (store, kind, exceptId = '') => store.state.categories.filter((category) =>
+  !category.archived && !category.parentId && category.id !== exceptId && category.nature === categoryNature(kind));
+function nextCategoryCode(store, parentId) {
+  const parent = store.get('categories', parentId);
+  if (!parent?.code) return '';
+  const prefix = `${parent.code}.`;
+  const used = new Set(store.state.categories.map((category) => String(category.code || '')));
+  let number = 1;
+  while (used.has(`${prefix}${number}`)) number++;
+  return `${prefix}${number}`;
+}
+
+// Keep old category ids for financial history; archived categories stay available for inspection.
 function categoriasSheet(ctx) {
   const { store } = ctx;
   const nameI = el('input', { class: 'pa-input pa-grow', 'data-testid': 'cat-name', type: 'text', placeholder: 'Nova categoria' });
+  const codeI = el('input', { class: 'pa-input', 'data-testid': 'cat-code', type: 'text', placeholder: 'Código automático' });
   const kindSel = el('select', { class: 'pa-input', 'data-testid': 'cat-kind' }, CATEGORY_KINDS.map(([v, t]) => el('option', { value: v, text: t })));
   const parentSel = el('select', { class: 'pa-input', 'data-testid': 'cat-parent' });
+  const error = el('p', { class: 'pa-sheet-msg', role: 'alert' });
   function fillParents() {
-    const tops = store.state.categories.filter((c) => c.kind === kindSel.value && !c.parentId && !c.archived);
-    parentSel.replaceChildren(el('option', { value: '', text: '— categoria principal —' }), ...tops.map((t) => el('option', { value: t.id, text: `sub de: ${t.name}` })));
+    const previous = parentSel.value;
+    const root = categoryByKey(store, categoryRootKey(kindSel.value));
+    const tops = categoryParents(store, kindSel.value);
+    parentSel.replaceChildren(el('option', { value: '', text: '— categoria principal —' }), ...tops.map((top) => el('option', { value: top.id, text: top.name })));
+    parentSel.value = tops.some((top) => top.id === previous) ? previous : tops.some((top) => top.id === root?.id) ? root.id : '';
   }
   fillParents();
   kindSel.addEventListener('change', fillParents);
   function add() {
     const nm = nameI.value.trim();
-    if (!nm) { nameI.focus(); return; }
-    const nature = kindSel.value === 'receita' ? 'receita' : kindSel.value === 'custo' || kindSel.value === 'perda' ? 'custo' : 'despesa';
-    ctx.actions.mutateModal((s) => s.upsertCategory({ id: uuid(), name: nm, kind: kindSel.value, nature, cashFlowGroup: kindSel.value === 'perda' ? 'nao-caixa' : 'operacional', ...(parentSel.value ? { parentId: parentSel.value } : {}) }));
+    const code = codeI.value.trim() || nextCategoryCode(store, parentSel.value);
+    error.textContent = '';
+    if (!nm) { error.textContent = 'Informe o nome da categoria.'; nameI.focus(); return; }
+    if (categoryNameConflict(store, nm, kindSel.value === 'receita' ? 'receber' : 'pagar')) { error.textContent = 'Já existe uma categoria ativa com esse nome para esta operação.'; nameI.focus(); return; }
+    if (categoryCodeConflict(store, code)) { error.textContent = 'Esse código já pertence a outra categoria ativa.'; codeI.focus(); return; }
+    const parent = store.get('categories', parentSel.value);
+    ctx.actions.mutateModal((s) => s.upsertCategory({ id: uuid(), name: nm, ...(code ? { code } : {}), kind: kindSel.value, nature: categoryNature(kindSel.value), cashFlowGroup: kindSel.value === 'perda' ? 'nao-caixa' : parent?.cashFlowGroup || 'operacional', ...(parentSel.value ? { parentId: parentSel.value } : {}) }));
   }
 
-  const used = (id) => store.state.despesas.some((d) => d.categoryId === id && !store.isReversed('despesa', d.id)) || store.state.financeTitles.some((t) => t.categoryId === id);
-  const catRow = (c, sub) => el('li', { class: 'pa-list-item' + (c.archived ? ' pa-reversed' : ''), 'data-testid': 'cat-row' }, [
-    el('span', { class: 'pa-grow', text: (sub ? '— ' : '') + c.name }),
-    el('button', { class: 'pa-btn pa-ghost pa-sm', title: c.archived ? 'Reativar' : 'Arquivar', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...c, archived: !c.archived })) }, c.archived ? '↺' : '🗄'),
-    !used(c.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir', onclick: () => ctx.actions.mutateModal((s) => s.removeCategory(c.id)) }, '✕'),
+  const active = store.state.categories.filter((category) => !category.archived).slice()
+    .sort((a, b) => String(a.code || '99').localeCompare(String(b.code || '99'), undefined, { numeric: true }) || a.name.localeCompare(b.name, 'pt-BR'));
+  const archived = store.state.categories.filter((category) => category.archived).slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const catRow = (category) => el('li', { class: 'pa-list-item', 'data-testid': 'cat-row' }, [
+    el('span', { class: 'pa-num pa-muted', text: category.code || '' }),
+    el('div', { class: 'pa-grow' }, [el('strong', { text: `${category.parentId ? '— ' : ''}${category.name}` }), el('span', { class: 'pa-muted', text: [kindShort(category.kind) || category.nature, category.duplicateOf ? `Consolidada em ${store.get('categories', category.duplicateOf)?.name || 'outra categoria'}` : category.archived ? 'Arquivada' : 'Ativa'].join(' · ') })]),
+    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-edit', onclick: () => ctx.actions.openModal({ kind: 'category-edit', id: category.id }) }, 'Editar'),
+    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Arquivar', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: true })) }, '🗄'),
+    category.archived && !category.duplicateOf && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: false })) }, 'Reativar'),
+    !category.archived && !category.systemKey && !categoryInUse(store, category.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir categoria nunca usada', onclick: () => ctx.actions.mutateModal((s) => s.removeCategory(category.id)) }, '✕'),
   ].filter(Boolean));
-  const groups = CATEGORY_KINDS.map(([kind, , label]) => {
-    const cats = store.state.categories.filter((c) => c.kind === kind);
-    if (!cats.length) return null;
-    const tops = cats.filter((c) => !c.parentId);
-    const lis = [];
-    for (const t of tops) { lis.push(catRow(t, false)); for (const s of cats.filter((c) => c.parentId === t.id)) lis.push(catRow(s, true)); }
-    for (const orphan of cats.filter((c) => c.parentId && !tops.some((t) => t.id === c.parentId))) lis.push(catRow(orphan, false));
-    return el('div', {}, [el('h3', { class: 'pa-h3', text: label }), el('ul', { class: 'pa-list pa-tight' }, lis)]);
-  }).filter(Boolean);
 
   return sheet({
-    title: 'Categorias',
+    title: 'Organizar categorias',
     rows: [
-      el('div', { class: 'pa-row pa-form' }, [nameI]),
-      el('div', { class: 'pa-row pa-form' }, [kindSel, parentSel]),
+      el('p', { class: 'pa-hint', text: 'Cada receita, custo ou despesa deve ter uma categoria clara. As cópias consolidadas ficam arquivadas; os lançamentos antigos continuam com seus vínculos.' }),
+      field('Nova categoria', nameI),
+      el('div', { class: 'pa-filtergrid' }, [field('Tipo', kindSel), field('Grupo principal', parentSel), field('Código (opcional)', codeI)]),
+      error,
       el('div', { class: 'pa-row' }, [el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cat-add', onclick: add }, '+ Adicionar')]),
-      el('p', { class: 'pa-hint', text: 'Arquive (🗄) o que não usa mais — o histórico continua certo. Excluir (✕) só aparece nas que nunca foram usadas.' }),
-      ...groups,
+      el('h3', { class: 'pa-h3', text: `Categorias ativas (${active.length})` }),
+      el('ul', { class: 'pa-list pa-tight' }, active.map(catRow)),
+      archived.length && el('details', {}, [el('summary', { text: `Categorias arquivadas (${archived.length})` }), el('ul', { class: 'pa-list pa-tight' }, archived.map(catRow))]),
       el('div', { class: 'pa-row pa-cardfoot' }, [el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-done', onclick: () => ctx.actions.closeModal() }, 'Concluir')]),
-    ],
+    ].filter(Boolean),
   });
+}
+
+MODALS['category-edit'] = (ctx, modal) => categoryEditSheet(ctx, modal.id);
+function categoryEditSheet(ctx, id) {
+  const { store } = ctx;
+  const category = store.get('categories', id);
+  if (!category) return sheet({ title: 'Categoria não encontrada', rows: [] });
+  const locked = Boolean(category.systemKey || categoryInUse(store, id));
+  const name = el('input', { class: 'pa-input', type: 'text', value: category.name, 'data-testid': 'cat-edit-name' });
+  const code = el('input', { class: 'pa-input', type: 'text', value: category.code || '', 'data-testid': 'cat-edit-code' });
+  const kind = el('select', { class: 'pa-input', 'data-testid': 'cat-edit-kind' }, CATEGORY_KINDS.map(([value, label]) => el('option', { value, text: label, ...(value === category.kind ? { selected: 'selected' } : {}) })));
+  const parent = el('select', { class: 'pa-input', 'data-testid': 'cat-edit-parent' });
+  const fillParents = () => {
+    const choices = categoryParents(store, kind.value, id);
+    const root = categoryByKey(store, categoryRootKey(kind.value));
+    const previous = parent.value || category.parentId;
+    parent.replaceChildren(el('option', { value: '', text: '— categoria principal —' }), ...choices.map((item) => el('option', { value: item.id, text: item.name })));
+    parent.value = choices.some((item) => item.id === previous) ? previous : choices.some((item) => item.id === root?.id) ? root.id : '';
+  };
+  fillParents(); kind.addEventListener('change', fillParents);
+  const error = el('p', { class: 'pa-sheet-msg', role: 'alert' });
+  function save() {
+    const newName = name.value.trim(); const newCode = code.value.trim();
+    const newKind = locked ? category.kind : kind.value;
+    const newParentId = locked ? category.parentId : parent.value || undefined;
+    error.textContent = '';
+    if (!newName) { error.textContent = 'Informe o nome da categoria.'; name.focus(); return; }
+    if (norm(newName) !== norm(category.name) && categoryNameConflict(store, newName, categoryDirection({ ...category, kind: newKind, nature: categoryNature(newKind) }), id)) { error.textContent = 'Já existe uma categoria ativa com esse nome para esta operação.'; name.focus(); return; }
+    if (newCode !== String(category.code || '').trim() && categoryCodeConflict(store, newCode, id)) { error.textContent = 'Esse código já pertence a outra categoria ativa.'; code.focus(); return; }
+    const parentCategory = store.get('categories', newParentId);
+    const record = category.systemKey
+      ? { ...category, name: newName, code: newCode, customName: newName !== DEFAULT_CHART.find((entry) => entry.systemKey === category.systemKey)?.name, customCode: newCode !== DEFAULT_CHART.find((entry) => entry.systemKey === category.systemKey)?.code }
+      : { ...category, name: newName, code: newCode || undefined, kind: newKind, nature: locked ? category.nature : categoryNature(newKind), parentId: newParentId, cashFlowGroup: locked ? category.cashFlowGroup : newKind === 'perda' ? 'nao-caixa' : parentCategory?.cashFlowGroup || 'operacional' };
+    ctx.actions.mutateModal((s) => s.upsertCategory(record));
+    ctx.actions.openModal({ kind: 'categorias' });
+  }
+  return sheet({ title: `Editar categoria · ${category.name}`, rows: [
+    field('Nome', name), field('Código do plano de contas', code),
+    locked ? el('p', { class: 'pa-hint', text: category.systemKey ? 'Esta categoria faz parte do plano padrão. O tipo e o grupo são fixos para preservar os relatórios; nome e código podem ser editados.' : 'Esta categoria já tem lançamentos ou subcategorias. Para preservar o histórico, edite apenas o nome e o código.' }) : el('div', { class: 'pa-filtergrid' }, [field('Tipo', kind), field('Grupo principal', parent)]),
+    error, el('button', { class: 'pa-btn pa-ghost', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, '← Voltar às categorias'),
+  ], onSave: save, saveTestid: 'cat-edit-save' });
 }
 
 // ── Perdas / baixas (Rev 03 #3 — value lost to waste) ────────────────────────────

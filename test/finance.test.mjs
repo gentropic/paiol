@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PaiolStore } from '../src/store.js';
+import { DEFAULT_CATEGORIES, PaiolStore } from '../src/store.js';
 import { ensureFinanceFoundation, listTitles, titleState, cashFlow, cashMovements, categoryByKey } from '../src/finance.js';
 
 const ids = () => { let n = 0; return () => `id-${++n}`; };
@@ -75,6 +75,51 @@ test('default chart covers the main accounting groups of a bakery', () => {
   for (const systemKey of requiredKeys) {
     assert.ok(categoryByKey(s, systemKey), `missing category ${systemKey}`);
   }
+});
+
+test('repeated system categories are archived without changing historical category ids', () => {
+  const s = new PaiolStore(); ensureFinanceFoundation(s, ids());
+  const water = categoryByKey(s, 'agua');
+  s.upsertCategory({ ...water, id: 'agua-repetida', name: 'Água antiga' });
+  s.addDespesa({ id: 'despesa-antiga', at: '2026-07-10', valor: 35, categoryId: 'agua-repetida' });
+  s.upsertFinanceTitle({ id: 'conta-antiga', direction: 'pagar', issuedAt: '2026-07-10', dueDate: '2026-07-10', amount: 35, description: 'Água', categoryId: 'agua-repetida', sourceType: 'manual' });
+  ensureFinanceFoundation(s, ids());
+  assert.equal(s.state.categories.filter((c) => c.systemKey === 'agua' && !c.archived).length, 1);
+  assert.equal(s.state.categories.filter((c) => c.systemKey === 'agua' && c.archived).length, 1);
+  assert.equal(s.state.despesas[0].categoryId, 'agua-repetida');
+  assert.equal(s.get('financeTitles', 'conta-antiga').categoryId, 'agua-repetida');
+  assert.ok(categoryByKey(s, 'agua') && !categoryByKey(s, 'agua').archived);
+  assert.equal(listTitles(s, { categoryId: categoryByKey(s, 'agua').id }).some((row) => row.title.id === 'conta-antiga'), true);
+  assert.equal(cashFlow(s, '2026-07-01', '2026-07-31', { categoryId: categoryByKey(s, 'agua').id }).totalOut, 35);
+});
+
+test('legacy aliases and custom duplicates are archived while custom names stay editable', () => {
+  const s = new PaiolStore(); ensureFinanceFoundation(s, ids());
+  const root = categoryByKey(s, 'despesas');
+  s.upsertCategory({ id: 'legacy-internet', name: 'Internet', kind: 'despesaFixa' });
+  s.upsertCategory({ ...root, id: 'despesas-repetidas' });
+  s.upsertCategory({ id: 'child-old-parent', name: 'Despesa específica', kind: 'despesaVariavel', nature: 'despesa', parentId: 'despesas-repetidas' });
+  s.upsertCategory({ id: 'custom-1', name: 'Feiras extras', kind: 'despesaVariavel', nature: 'despesa', parentId: root.id });
+  s.upsertCategory({ id: 'custom-2', name: 'Feiras extras', kind: 'despesaVariavel', nature: 'despesa', parentId: root.id });
+  const water = categoryByKey(s, 'agua');
+  s.upsertCategory({ ...water, name: 'Água e esgoto', code: '3.20', customName: true, customCode: true });
+  ensureFinanceFoundation(s, ids());
+  assert.equal(s.get('categories', 'legacy-internet').archived, true);
+  assert.equal(s.get('categories', 'child-old-parent').parentId, root.id);
+  assert.equal(s.state.categories.filter((c) => c.name === 'Feiras extras' && !c.archived).length, 1);
+  assert.equal(categoryByKey(s, 'agua').name, 'Água e esgoto');
+  assert.equal(categoryByKey(s, 'agua').code, '3.20');
+});
+
+test('first-run legacy categories leave one active chart of accounts', () => {
+  const s = new PaiolStore();
+  DEFAULT_CATEGORIES.forEach((category, index) => s.upsertCategory({ id: `legacy-${index}`, ...category }));
+  ensureFinanceFoundation(s, ids());
+  const active = s.state.categories.filter((category) => !category.archived);
+  assert.equal(active.filter((category) => category.systemKey === 'vendas').length, 1);
+  assert.equal(active.filter((category) => category.name === 'Gás').length, 0);
+  assert.equal(active.filter((category) => category.name === 'Internet').length, 0);
+  assert.equal(active.filter((category) => category.name === 'Outras').length, 0);
 });
 
 test('transfers affect each account but not consolidated cash inflow and outflow', () => {
