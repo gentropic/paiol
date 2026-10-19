@@ -34,7 +34,7 @@ function unitsInDimension(u) {
 // segmented control. Grouped by frequency/mental-model so 8 screens fit ~5 thumb-reachable tabs.
 const SECTIONS = [
   { id: 'inicio', label: 'Início', icon: '⌂', screens: [['inicio', 'Início']] },
-  { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendas']] },
+  { id: 'pedidos', label: 'Pedidos', icon: '▤', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendidos']] },
   { id: 'producao', label: 'Produção', icon: '◇', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
   { id: 'cadastro', label: 'Cadastro', icon: '＋', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcionários']] },
   { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'Início'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-ficha', 'Ficha do cliente'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lançamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Orçamento'], ['simulador', 'Simulador']] },
@@ -82,10 +82,9 @@ const HELP_SCREENS = [
     'Quem ainda tem valor a pagar das encomendas — o total a receber e cada pendência. Toque numa para registrar um pagamento (total ou parcial); o saldo é recalculado sozinho.',
     'Para corrigir um pagamento lançado errado, use o estorno (↩) na encomenda — ele cancela sem apagar o histórico.',
   ] },
-  { id: 'vendas', icon: '🛒', label: 'Vendas', paras: [
-    'Relatório gerencial das vendas por período. O filtro Todos inclui vendas pagas e pendentes; apenas desistências ficam separadas. Veja quanto vendeu, recebeu e ainda tem a receber, além dos totais por cliente e produto.',
-    'Filtre por produto, cliente ou pelos dois juntos para ver quantas unidades foram vendidas, em que data, quem comprou, o valor e se a venda foi recebida ou continua a receber.',
-    'Entregue e pago são informações independentes. O filtro Desistências mostra os pedidos cancelados sem apagar o histórico.',
+  { id: 'vendas', icon: '🛒', label: 'Vendidos', paras: [
+    'Mostra as encomendas marcadas como entregues e as vendas rápidas do período. A data do filtro é a data de entrega registrada na encomenda. Entregue e pago são informações independentes: uma encomenda entregue pode continuar a receber.',
+    'Marque um ou mais produtos para filtrar e digite o nome do cliente para escolhê-lo. O filtro Todos inclui vendas recebidas e pendentes. Desistências ficam em uma visão separada.',
   ] },
   { id: 'financeiro', icon: '$', label: 'Financeiro', paras: [
     'Centraliza o dinheiro que entrou e saiu: pagamentos de vendas, outras receitas, despesas fixas, despesas variáveis e custos.',
@@ -1778,34 +1777,77 @@ function vendasPanel(ctx) {
   const { store } = ctx;
   const products = store.state.products;
   const activeProducts = products.filter(productIsActive);
-  const { vendaStart: start, vendaEnd: end, vendaStatus: status, vendaProductId: requestedProductId, vendaClientId: requestedClientId } = ctx.view;
-  const productId = products.some((p) => p.id === requestedProductId) ? requestedProductId : '';
+  const { vendaStart: start, vendaEnd: end, vendaStatus: status, vendaProductIds: requestedProductIds, vendaClientId: requestedClientId } = ctx.view;
+  const productIds = [...new Set(Array.isArray(requestedProductIds) ? requestedProductIds : [])].filter((id) => products.some((p) => p.id === id));
+  const hasProductFilter = productIds.length > 0;
+  const productId = productIds.length === 1 ? productIds[0] : '';
   const clientId = requestedClientId === '__sem__' || store.state.clients.some((c) => c.id === requestedClientId) ? requestedClientId : '';
   const selectedProduct = productId ? store.get('products', productId) : null;
   const report = salesPeriodSummary(store, start, end, status);
   const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), 'data-testid': `venda-f-${key}`, onclick: () => ctx.actions.setVendaPeriod({ vendaStatus: key }) }, label);
   const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setVendaPeriod({ vendaStart: s, vendaEnd: e }), 'venda');
-  const productFilter = el('select', { class: 'pa-input', 'data-testid': 'venda-product-filter' }, [
-    el('option', { value: '', text: 'Todos os produtos', ...(!productId ? { selected: 'selected' } : {}) }),
-    ...products.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name))).map((p) => el('option', { value: p.id, text: p.name, ...(productId === p.id ? { selected: 'selected' } : {}) })),
-  ]);
-  productFilter.addEventListener('change', () => ctx.actions.setVendaPeriod({ vendaProductId: productFilter.value }));
-  const clientFilter = el('select', { class: 'pa-input', 'data-testid': 'venda-client-filter' }, [
-    el('option', { value: '', text: 'Todos os clientes', ...(!clientId ? { selected: 'selected' } : {}) }),
-    el('option', { value: '__sem__', text: 'Sem cliente / venda rápida', ...(clientId === '__sem__' ? { selected: 'selected' } : {}) }),
-    ...store.state.clients.slice().sort((a, b) => norm(clientLabel(a)).localeCompare(norm(clientLabel(b)))).map((c) => el('option', { value: c.id, text: clientLabel(c), ...(clientId === c.id ? { selected: 'selected' } : {}) })),
-  ]);
-  clientFilter.addEventListener('change', () => ctx.actions.setVendaPeriod({ vendaClientId: clientFilter.value }));
+  const productFilter = el('details', { 'data-testid': 'venda-product-filter' });
+  const stagedProductIds = new Set(productIds);
+  const productChoices = products.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
+  const productSummary = el('summary', { class: 'pa-input', style: 'cursor:pointer', text: hasProductFilter ? `${productIds.length} produto(s) selecionado(s)` : 'Todos os produtos' });
+  const productSearch = el('input', { class: 'pa-input', type: 'search', placeholder: 'Digite para localizar um produto…', 'aria-label': 'Buscar produto no filtro' });
+  const productOptions = el('div', { style: 'max-height:240px;overflow-y:auto;margin:8px 0' });
+  const allCheck = el('input', { type: 'checkbox', checked: !hasProductFilter, 'data-testid': 'venda-product-all' });
+  const choices = productChoices.map((p) => {
+    const check = el('input', { type: 'checkbox', checked: stagedProductIds.has(p.id), value: p.id, 'data-testid': 'venda-product-check' });
+    const label = el('label', { class: 'pa-check' }, [check, el('span', { text: p.name })]);
+    check.addEventListener('change', () => {
+      if (check.checked) stagedProductIds.add(p.id); else stagedProductIds.delete(p.id);
+      allCheck.checked = stagedProductIds.size === 0;
+    });
+    return { p, check, label };
+  });
+  allCheck.addEventListener('change', () => {
+    stagedProductIds.clear();
+    allCheck.checked = true;
+    for (const { check } of choices) check.checked = false;
+  });
+  productOptions.append(el('label', { class: 'pa-check' }, [allCheck, el('strong', { text: 'Todos os produtos' })]), ...choices.map(({ label }) => label));
+  productSearch.addEventListener('input', () => {
+    const query = norm(productSearch.value);
+    for (const { p, label } of choices) label.style.display = norm(p.name).includes(query) ? '' : 'none';
+  });
+  productFilter.append(productSummary, productSearch, productOptions,
+    el('button', { class: 'pa-btn pa-primary pa-sm', type: 'button', 'data-testid': 'venda-product-apply', onclick: () => ctx.actions.setVendaPeriod({ vendaProductIds: [...stagedProductIds] }) }, 'Aplicar filtro'));
 
-  const visibleRows = report.rows.filter((row) => (!clientId || row.clientId === clientId) && (!productId || (row.kind === 'sale'
-    ? row.sale.productId === productId
-    : (row.order.itens || []).some((it) => it.productId === productId))));
-  const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && (!productId || (row.kind === 'sale'
-    ? row.sale.productId === productId
-    : (row.order.itens || []).some((it) => it.productId === productId))));
+  const clientFilter = el('div', { class: 'pa-cli-picker', 'data-testid': 'venda-client-filter' });
+  const selectClient = (id) => ctx.actions.setVendaPeriod({ vendaClientId: id });
+  if (clientId) {
+    const clientName = clientId === '__sem__' ? 'Sem cliente / venda rápida' : clientLabel(store.get('clients', clientId));
+    clientFilter.append(el('div', { class: 'pa-cli-chip' }, [
+      el('span', { class: 'pa-grow', text: clientName }),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes', 'aria-label': 'Mostrar todos os clientes', onclick: () => selectClient('') }, '✕'),
+    ]));
+  } else {
+    const clientSearch = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os clientes — digite um nome…', 'data-testid': 'venda-client-search' });
+    const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
+    const option = (label, id) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', onclick: () => selectClient(id), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectClient(id); } } }, label);
+    const update = () => {
+      const query = norm(clientSearch.value);
+      const showAll = !query || query === 'todos' || query === 'todas' || query.startsWith('todos os clientes');
+      const matches = showAll ? [] : store.state.clients.filter((c) => norm(clientLabel(c)).includes(query)).slice(0, 8);
+      suggestions.replaceChildren(...(showAll ? [option('Todos os clientes', '')] : []), ...((!query || norm('Sem cliente / venda rápida').includes(query)) ? [option('Sem cliente / venda rápida', '__sem__')] : []), ...matches.map((c) => option(clientLabel(c), c.id)));
+      suggestions.style.display = suggestions.childElementCount ? '' : 'none';
+    };
+    clientSearch.addEventListener('focus', update);
+    clientSearch.addEventListener('input', update);
+    clientSearch.addEventListener('keydown', (event) => { if (event.key === 'Escape') suggestions.style.display = 'none'; });
+    clientFilter.append(clientSearch, suggestions);
+  }
+
+  const hasSelectedProduct = (row) => !hasProductFilter || (row.kind === 'sale'
+    ? productIds.includes(row.sale.productId)
+    : (row.order.itens || []).some((it) => productIds.includes(it.productId)));
+  const visibleRows = report.rows.filter((row) => (row.kind === 'sale' || row.order.entregue) && (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
+  const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
   const rowMetrics = (row) => {
-    if (!productId) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
-    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).filter((it) => it.productId === productId).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
+    if (!hasProductFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
+    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).filter((it) => productIds.includes(it.productId)).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
     const ratio = row.total > 0 ? total / row.total : 0;
     const received = Math.min(total, (row.received || 0) * ratio);
     return { total, received, pending: Math.max(0, total - received) };
@@ -1833,7 +1875,7 @@ function vendasPanel(ctx) {
     const c = clientSummaryMap.get(row.clientId) || { id: row.clientId, total: 0, pending: 0 };
     c.total += metrics.total; c.pending += metrics.pending; clientSummaryMap.set(row.clientId, c);
     if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
-    else for (const it of row.order.itens || []) if (!productId || it.productId === productId) addFilteredProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
+    else for (const it of row.order.itens || []) if (!hasProductFilter || productIds.includes(it.productId)) addFilteredProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
   }
   const filteredClients = [...clientSummaryMap.values()].map((c) => ({ ...c, name: c.id === '__sem__' ? 'Sem cliente / venda rápida' : (store.get('clients', c.id)?.name || '(cliente removido)') })).sort((a, b) => b.total - a.total);
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
@@ -1847,7 +1889,7 @@ function vendasPanel(ctx) {
         el('div', { class: 'pa-enc-title' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: enc.entregue ? 'pa-badge pa-ok' : 'pa-badge', text: enc.entregue ? 'entregue' : 'não entregue' }), el('span', { class: row.paid ? 'pa-badge pa-ok' : 'pa-badge pa-warn', text: row.paid ? 'recebido' : 'a receber' })]),
         el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} · ${encomendaItemsResumo(store, enc)}` }),
       ]),
-      el('strong', { class: 'pa-num', text: brl(row.total) }),
+      el('strong', { class: 'pa-num', text: brl(rowMetrics(row).total) }),
       el('span', { class: 'pa-chev', text: '›' }),
     ]);
   });
@@ -1860,16 +1902,16 @@ function vendasPanel(ctx) {
     const cli = row.order.clienteId ? store.get('clients', row.order.clienteId) : null;
     return el('li', { class: 'pa-row-item pa-cancelled', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.order.id }) }, [
       el('div', { class: 'pa-grow' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: 'pa-muted', text: `${encomendaItemsResumo(store, row.order)} · ${fmtDate(row.at)}` })]),
-      el('strong', { class: 'pa-num pa-bad', text: brl(row.total) }), el('span', { class: 'pa-chev', text: '›' }),
+      el('strong', { class: 'pa-num pa-bad', text: brl(rowMetrics({ ...row, received: 0, pending: row.total }).total) }), el('span', { class: 'pa-chev', text: '›' }),
     ]);
   });
 
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Relatório gerencial' }), el('h2', { text: 'Vendas' })]),
+      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Relatório gerencial' }), el('h2', { text: 'Vendidos' })]),
       activeProducts.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'venda-new', onclick: () => ctx.actions.openModal({ kind: 'venda-add' }) }, '+ Venda rápida'),
     ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Todos = vendas pagas e pendentes do período. Desistências ficam separadas. Entregue e pago são controles independentes.' }),
+    el('p', { class: 'pa-hint', text: 'Encomendas entregues e vendas rápidas, pela data de entrega registrada. Inclui valores recebidos e pendentes; desistências ficam separadas.' }),
     period,
     el('div', { class: 'pa-filtergrid' }, [field('Filtrar por produto', productFilter), field('Filtrar por cliente', clientFilter)]),
     el('div', { class: 'pa-chiprow' }, [chip('todos', 'Todos'), chip('recebidos', 'Recebidos'), chip('naorecebidos', 'Não recebidos'), chip('desistencias', 'Desistências')]),
@@ -1883,7 +1925,7 @@ function vendasPanel(ctx) {
           selectedProduct && el('section', { class: 'pa-detail-card', 'data-testid': 'venda-product-detail' }, [
             el('div', { class: 'pa-cardhead' }, [
               el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Produto selecionado' }), el('h3', { class: 'pa-h3', text: selectedProduct.name })]),
-              el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.setVendaPeriod({ vendaProductId: '' }) }, 'Limpar'),
+              el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.setVendaPeriod({ vendaProductIds: [] }) }, 'Limpar'),
             ]),
             el('div', { class: 'pa-statgrid' }, [
               statCard('Quantidade vendida', `${fmtNum(productSales.reduce((sum, row) => sum + row.qty, 0))} un`, 'navy'),
@@ -1901,7 +1943,7 @@ function vendasPanel(ctx) {
           filteredClients.length > 0 && el('div', { class: 'pa-report-list' }, filteredClients.map((c) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: c.name }), el('strong', { text: brl(c.total) }), c.pending > 0.005 && el('span', { class: 'pa-badge pa-warn', text: `falta ${brl(c.pending)}` })].filter(Boolean)))),
           filteredProducts.length > 0 && el('h3', { class: 'pa-h3', text: 'Produtos vendidos' }),
           filteredProducts.length > 0 && el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { text: brl(p.total) })]))),
-          detailRows.length > 0 && el('h3', { class: 'pa-h3', text: 'Vendas do período' }),
+          detailRows.length > 0 && el('h3', { class: 'pa-h3', text: 'Vendidos no período' }),
           detailRows.length ? el('ul', { class: 'pa-list pa-rows' }, detailRows) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
         ]),
   ].filter(Boolean));

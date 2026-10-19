@@ -26,7 +26,7 @@ export async function boot(root) {
     tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro',
     logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: initialEnd, comandaStart: localDate(weekStartDate), comandaEnd: localDate(weekEndDate), encSort: 'entrega', encStatus: 'todas',
     encStart: '', encEnd: '', encClientId: '', encProductId: '', encDeliveryMethod: '',
-    vendaStart: initialStart, vendaEnd: initialEnd, vendaStatus: 'todos', vendaProductId: '', vendaClientId: '',
+    vendaStart: initialStart, vendaEnd: initialEnd, vendaStatus: 'todos', vendaProductIds: [], vendaClientId: '',
     dashboardPreset: 'mes', dashboardStart: initialStart, dashboardEnd: initialMonthEnd,
     fiadoStart: initialStart, fiadoEnd: initialEnd, fiadoStatus: 'aberto',
     finStart: initialStart, finEnd: initialMonthEnd, finStatus: 'aberto', finProjected: true,
