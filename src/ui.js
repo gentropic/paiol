@@ -20,6 +20,7 @@ import { managerialDre } from './dre.js';
 import { inventorySummary, ingredientInventory } from './inventory.js';
 import { APP_VERSION } from './config.js';
 import { productSaleKind, isBundleProduct, bundleKindLabel, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
+import { findOpenOrderForClientDate, addOrAppendOrder } from './orders.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
 // Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
@@ -71,8 +72,9 @@ const HELP_SCREENS = [
     'Se aparecer “sem preço”, é porque falta cadastrar o preço de algum insumo usado.',
   ] },
   { id: 'encomendas', icon: '📋', label: 'Encomendas', paras: [
-    'Os pedidos com data de entrega. Busque o cliente pelo nome, escolha a data e vá buscando os produtos — o total sai calculado. A encomenda já conta como venda e entra no histórico do cliente.',
-    'A lista começa mostrando todas as datas. Dá pra ordenar por entrega, cliente ou data do pedido; filtrar separadamente por cliente, produto, retirada/motoboy e situação; e criar outra encomenda sem voltar ao Início. Marque ⭐ pra deixar uma encomenda URGENTE (vai pro topo) e “Entregar” quando sair.',
+    'Os pedidos com data de entrega. Busque o cliente pelo nome, escolha a data e vá buscando os produtos — o total sai calculado. Toda encomenda de um cliente cadastrado entra na ficha dele, paga ou pendente.',
+    'A lista começa mostrando todas as datas. Ordene por urgentes, retirada, motoboy ou nome do cliente; filtre por cliente, produto, entrega e situação. Marque ⭐ para destacar urgências e “Entregar” quando sair.',
+    'Um novo pedido para o mesmo cliente cadastrado e a mesma data entra na encomenda ainda não entregue. Os produtos, frete, desconto e observações são somados sem perder pagamentos já lançados. Se a encomenda anterior já foi entregue, começa outro pedido.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
     'A lista do que produzir num dia. A Quantidade Prevista vem sozinha das encomendas com entrega nessa data (e dá pra ajustar). Em Produzidos/Estoque você anota quanto PRODUZIU de verdade — não o que vendeu; vale pra estoque ou produção extra. Marque ✓ quando terminar.',
@@ -2020,7 +2022,7 @@ function vendaSheet(ctx) {
 
 /** A search-to-select client picker (Rev 07) — scales past a dropdown when there are many clients.
  *  `.value()` → the selected client id (or '' for sem cliente). */
-function clientePicker(store, initialId) {
+function clientePicker(store, initialId, onChange = () => {}) {
   let selected = initialId || '';
   const container = el('div', { class: 'pa-cli-picker' });
   function render() {
@@ -2028,7 +2030,7 @@ function clientePicker(store, initialId) {
     if (cli) {
       container.replaceChildren(el('div', { class: 'pa-cli-chip', 'data-testid': 'enc-cliente-chip' }, [
         el('span', { class: 'pa-grow', text: clientLabel(cli) }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { selected = ''; render(); } }, '✕'),
+        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { selected = ''; render(); onChange(); } }, '✕'),
       ]));
       return;
     }
@@ -2039,7 +2041,7 @@ function clientePicker(store, initialId) {
       if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
       const matches = store.state.clients.filter((c) => !c.inactive && norm(clientSearchText(c)).includes(q)).slice(0, 6);
       results.style.display = matches.length ? '' : 'none';
-      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-cliente-result', onclick: () => { selected = c.id; render(); } }, [el('div', { class: 'pa-grow' }, [el('strong', { text: clientLabel(c) }), tagChips(c.tags)].filter(Boolean)), el('span', { class: 'pa-add', text: '+' })])));
+      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-cliente-result', onclick: () => { selected = c.id; render(); onChange(); } }, [el('div', { class: 'pa-grow' }, [el('strong', { text: clientLabel(c) }), tagChips(c.tags)].filter(Boolean)), el('span', { class: 'pa-add', text: '+' })])));
     });
     container.replaceChildren(search, results);
   }
@@ -2071,15 +2073,24 @@ function encomendasPanel(ctx) {
   else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo <= 0.005);
   else if (status === 'urgentes') list = list.filter((e) => !e.desistenciaAt && e.urgente);
   list.sort((a, b) => {
-    if (!!a.urgente !== !!b.urgente) return a.urgente ? -1 : 1; // urgentes pinned to the top
-    if (sort === 'cliente') return cliName(a).localeCompare(cliName(b));
-    if (sort === 'pedido') return (a.at < b.at ? 1 : -1);        // most recently lançada first
-    return (a.deliveryDate < b.deliveryDate ? 1 : -1);           // by delivery date
+    const aUrgent = Boolean(a.urgente && !a.desistenciaAt);
+    const bUrgent = Boolean(b.urgente && !b.desistenciaAt);
+    if (sort === 'urgentes' && aUrgent !== bUrgent) return aUrgent ? -1 : 1;
+    if (sort === 'retirada' || sort === 'motoboy') {
+      const aFirst = (a.deliveryMethod || 'retirada') === sort;
+      const bFirst = (b.deliveryMethod || 'retirada') === sort;
+      if (aFirst !== bFirst) return aFirst ? -1 : 1;
+    }
+    if (sort === 'cliente') {
+      const byName = cliName(a).localeCompare(cliName(b), 'pt-BR');
+      if (byName) return byName;
+    }
+    return String(a.deliveryDate || '').localeCompare(String(b.deliveryDate || '')) || cliName(a).localeCompare(cliName(b), 'pt-BR');
   });
   const ul = el('ul', { class: 'pa-list pa-rows' }, list.map((e) => encomendaRow(ctx, e)));
 
   const chip = (k, label) => el('button', { class: 'pa-chip' + (status === k ? ' pa-chip-on' : ''), 'data-testid': `enc-f-${k}`, onclick: () => ctx.actions.setEncStatus(k) }, label);
-  const sortSel = el('select', { class: 'pa-input pa-narrow', 'data-testid': 'enc-sort' }, [['entrega', 'Entrega'], ['cliente', 'Cliente'], ['pedido', 'Pedido']].map(([v, t]) => el('option', { value: v, text: t, ...(sort === v ? { selected: 'selected' } : {}) })));
+  const sortSel = el('select', { class: 'pa-input pa-narrow', 'data-testid': 'enc-sort' }, [['urgentes', 'Urgentes primeiro'], ['retirada', 'Retirada primeiro'], ['motoboy', 'Motoboy primeiro'], ['cliente', 'Clientes A–Z']].map(([v, t]) => el('option', { value: v, text: t, ...(sort === v ? { selected: 'selected' } : {}) })));
   sortSel.addEventListener('change', () => ctx.actions.setEncSort(sortSel.value));
   const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setEncPeriod({ encStart: s, encEnd: e }), 'enc');
   const clientFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-client-filter' }, [
@@ -2170,7 +2181,7 @@ function encomendaSheet(ctx, enc) {
 
   const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice, ...(it.bundleItems ? { bundleItems: it.bundleItems.map((child) => ({ ...child })) } : {}) })) : [];
 
-  const cliPicker = clientePicker(store, enc ? enc.clienteId : '');
+  const cliPicker = clientePicker(store, enc ? enc.clienteId : '', refreshMatchingOrder);
   const urgenteChk = el('input', { type: 'checkbox', 'data-testid': 'enc-urgente' }); urgenteChk.checked = !!(enc && enc.urgente);
   const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
   const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
@@ -2178,6 +2189,19 @@ function encomendaSheet(ctx, enc) {
   const discount = moneyField(enc ? enc.discount : null, 'enc-discount');
   const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observações (opcional)' });
   notes.value = enc ? (enc.notes || '') : '';
+  const mergeNotice = el('p', { class: 'pa-callout', 'data-testid': 'enc-merge-notice', style: 'display:none' });
+  function refreshMatchingOrder() {
+    if (enc) return;
+    const current = findOpenOrderForClientDate(store, cliPicker.value(), date.value);
+    mergeNotice.style.display = current ? '' : 'none';
+    if (current) {
+      entrega.value = current.deliveryMethod || 'retirada';
+      entrega.disabled = true;
+      mergeNotice.textContent = `Já existe uma encomenda aberta para este cliente em ${fmtDate(current.deliveryDate)}. Os novos produtos serão acrescentados a ela; pagamentos já registrados serão preservados.`;
+    } else entrega.disabled = false;
+  }
+  date.addEventListener('change', refreshMatchingOrder);
+  refreshMatchingOrder();
 
   const totalEl = el('strong', { 'data-testid': 'enc-total' });
   const grossTotal = () => items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0) + (parseNum(frete.input.value) || 0);
@@ -2249,20 +2273,24 @@ function encomendaSheet(ctx, enc) {
     const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * (orderItemUnitCost(store, it, unitCost) || 0), 0);
     const fr = parseNum(frete.input.value);
     const ob = notes.value.trim();
-    ctx.actions.mutate((s) => s.upsertEncomenda({
-      ...(enc || { at: nowIso() }),
-      id: enc ? enc.id : uuid(),
-      deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
-      clienteId: cliPicker.value() || undefined,
-      itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0, ...(it.bundleItems?.length ? { bundleItems: it.bundleItems.map((child) => ({ productId: child.productId, qty: Number(child.qty) || 0 })) } : {}) })),
-      total: grandTotal(),
-      discount: discountValue || undefined,
-      costSnapshot: cost,
-      deliveryMethod: entrega.value,
-      frete: fr == null ? undefined : fr,
-      notes: ob || undefined,
-      urgente: urgenteChk.checked || undefined,
-    }));
+    ctx.actions.mutate((s) => {
+      const order = {
+        ...(enc || { at: nowIso() }),
+        id: enc ? enc.id : uuid(),
+        deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
+        clienteId: cliPicker.value() || undefined,
+        itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0, ...(it.bundleItems?.length ? { bundleItems: it.bundleItems.map((child) => ({ productId: child.productId, qty: Number(child.qty) || 0 })) } : {}) })),
+        total: grandTotal(),
+        discount: discountValue || undefined,
+        costSnapshot: cost,
+        deliveryMethod: entrega.value,
+        frete: fr == null ? undefined : fr,
+        notes: ob || undefined,
+        urgente: urgenteChk.checked || undefined,
+      };
+      if (enc) s.upsertEncomenda(order);
+      else addOrAppendOrder(s, order);
+    });
   }
 
   // Payment summary + history (edit mode). Registering a payment happens from Fiado (or here, after
@@ -2298,6 +2326,7 @@ function encomendaSheet(ctx, enc) {
     ]),
     field('Cliente', cliPicker.el),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Entrega' }), date, entrega]),
+    !enc && mergeNotice,
     el('label', { class: 'pa-check' }, [urgenteChk, el('span', { text: 'Marcar como URGENTE (vai pro topo da lista)' })]),
     el('h3', { class: 'pa-h3', text: 'Itens' }),
     itemsList,
@@ -2307,6 +2336,7 @@ function encomendaSheet(ctx, enc) {
     field('Desconto da venda (opcional)', discount),
     el('p', { class: 'pa-hint', text: 'Este desconto reduz o valor da venda. Um desconto negociado somente na quitação pode ser registrado depois em Financeiro › A Receber.' }),
     field('Observações (opcional)', notes),
+    enc && enc.clienteId && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-client-statement', onclick: () => ctx.actions.openClientStatement(enc.clienteId) }, 'Abrir ficha do cliente'),
     ...paymentSection.filter(Boolean),
   ];
 

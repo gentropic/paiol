@@ -23,7 +23,7 @@ test('order payments remain the single settlement source and support partial rec
   s.upsertEncomenda({ id: 'e1', at: '2026-07-01', deliveryDate: '2026-07-20', itens: [], total: 100, costSnapshot: 0 });
   ensureFinanceFoundation(s, ids()); const title = s.state.financeTitles[0];
   s.addPayment({ id: 'p1', at: '2026-07-05', encomendaId: 'e1', valor: 35, forma: 'Pix' });
-  assert.deepEqual(titleState(s, title, '2026-07-10'), { paid: 35, discounted: 0, settled: 35, balance: 65, status: 'parcial', overdueDays: 0 });
+  assert.deepEqual(titleState(s, title, '2026-07-10'), { paid: 35, discounted: 0, credited: 0, writtenOff: 0, settled: 35, balance: 65, status: 'parcial', overdueDays: 0 });
   assert.equal(cashMovements(s).filter((m) => m.sourceType === 'payment').length, 1);
 });
 
@@ -50,7 +50,9 @@ test('financial reconciliation preserves essential order and comanda data', () =
   const order = { id: 'e1', at: '2026-07-01', deliveryDate: '2026-07-20', itens: [{ productId: 'p1', qty: 3, unitPrice: 10 }], total: 30, costSnapshot: 12, entregue: false };
   const command = { id: '2026-07-20', date: '2026-07-20', itens: [{ productId: 'p1', prevista: 3, realizado: 1, feito: false }] };
   s.upsertEncomenda(order); s.upsertComanda(command); ensureFinanceFoundation(s, ids());
-  assert.deepEqual(s.get('encomendas', 'e1'), order);
+  const { updatedAt, ...savedOrder } = s.get('encomendas', 'e1');
+  assert.ok(updatedAt);
+  assert.deepEqual(savedOrder, order);
   assert.deepEqual(s.get('comandas', '2026-07-20'), command);
 });
 

@@ -210,7 +210,11 @@ export class PaiolStore {
   /** @param {object} x */
   upsertEmployee(x) { return this._upsert('employees', x); }
   /** @param {import('./domain.js').Encomenda} x */
-  upsertEncomenda(x) { return this._upsert('encomendas', x); }
+  upsertEncomenda(x) {
+    const previousAt = Date.parse(this.get('encomendas', x.id)?.updatedAt || '');
+    const updatedAt = new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString();
+    return this._upsert('encomendas', { ...x, updatedAt });
+  }
   /** @param {import('./domain.js').Comanda} x */
   upsertComanda(x) { return this._upsert('comandas', x); }
   /** @param {import('./domain.js').Category} x */
@@ -361,9 +365,9 @@ export class PaiolStore {
 
   /**
    * Merge another store/state into this one. Events union by id (immutable, so a shared
-   * id means identical content — duplicates are dropped). Product edits use updatedAt so a
-   * stale Dropbox copy cannot undo a newly saved price. Other master data still use incoming
-   * replacement by id (v0.1 single-user, no vector clocks yet).
+   * id means identical content — duplicates are dropped). Product and order edits use updatedAt
+   * so a stale Dropbox copy cannot undo newly saved prices or items in an open order. Other
+   * master data still use incoming replacement by id (v0.1 single-user, no vector clocks yet).
    * @param {PaiolStore | State} other
    * @returns {{ eventsAdded: number, masterUpserted: number }}
    */
@@ -392,9 +396,9 @@ export class PaiolStore {
     for (const c of BUSINESS_MASTER_COLLECTIONS) {
       for (const rec of o[c] || []) {
         if (this._trashBlocks(c, rec.id)) continue;
-        // A newly saved product must not be replaced by an older Dropbox copy.
-        // Legacy products without updatedAt remain compatible: a dated edit wins over them.
-        if (c === 'products') {
+        // A newly saved product or order must not be replaced by an older Dropbox copy.
+        // Legacy records without updatedAt remain compatible: a dated edit wins over them.
+        if (c === 'products' || c === 'encomendas') {
           const local = this.get(c, rec.id);
           if (local && String(local.updatedAt || '') > String(rec.updatedAt || '')) continue;
           if (local && JSON.stringify(local) === JSON.stringify(rec)) continue;

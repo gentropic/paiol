@@ -24,7 +24,7 @@ export async function boot(root) {
   const initialMonthEnd = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
   const view = {
     tab: 'inicio', linked: false, busy: false, status: null, reportMonth: null, prodSort: 'lucro',
-    logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: initialEnd, comandaStart: localDate(weekStartDate), comandaEnd: localDate(weekEndDate), encSort: 'entrega', encStatus: 'todas',
+    logMonth: null, financeMonth: null, financeType: 'todos', comandaDate: initialEnd, comandaStart: localDate(weekStartDate), comandaEnd: localDate(weekEndDate), encSort: 'urgentes', encStatus: 'todas',
     encStart: '', encEnd: '', encClientId: '', encProductId: '', encDeliveryMethod: '',
     vendaStart: initialStart, vendaEnd: initialEnd, vendaStatus: 'todos', vendaProductIds: [], vendaClientId: '',
     dashboardPreset: 'mes', dashboardStart: initialStart, dashboardEnd: initialMonthEnd,
