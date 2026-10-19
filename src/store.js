@@ -63,6 +63,7 @@ export const DEFAULT_CONFIG = {
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
   commissionPct: 0,
+  settingsHelperInputs: {},          // inputs accepted in each "Calcular comigo" calculator
   paymentMethods: [
     { id: 'pix', name: 'Pix' },
     { id: 'dinheiro', name: 'Dinheiro' },

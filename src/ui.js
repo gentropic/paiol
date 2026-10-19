@@ -2138,6 +2138,10 @@ MODALS['encomendas-fichas-dia'] = (ctx, modal) => encomendasFichasDiaSheet(ctx, 
 function encomendasFichasDiaSheet(ctx, modal) {
   const { store } = ctx;
   const date = el('input', { class: 'pa-input', type: 'date', value: modal.date || todayInput(), 'data-testid': 'enc-fichas-date' });
+  const status = el('select', { class: 'pa-input', 'data-testid': 'enc-fichas-status' }, [
+    el('option', { value: 'todos', text: 'Todos os pedidos' }),
+    el('option', { value: 'areceber', text: 'A receber' }),
+  ]);
   const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Buscar cliente pelo nome…', 'data-testid': 'enc-fichas-search' });
   const all = el('input', { type: 'checkbox', 'data-testid': 'enc-fichas-all' });
   const list = el('div', { style: 'max-height:320px;overflow-y:auto', 'data-testid': 'enc-fichas-clients' });
@@ -2159,7 +2163,7 @@ function encomendasFichasDiaSheet(ctx, modal) {
   const renderClients = () => {
     selected.clear();
     all.checked = false;
-    dayOrders = store.state.encomendas.filter((order) => !order.desistenciaAt && dateOnly(order.deliveryDate) === date.value && order.clienteId && store.get('clients', order.clienteId));
+    dayOrders = store.state.encomendas.filter((order) => !order.desistenciaAt && dateOnly(order.deliveryDate) === date.value && order.clienteId && store.get('clients', order.clienteId) && (status.value !== 'areceber' || paymentStatus(store, order).saldo > 0.005));
     const grouped = new Map();
     for (const order of dayOrders) {
       const orders = grouped.get(order.clienteId) || [];
@@ -2178,11 +2182,12 @@ function encomendasFichasDiaSheet(ctx, modal) {
       check.addEventListener('change', () => { if (check.checked) selected.add(id); else selected.delete(id); updateSelection(); });
       return { client, check, label };
     }).sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
-    list.replaceChildren(...(choices.length ? choices.map(({ label }) => label) : [el('p', { class: 'pa-empty', text: 'Nenhuma encomenda de cliente cadastrado nesta data.' })]));
+    list.replaceChildren(...(choices.length ? choices.map(({ label }) => label) : [el('p', { class: 'pa-empty', text: status.value === 'areceber' ? 'Nenhuma encomenda a receber nesta data.' : 'Nenhuma encomenda de cliente cadastrado nesta data.' })]));
     updateSearch();
     updateSelection();
   };
   date.addEventListener('change', () => { search.value = ''; renderClients(); });
+  status.addEventListener('change', renderClients);
   search.addEventListener('input', updateSearch);
   all.addEventListener('change', () => {
     selected.clear();
@@ -2198,8 +2203,9 @@ function encomendasFichasDiaSheet(ctx, modal) {
   });
   renderClients();
   return sheet({ title: 'Fichas das encomendas do dia', rows: [
-    el('p', { class: 'pa-hint', text: 'Escolha a data e marque os clientes cadastrados. As fichas incluem pedidos pagos e pendentes desse dia; desistências e pedidos sem cliente cadastrado ficam fora.' }),
+    el('p', { class: 'pa-hint', text: 'Escolha a data, filtre os pedidos e marque os clientes cadastrados. “A receber” inclui apenas pedidos com saldo pendente; desistências e pedidos sem cliente cadastrado ficam fora.' }),
     field('Data de entrega', date),
+    field('Situação', status),
     search,
     el('label', { class: 'pa-check' }, [all, el('strong', { text: 'Marcar todos os clientes desta data' })]),
     list,
@@ -4728,7 +4734,8 @@ MODALS['settings-helper'] = (ctx, modal) => settingsHelperSheet(ctx, modal.key);
 function settingsHelperSheet(ctx, key) {
   const spec = SETTINGS_HELPERS[key];
   if (!spec) return sheet({ title: 'Ajuda de cálculo', rows: [el('p', { class: 'pa-empty', text: 'Este cálculo não está disponível.' })] });
-  const inputs = Object.fromEntries(spec.fields.map(([fieldKey, label]) => [fieldKey, el('input', { class: 'pa-input', type: 'text', inputmode: 'decimal', placeholder: '0' })]));
+  const savedInputs = ctx.store.getConfig().settingsHelperInputs?.[key] || {};
+  const inputs = Object.fromEntries(spec.fields.map(([fieldKey]) => [fieldKey, el('input', { class: 'pa-input', type: 'text', inputmode: 'decimal', placeholder: '0', value: savedInputs[fieldKey] ?? '' })]));
   const result = el('div', { class: 'pa-callout' });
   let calculated = null;
   const recompute = () => {
@@ -4748,9 +4755,13 @@ function settingsHelperSheet(ctx, key) {
       .filter((rateKey) => rateKey !== spec.configKey)
       .reduce((sum, rateKey) => sum + (Number(current[rateKey]) || 0), 0);
     if (spec.percent && stored + otherRates >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado à margem, à taxa de pagamento e à comissão.'); return; }
-    ctx.actions.mutate((store) => store.setConfig({ [spec.configKey]: stored }));
+    const entered = Object.fromEntries(Object.entries(inputs).map(([fieldKey, input]) => [fieldKey, input.value.trim()]));
+    ctx.actions.mutate((store) => store.setConfig({
+      [spec.configKey]: stored,
+      settingsHelperInputs: { ...(store.getConfig().settingsHelperInputs || {}), [key]: entered },
+    }));
   };
-  return sheet({ title: spec.title, rows: [el('p', { class: 'pa-hint', text: spec.intro }), ...spec.fields.map(([fieldKey, label]) => field(label, inputs[fieldKey])), result], onSave: save, saveLabel: 'Usar este resultado', saveTestid: `settings-helper-${key}` });
+  return sheet({ title: spec.title, rows: [el('p', { class: 'pa-hint', text: spec.intro }), Object.keys(savedInputs).length > 0 && el('p', { class: 'pa-hint', text: 'Dados do último cálculo aplicado. Você pode alterá-los e usar um novo resultado.' }), ...spec.fields.map(([fieldKey, label]) => field(label, inputs[fieldKey])), result].filter(Boolean), onSave: save, saveLabel: 'Usar este resultado', saveTestid: `settings-helper-${key}` });
 }
 
 function ajustesPanel(ctx) {

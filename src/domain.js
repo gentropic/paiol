@@ -404,6 +404,7 @@
  * @property {number} commissionPct          // 0..1, goes in the markup divisor
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
  * @property {number} expectedProductionMinutesMonth // production-time denominator for fixed costs
+ * @property {Record<string, Record<string, string>>} [settingsHelperInputs] // saved calculator inputs by helper
  * @property {'active-time'|'total-time'} [rateioBase] // default 'active-time' (§4.3; 'per-unit' deferred)
  * @property {Empresa} [empresa]             // Dados da empresa (Rev 06) — recibo header; filled in Ajustes
  */
