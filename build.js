@@ -28,7 +28,7 @@ const SW_OUT = resolve(HERE, 'sw.js');
 // by byte-diff and offers a reload. Relative URLs resolve against the SW's own /paiol/ scope.
 const SW_CONFIG = {
   app: 'paiol',
-  cache: 'paiol-shell-v12',
+  cache: 'paiol-shell-v13',
   precache: ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './vendor/pdf-lib/pdf-lib.min.js', './vendor/exceljs/exceljs.min.js'],
   navFallback: './index.html',
   routes: [{ pattern: '/paiol/(?:index\\.html)?$', strategy: 'network-first' }],

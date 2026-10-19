@@ -75,6 +75,7 @@ const HELP_SCREENS = [
     'Os pedidos com data de entrega. Busque o cliente pelo nome, escolha a data e vá buscando os produtos — o total sai calculado. Toda encomenda de um cliente cadastrado entra na ficha dele, paga ou pendente.',
     'A lista começa mostrando todas as datas. Ordene por urgentes, retirada, motoboy ou nome do cliente; filtre por cliente, produto, entrega e situação. Marque ⭐ para destacar urgências e “Entregar” quando sair.',
     'Um novo pedido para o mesmo cliente cadastrado e a mesma data entra na encomenda ainda não entregue. Os produtos, frete, desconto e observações são somados sem perder pagamentos já lançados. Se a encomenda anterior já foi entregue, começa outro pedido.',
+    'Em “Fichas do dia”, escolha uma data e marque os clientes cujas encomendas quer imprimir. A prévia gera o mesmo PDF compacto de 3 fichas por folha, com o valor e o saldo dos pedidos dessa data.',
   ] },
   { id: 'comanda', icon: '📝', label: 'Comanda do dia', paras: [
     'A lista do que produzir num dia. A Quantidade Prevista vem sozinha das encomendas com entrega nessa data (e dá pra ajustar). Em Produzidos/Estoque você anota quanto PRODUZIU de verdade — não o que vendeu; vale pra estoque ou produção extra. Marque ✓ quando terminar.',
@@ -2113,6 +2114,7 @@ function encomendasPanel(ctx) {
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Encomendas' }),
+      store.state.encomendas.length > 0 && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-fichas-dia', onclick: () => ctx.actions.openModal({ kind: 'encomendas-fichas-dia', date: start && start === end ? start : todayInput() }) }, '🖨 Fichas do dia'),
       activeProducts.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'enc-new', onclick: () => ctx.actions.openModal({ kind: 'encomenda-add' }) }, '+ Nova encomenda'),
     ].filter(Boolean)),
     el('p', { class: 'pa-hint', text: 'Todas as encomendas ficam aqui, inclusive entregues, pagas e desistências. Use os filtros apenas quando quiser reduzir a lista.' }),
@@ -2129,6 +2131,81 @@ function encomendasPanel(ctx) {
           list.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhuma encomenda com esse filtro.' }),
         ].filter(Boolean)),
   ].filter(Boolean));
+}
+
+MODALS['encomendas-fichas-dia'] = (ctx, modal) => encomendasFichasDiaSheet(ctx, modal);
+
+function encomendasFichasDiaSheet(ctx, modal) {
+  const { store } = ctx;
+  const date = el('input', { class: 'pa-input', type: 'date', value: modal.date || todayInput(), 'data-testid': 'enc-fichas-date' });
+  const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Buscar cliente pelo nome…', 'data-testid': 'enc-fichas-search' });
+  const all = el('input', { type: 'checkbox', 'data-testid': 'enc-fichas-all' });
+  const list = el('div', { style: 'max-height:320px;overflow-y:auto', 'data-testid': 'enc-fichas-clients' });
+  const count = el('span', { class: 'pa-muted' });
+  const print = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'enc-fichas-print' }, 'Conferir fichas para imprimir');
+  const selected = new Set();
+  let dayOrders = [];
+  let choices = [];
+
+  const updateSelection = () => {
+    all.checked = choices.length > 0 && selected.size === choices.length;
+    print.disabled = selected.size === 0;
+    count.textContent = `${selected.size} de ${choices.length} cliente(s) marcado(s)`;
+  };
+  const updateSearch = () => {
+    const query = norm(search.value);
+    for (const { client, label } of choices) label.style.display = norm(clientSearchText(client)).includes(query) ? '' : 'none';
+  };
+  const renderClients = () => {
+    selected.clear();
+    all.checked = false;
+    dayOrders = store.state.encomendas.filter((order) => !order.desistenciaAt && dateOnly(order.deliveryDate) === date.value && order.clienteId && store.get('clients', order.clienteId));
+    const grouped = new Map();
+    for (const order of dayOrders) {
+      const orders = grouped.get(order.clienteId) || [];
+      orders.push(order);
+      grouped.set(order.clienteId, orders);
+    }
+    choices = [...grouped.entries()].map(([id, orders]) => {
+      const client = store.get('clients', id);
+      const check = el('input', { type: 'checkbox', value: id, 'data-testid': 'enc-fichas-client-check' });
+      const total = orders.reduce((sum, order) => sum + (Number(order.total) || 0), 0);
+      const balance = orders.reduce((sum, order) => sum + paymentStatus(store, order).saldo, 0);
+      const label = el('label', { class: 'pa-check' }, [check, el('span', {}, [
+        el('strong', { text: clientLabel(client) }),
+        el('span', { class: 'pa-muted', text: ` · ${orders.length} pedido(s) · ${brl(total)} · saldo ${brl(balance)}` }),
+      ])]);
+      check.addEventListener('change', () => { if (check.checked) selected.add(id); else selected.delete(id); updateSelection(); });
+      return { client, check, label };
+    }).sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
+    list.replaceChildren(...(choices.length ? choices.map(({ label }) => label) : [el('p', { class: 'pa-empty', text: 'Nenhuma encomenda de cliente cadastrado nesta data.' })]));
+    updateSearch();
+    updateSelection();
+  };
+  date.addEventListener('change', () => { search.value = ''; renderClients(); });
+  search.addEventListener('input', updateSearch);
+  all.addEventListener('change', () => {
+    selected.clear();
+    if (all.checked) for (const { check } of choices) selected.add(check.value);
+    for (const { check } of choices) check.checked = selected.has(check.value);
+    updateSelection();
+  });
+  print.addEventListener('click', () => {
+    if (!selected.size) return;
+    const fichas = buildFichas(store, dayOrders.filter((order) => selected.has(order.clienteId)))
+      .sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
+    ctx.actions.openModal({ kind: 'ficha-preview', fichas, filename: `fichas-encomendas-${date.value}.pdf` });
+  });
+  renderClients();
+  return sheet({ title: 'Fichas das encomendas do dia', rows: [
+    el('p', { class: 'pa-hint', text: 'Escolha a data e marque os clientes cadastrados. As fichas incluem pedidos pagos e pendentes desse dia; desistências e pedidos sem cliente cadastrado ficam fora.' }),
+    field('Data de entrega', date),
+    search,
+    el('label', { class: 'pa-check' }, [all, el('strong', { text: 'Marcar todos os clientes desta data' })]),
+    list,
+    count,
+    el('div', { class: 'pa-sheet-actions' }, [print]),
+  ] });
 }
 
 function encomendaItemsResumo(store, e) {
