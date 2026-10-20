@@ -2385,7 +2385,7 @@ function encomendaSheet(ctx, enc) {
   const renderTotal = () => { totalEl.textContent = brl(grandTotal()); discount.input.setCustomValidity(''); };
 
   const itemsList = el('ul', { class: 'pa-list pa-tight' });
-  function bundleEditor(it, product, renderLine) {
+  function bundleEditor(it, product, renderLine, totalLabel, lineTot) {
     it.bundleItems ||= [];
     const box = el('div', { class: 'pa-bundle-editor', 'data-testid': 'enc-bundle-editor' });
     const render = () => {
@@ -2411,7 +2411,7 @@ function encomendaSheet(ctx, enc) {
         suggestions.style.display = matches.length ? '' : 'none';
       };
       search.addEventListener('input', showSuggestions);
-      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Escolha o conteúdo deste pedido. As quantidades serão multiplicadas pelo número de conjuntos e aparecerão na comanda. Outros produtos adicionados ao pedido ficam avulsos.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', {}, [search, suggestions]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }));
+      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Escolha o conteúdo deste pedido. As quantidades serão multiplicadas pelo número de conjuntos e aparecerão na comanda. Outros produtos adicionados ao pedido ficam avulsos.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', {}, [search, suggestions]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }), el('div', { class: 'pa-bundle-total' }, [totalLabel, lineTot]));
     };
     render();
     return box;
@@ -2419,17 +2419,22 @@ function encomendaSheet(ctx, enc) {
   function renderItems() {
     itemsList.replaceChildren(...(items.length ? items.map((it, idx) => {
       const p = store.get('products', it.productId);
+      const bundle = p && isBundleProduct(p);
       const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(it.qty), 'aria-label': 'quantidade' });
       const price = el('input', { class: 'pa-input pa-unit', type: 'text', inputmode: 'decimal', value: fmtMoneyInput(it.unitPrice), 'aria-label': 'preço' });
-      const lineTot = el('span', { class: 'pa-muted pa-linetot' });
-      const renderLine = () => { lineTot.textContent = brl(orderItemGross(it)); };
+      const lineTot = el(bundle ? 'strong' : 'span', { class: bundle ? 'pa-num' : 'pa-muted pa-linetot', ...(bundle ? { 'data-testid': 'enc-bundle-total' } : {}) });
+      const totalLabel = bundle ? el('strong', { class: 'pa-grow' }) : null;
+      const renderLine = () => {
+        lineTot.textContent = brl(orderItemGross(it));
+        if (totalLabel) totalLabel.textContent = `Total ${bundleKindLabel(p) === 'Cesta' ? 'da' : 'do'} ${bundleKindLabel(p).toLowerCase()}${Number(it.qty) > 1 ? ` (${fmtNum(it.qty)} unidades)` : ''}`;
+      };
       qty.addEventListener('input', () => { it.qty = parseNum(qty.value) || 0; renderLine(); renderTotal(); });
       price.addEventListener('input', () => { it.unitPrice = parseNum(price.value) || 0; renderLine(); renderTotal(); });
       renderLine();
       return el('li', { class: 'pa-list-item pa-encitem' }, [
         qty,
-        el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('span', { text: p ? p.name : '(produto removido)' }), p && isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(p) })].filter(Boolean)), lineTot, p && isBundleProduct(p) && bundleEditor(it, p, renderLine)]),
-        el('span', { class: 'pa-lab', text: p && isBundleProduct(p) ? 'Embalagem R$' : 'R$' }), price,
+        el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('span', { text: p ? p.name : '(produto removido)' }), bundle && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(p) })].filter(Boolean)), bundle ? bundleEditor(it, p, renderLine, totalLabel, lineTot) : lineTot]),
+        el('span', { class: 'pa-lab', text: bundle ? 'Embalagem R$' : 'R$' }), price,
         el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { items.splice(idx, 1); renderItems(); renderTotal(); } }, '✕'),
       ]);
     }) : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda — busque um produto abaixo.' })]));
