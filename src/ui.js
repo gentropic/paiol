@@ -1785,9 +1785,7 @@ function vendasPanel(ctx) {
   const { vendaStart: start, vendaEnd: end, vendaStatus: status, vendaProductIds: requestedProductIds, vendaClientId: requestedClientId } = ctx.view;
   const productIds = [...new Set(Array.isArray(requestedProductIds) ? requestedProductIds : [])].filter((id) => products.some((p) => p.id === id));
   const hasProductFilter = productIds.length > 0;
-  const productId = productIds.length === 1 ? productIds[0] : '';
   const clientId = requestedClientId === '__sem__' || store.state.clients.some((c) => c.id === requestedClientId) ? requestedClientId : '';
-  const selectedProduct = productId ? store.get('products', productId) : null;
   const report = salesPeriodSummary(store, start, end, status);
   const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), 'data-testid': `venda-f-${key}`, onclick: () => ctx.actions.setVendaPeriod({ vendaStatus: key }) }, label);
   const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setVendaPeriod({ vendaStart: s, vendaEnd: e }), 'venda');
@@ -1858,43 +1856,29 @@ function vendasPanel(ctx) {
     return { total, received, pending: Math.max(0, total - received) };
   };
   const filteredTotals = visibleRows.reduce((acc, row) => { const m = rowMetrics(row); acc.total += m.total; acc.received += m.received; acc.pending += m.pending; return acc; }, { total: 0, received: 0, pending: 0 });
-  const productSales = selectedProduct ? visibleRows.map((row) => {
-    if (row.kind === 'sale') return {
-      id: row.id, at: row.at, clientName: 'Sem cliente / venda rápida', qty: Number(row.sale.qty) || 0,
-      total: row.total, received: true,
-    };
-    const cli = row.order.clienteId ? store.get('clients', row.order.clienteId) : null;
-    const matching = (row.order.itens || []).filter((it) => it.productId === productId);
-    return {
-      id: row.id, at: row.at, clientName: cli?.name || 'Sem cliente',
-      qty: matching.reduce((sum, it) => sum + (Number(it.qty) || 0), 0),
-      total: matching.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0),
-      received: row.paid, partial: !row.paid && row.received > 0.005,
-    };
-  }) : [];
-  const clientSummaryMap = new Map();
   const productSummaryMap = new Map();
   const addFilteredProduct = (id, qty, total) => { const p = productSummaryMap.get(id) || { id, qty: 0, total: 0 }; p.qty += qty; p.total += total; productSummaryMap.set(id, p); };
   for (const row of visibleRows) {
-    const metrics = rowMetrics(row);
-    const c = clientSummaryMap.get(row.clientId) || { id: row.clientId, total: 0, pending: 0 };
-    c.total += metrics.total; c.pending += metrics.pending; clientSummaryMap.set(row.clientId, c);
     if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
     else for (const it of row.order.itens || []) if (!hasProductFilter || productIds.includes(it.productId)) addFilteredProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
   }
-  const filteredClients = [...clientSummaryMap.values()].map((c) => ({ ...c, name: c.id === '__sem__' ? 'Sem cliente / venda rápida' : (store.get('clients', c.id)?.name || '(cliente removido)') })).sort((a, b) => b.total - a.total);
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
 
-  const detailRows = visibleRows.map((row) => {
+  const productDetailRows = (productId) => visibleRows.filter((row) => row.kind === 'sale'
+    ? row.sale.productId === productId
+    : (row.order.itens || []).some((it) => it.productId === productId)).map((row) => {
     if (row.kind === 'sale') return saleRow(ctx, row.sale);
     const enc = row.order;
     const cli = enc.clienteId ? store.get('clients', enc.clienteId) : null;
+    const matching = (enc.itens || []).filter((it) => it.productId === productId);
+    const qty = matching.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
+    const total = matching.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
     return el('li', { class: 'pa-row-item', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: enc.id }) }, [
       el('div', { class: 'pa-grow' }, [
         el('div', { class: 'pa-enc-title' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: enc.entregue ? 'pa-badge pa-ok' : 'pa-badge', text: enc.entregue ? 'entregue' : 'não entregue' }), el('span', { class: row.paid ? 'pa-badge pa-ok' : 'pa-badge pa-warn', text: row.paid ? 'recebido' : 'a receber' })]),
-        el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} · ${encomendaItemsResumo(store, enc)}` }),
+        el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} · ${fmtNum(qty)} un` }),
       ]),
-      el('strong', { class: 'pa-num', text: brl(rowMetrics(row).total) }),
+      el('strong', { class: 'pa-num', text: brl(total) }),
       el('span', { class: 'pa-chev', text: '›' }),
     ]);
   });
@@ -1927,29 +1911,11 @@ function vendasPanel(ctx) {
         ])
       : el('div', {}, [
           el('div', { class: 'pa-statgrid' }, [statCard('Total vendido', brl(filteredTotals.total), 'navy'), statCard('Recebido', brl(filteredTotals.received), 'ok'), statCard('Pendente', brl(filteredTotals.pending), filteredTotals.pending > 0.005 ? 'warn' : 'soft')]),
-          selectedProduct && el('section', { class: 'pa-detail-card', 'data-testid': 'venda-product-detail' }, [
-            el('div', { class: 'pa-cardhead' }, [
-              el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Produto selecionado' }), el('h3', { class: 'pa-h3', text: selectedProduct.name })]),
-              el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.setVendaPeriod({ vendaProductIds: [] }) }, 'Limpar'),
-            ]),
-            el('div', { class: 'pa-statgrid' }, [
-              statCard('Quantidade vendida', `${fmtNum(productSales.reduce((sum, row) => sum + row.qty, 0))} un`, 'navy'),
-              statCard('Valor do produto', brl(productSales.reduce((sum, row) => sum + row.total, 0)), 'soft'),
-            ]),
-            el('h3', { class: 'pa-h3', text: 'Quando, quem comprou e situação' }),
-            productSales.length ? el('ul', { class: 'pa-list pa-rows' }, productSales.map((row) => el('li', { class: 'pa-list-item' }, [
-              el('time', { class: 'pa-muted', text: fmtDate(row.at) }),
-              el('div', { class: 'pa-grow' }, [el('strong', { text: row.clientName }), el('span', { class: 'pa-muted', text: `${fmtNum(row.qty)} un` })]),
-              el('span', { class: row.received ? 'pa-badge pa-ok' : 'pa-badge pa-warn', text: row.received ? 'recebida' : (row.partial ? 'parcial · a receber' : 'a receber') }),
-              el('strong', { class: 'pa-num', text: brl(row.total) }),
-            ]))) : el('p', { class: 'pa-empty', text: 'Nenhuma venda deste produto com os filtros escolhidos.' }),
-          ]),
-          filteredClients.length > 0 && el('h3', { class: 'pa-h3', text: 'Clientes que compraram' }),
-          filteredClients.length > 0 && el('div', { class: 'pa-report-list' }, filteredClients.map((c) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: c.name }), el('strong', { text: brl(c.total) }), c.pending > 0.005 && el('span', { class: 'pa-badge pa-warn', text: `falta ${brl(c.pending)}` })].filter(Boolean)))),
-          filteredProducts.length > 0 && el('h3', { class: 'pa-h3', text: 'Produtos vendidos' }),
-          filteredProducts.length > 0 && el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { text: brl(p.total) })]))),
-          detailRows.length > 0 && el('h3', { class: 'pa-h3', text: 'Vendidos no período' }),
-          detailRows.length ? el('ul', { class: 'pa-list pa-rows' }, detailRows) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
+          el('h3', { class: 'pa-h3', text: 'Vendidos no período' }),
+          filteredProducts.length ? el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('details', { class: 'pa-sold-group' }, [
+            el('summary', { class: 'pa-preview-line' }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { class: 'pa-num', text: brl(p.total) })]),
+            el('ul', { class: 'pa-list pa-rows' }, productDetailRows(p.id)),
+          ]))) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
         ]),
   ].filter(Boolean));
 }
