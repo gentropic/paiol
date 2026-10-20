@@ -139,7 +139,7 @@ async function seedBusiness(page) {
 
 describe('paiol UI smoke', () => {
   before(async () => {
-    ({ chromium } = await import('playwright'));
+    ({ chromium } = await import(process.env.PAIOL_PLAYWRIGHT_PATH || 'playwright'));
     // Build the single-file artifact fresh, so the "built paiol.html" test exercises current src.
     execFileSync(process.execPath, ['build.js'], { stdio: 'ignore' });
     server = spawn(process.execPath, ['tools/dev-server.js'], {
@@ -147,7 +147,8 @@ describe('paiol UI smoke', () => {
     });
     await waitForServer(BASE);
     const systemChrome = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    browser = await chromium.launch(existsSync(systemChrome) ? { executablePath: systemChrome } : {});
+    const browserExecutable = process.env.PAIOL_BROWSER_EXECUTABLE || systemChrome;
+    browser = await chromium.launch(existsSync(browserExecutable) ? { executablePath: browserExecutable } : {});
     context = await browser.newContext();
   });
 
@@ -382,15 +383,29 @@ describe('paiol UI smoke', () => {
     await seedBusiness(page); // product "Pãozinho", no orders today
 
     await goto(page, 'Comanda');
-    await setComandaToday(page);
-    // add an avulso product (no encomenda backing it)
-    await page.fill('[data-testid="cmd-prodsearch"]', 'pão');
-    await page.click('[data-testid="cmd-prodresult"]');
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    await page.fill('[data-testid="cmd-week-start"]', iso);
+    await page.dispatchEvent('[data-testid="cmd-week-start"]', 'change');
+    await page.fill('[data-testid="cmd-week-end"]', iso);
+    await page.dispatchEvent('[data-testid="cmd-week-end"]', 'change');
+    assert.equal(await page.locator('[data-testid="cmd-period-day"]').count(), 0, 'empty dates should stay hidden');
+    assert.match(await page.locator('.pa-main').innerText(), /Período sem encomendas ou produção avulsa/);
+    // Add a product even when there is no day card yet.
+    await page.click('[data-testid="cmd-avulso-add"]');
+    await page.fill('[data-testid="cmd-avulso-search"]', 'pão');
+    await page.click('[data-testid="cmd-avulso-result"]');
+    await page.fill('[data-testid="cmd-avulso-qty"]', '10');
+    await page.click('[data-testid="cmd-avulso-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     await page.waitForSelector('[data-testid="cmd-prevista"]');
-    // set a manual Quantidade Prevista + a produced amount (independent)
-    await page.fill('[data-testid="cmd-prevista"]', '10');
+    assert.equal(await page.inputValue('[data-testid="cmd-prevista"]'), '10');
+    // The planned quantity tracks work; all avulso production is available for sale.
     await page.fill('[data-testid="cmd-realizado"]', '8');
     assert.match(await page.textContent('.pa-cmd-item'), /saldo a produzir/); // 10 prevista − 8 produzido
+    assert.match(await page.textContent('[data-testid="cmd-disponivel"]'), /\b8\b/);
+    await page.check('[data-testid="cmd-feito"]');
+    assert.match(await page.locator('.pa-cmd-item').getAttribute('class'), /pa-done/);
 
     // THE BUG FIX: the avulso prevista survives a reload (was lost before Rev 07)
     await page.waitForTimeout(1200);
@@ -400,6 +415,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('[data-testid="cmd-prevista"]');
     assert.equal(await page.inputValue('[data-testid="cmd-prevista"]'), '10', 'avulso prevista did not persist');
     assert.equal(await page.inputValue('[data-testid="cmd-realizado"]'), '8', 'produzido did not persist');
+    assert.equal(await page.isChecked('[data-testid="cmd-feito"]'), true, 'feito did not persist');
 
     // delete removes it
     await page.click('[data-testid="cmd-del"]');

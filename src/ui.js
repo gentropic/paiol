@@ -1313,7 +1313,7 @@ function comandaDaySection(ctx, date, unitCost) {
   };
   const previstaOf = (productId) => items.get(productId)?.prevista ?? ordered.get(productId) ?? 0;
   const persist = () => {
-    const itens = [...items.entries()].filter(([, item]) => (item.prevista || 0) > 0 || item.realizado > 0 || item.feito).map(([productId, item]) => ({ productId, ...(item.prevista != null ? { prevista: item.prevista } : {}), realizado: item.realizado || 0, feito: !!item.feito }));
+    const itens = [...items.entries()].filter(([productId, item]) => (item.prevista != null && (item.prevista > 0 || ordered.has(productId))) || item.realizado > 0 || item.feito).map(([productId, item]) => ({ productId, ...(item.prevista != null ? { prevista: item.prevista } : {}), realizado: item.realizado || 0, feito: !!item.feito }));
     ctx.actions.persist((s) => { if (itens.length) s.upsertComanda({ id: date, date, itens }); else if (s.get('comandas', date)) s.removeComanda(date); });
   };
   const indicators = el('div', { class: 'pa-comanda-ind' });
@@ -1322,7 +1322,7 @@ function comandaDaySection(ctx, date, unitCost) {
     for (const productId of productIds) {
       const expected = Number(previstaOf(productId)) || 0;
       const done = Number(items.get(productId)?.realizado) || 0;
-      planned += expected; produced += done; available += Math.max(0, done - expected); cost += done * unitCost(productId);
+      planned += expected; produced += done; available += Math.max(0, done - (ordered.get(productId) || 0)); cost += done * unitCost(productId);
     }
     indicators.replaceChildren(el('table', { class: 'pa-kv' }, [
       el('tr', {}, [el('td', { text: 'Previsto · Produzido' }), el('td', { class: 'pa-num', text: `${fmtNum(planned)} · ${fmtNum(produced)}` })]),
@@ -1340,8 +1340,9 @@ function comandaDaySection(ctx, date, unitCost) {
     const done = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); done.checked = item.feito;
     const balance = el('span', { class: 'pa-muted pa-exced' });
     const updateBalance = () => {
-      const difference = (Number(item.realizado) || 0) - (Number(previstaOf(productId)) || 0);
-      balance.textContent = difference > 0 ? `disponível para venda: ${fmtNum(difference)}` : (item.realizado > 0 && difference < 0 ? `saldo a produzir: ${fmtNum(-difference)}` : '');
+      const remaining = Math.max(0, (Number(previstaOf(productId)) || 0) - (Number(item.realizado) || 0));
+      const available = Math.max(0, (Number(item.realizado) || 0) - (ordered.get(productId) || 0));
+      balance.textContent = [remaining > 0 ? `saldo a produzir: ${fmtNum(remaining)}` : '', available > 0 ? `disponível para venda: ${fmtNum(available)}` : ''].filter(Boolean).join(' · ');
     };
     const card = el('div', { class: `pa-cmd-item${item.feito ? ' pa-done' : ''}` });
     planned.addEventListener('input', () => { item.prevista = parseNum(planned.value); updateBalance(); recompute(); persist(); });
@@ -1364,8 +1365,8 @@ function comandaDaySection(ctx, date, unitCost) {
     suggestions.style.display = matches.length ? '' : 'none';
     suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': isToday ? 'cmd-prodresult' : `cmd-prodresult-${date}`, onclick: () => {
       if (isBundleProduct(product)) { ctx.actions.openModal({ kind: 'comanda-bundle-add', date, productId: product.id }); return; }
-      items.set(product.id, { prevista: undefined, realizado: 0, feito: false }); productIds.push(product.id); productIds.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
-      search.value = ''; suggestions.style.display = 'none'; renderList(); recompute();
+      items.set(product.id, { prevista: 1, realizado: 0, feito: false }); productIds.push(product.id); productIds.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
+      search.value = ''; suggestions.style.display = 'none'; renderList(); recompute(); persist();
     } }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
   });
   const spec = buildComandaSpec(store, date);
@@ -1381,10 +1382,64 @@ function comandaDaySection(ctx, date, unitCost) {
 }
 
 MODALS['comanda-bundle-add'] = (ctx, modal) => comandaBundleSheet(ctx, modal);
+MODALS['comanda-avulso-add'] = (ctx, modal) => comandaAvulsoSheet(ctx, modal);
+function comandaAvulsoSheet(ctx, modal) {
+  const { store } = ctx;
+  const products = store.state.products.filter(productIsActive).sort((a, b) => norm(a.name).localeCompare(norm(b.name), 'pt-BR'));
+  const date = el('input', { class: 'pa-input', type: 'date', min: modal.start, max: modal.end, value: modal.date, 'data-testid': 'cmd-avulso-date' });
+  const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do produto…', 'data-testid': 'cmd-avulso-search' });
+  const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:240px;overflow-y:auto' });
+  const chosen = el('div', { class: 'pa-cli-picker' });
+  const qty = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', value: '1', 'data-testid': 'cmd-avulso-qty' });
+  let productId = '';
+  const choose = (product) => {
+    productId = product.id;
+    chosen.replaceChildren(el('div', { class: 'pa-cli-chip' }, [
+      el('span', { class: 'pa-grow', text: product.name }),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar produto', onclick: () => { productId = ''; chosen.replaceChildren(); search.style.display = ''; search.value = ''; search.focus(); } }, '✕'),
+    ]));
+    search.value = '';
+    search.style.display = 'none';
+    suggestions.style.display = 'none';
+  };
+  search.addEventListener('input', () => {
+    const query = norm(search.value);
+    const matches = query ? products.filter((product) => norm(product.name).includes(query)).slice(0, 8) : [];
+    suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-avulso-result', onclick: () => choose(product) }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
+    suggestions.style.display = matches.length ? '' : 'none';
+  });
+  function save() {
+    const product = store.get('products', productId);
+    const amount = parseNum(qty.value);
+    if (!date.value || date.value < modal.start || date.value > modal.end) { date.focus(); return; }
+    if (!product) { search.focus(); return; }
+    if (!(amount > 0)) { qty.focus(); return; }
+    if (isBundleProduct(product)) {
+      ctx.actions.openModal({ kind: 'comanda-bundle-add', date: date.value, productId, qty: amount });
+      return;
+    }
+    ctx.actions.mutate((s) => {
+      const current = s.get('comandas', date.value);
+      const byId = new Map((current?.itens || []).map((item) => [item.productId, { ...item }]));
+      const row = byId.get(productId) || { productId, realizado: 0, feito: false };
+      row.prevista = (row.prevista == null ? (orderedProductionForDate(s, date.value).get(productId) || 0) : Number(row.prevista) || 0) + amount;
+      row.feito = false;
+      byId.set(productId, row);
+      s.upsertComanda({ id: date.value, date: date.value, itens: [...byId.values()] });
+    });
+  }
+  return sheet({ title: 'Incluir item avulso na comanda', rows: [
+    el('p', { class: 'pa-hint', text: 'Escolha uma data do período e o produto a produzir para estoque ou pronta entrega. O item aparecerá na comanda desse dia.' }),
+    field('Data de produção', date),
+    field('Produto', el('div', {}, [search, suggestions, chosen])),
+    field('Quantidade avulsa prevista', qty),
+    !products.length && el('p', { class: 'pa-empty', text: 'Cadastre um produto para incluir produção avulsa.' }),
+  ].filter(Boolean), onSave: save, saveTestid: 'cmd-avulso-save', saveLabel: 'Incluir na comanda' });
+}
 function comandaBundleSheet(ctx, modal) {
   const { store } = ctx; const product = store.get('products', modal.productId);
   if (!product || !isBundleProduct(product)) return sheet({ title: 'Conjunto não encontrado', rows: [] });
-  const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
+  const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: fmtNum(modal.qty || 1) });
   const children = [];
   const itemsBox = el('div', { class: 'pa-detail-card' });
   const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== product.id);
@@ -1406,6 +1461,7 @@ function comandaBundleSheet(ctx, modal) {
     for (const [productId, extra] of required) {
       const row = byId.get(productId) || { productId, realizado: 0, feito: false };
       row.prevista = (row.prevista == null ? (ordered.get(productId) || 0) : Number(row.prevista) || 0) + extra;
+      row.feito = false;
       byId.set(productId, row);
     }
     ctx.actions.mutate((s) => s.upsertComanda({ id: modal.date, date: modal.date, itens: [...byId.values()] }));
@@ -1431,11 +1487,15 @@ function comandaPeriodPanel(ctx) {
   startInput.addEventListener('change', updateRange); endInput.addEventListener('change', updateRange);
   const days = comandaDatesWithProducts(store, start, end);
   return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produção' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', disabled: days.length === 0, onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF')]),
+    el('div', { class: 'pa-cardhead' }, [
+      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produção' })]),
+      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cmd-avulso-add', disabled: !store.state.products.some(productIsActive), onclick: () => ctx.actions.openModal({ kind: 'comanda-avulso-add', start, end, date: todayInput() >= start && todayInput() <= end ? todayInput() : start }) }, '+ Item avulso'),
+      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', disabled: days.length === 0, onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF'),
+    ]),
     el('div', { class: 'pa-period' }, [field('Data inicial', startInput), el('span', { class: 'pa-period-arrow', text: 'até' }), field('Data final', endInput)]),
     el('p', { class: 'pa-hint', text: 'Aparecem apenas as datas com produtos encomendados ou produção avulsa registrada. Ajuste quantidades e registre a produção diretamente em cada dia.' }),
     ...days.map((day) => comandaDaySection(ctx, day, unitCost)),
-    days.length === 0 && el('p', { class: 'pa-empty', text: 'Período sem encomendas registradas.' }),
+    days.length === 0 && el('p', { class: 'pa-empty', text: 'Período sem encomendas ou produção avulsa registradas. Use “+ Item avulso” para planejar uma produção.' }),
   ].filter(Boolean));
 }
 
