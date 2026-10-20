@@ -3415,7 +3415,8 @@ function financeTitleEditSheet(ctx, id) {
     if (isReceive && sourceType.value === 'cliente' && !client) { sourceError.textContent = 'Digite o nome e selecione um cliente sugerido.'; clientPicker.focus(); return; }
     if (isReceive && sourceType.value === 'origem' && !otherOrigin) { sourceError.textContent = 'Informe o nome da origem desta entrada.'; originName.focus(); return; }
     const selectedSupplier = !isReceive ? suppliers.find((p) => p.id === supplier.value) : null;
-    ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || title.partyName || 'Outro fornecedor', expectedMethod: method.value, notes: notes.value.trim() || undefined }));
+    const manualDue = title.sourceType === 'encomenda' && dateOnly(due.value) !== dateOnly(title.dueDate);
+    ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), ...(manualDue ? { paymentDueManual: true } : {}), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || title.partyName || 'Outro fornecedor', expectedMethod: method.value, notes: notes.value.trim() || undefined }));
   }
   return sheet({ title: 'Editar lançamento', rows: [el('p', { class: 'pa-hint', text: 'Altere o valor, as datas ou a classificação. Pagamentos já registrados permanecem no histórico.' }), field('Emissão', issue), field('Vencimento', due), isReceive ? field('Origem da entrada', sourceType) : field('Fornecedor', supplier), isReceive && clientFields, isReceive && originFields, isReceive && sourceError, field('Descrição', description), field('Valor total', amount), field('Categoria', category), field('Forma prevista', method), field('Observações', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-edit-save' });
 }
@@ -4883,12 +4884,41 @@ function ajustesPanel(ctx) {
         ]),
       ]),
     ]),
+    orderPaymentDueCard(ctx),
     notificationSettingsCard(ctx),
     shoppingSettingsCard(ctx),
     empresaCard(ctx),
     dadosCard(ctx),
     trashPanel(ctx),
     dropboxPanel(ctx),
+  ]);
+}
+
+function orderPaymentDueCard(ctx) {
+  const configuredDays = Number(ctx.store.getConfig().orderPaymentDueDays);
+  const currentDays = Number.isSafeInteger(configuredDays) && configuredDays >= 0 ? configuredDays : 0;
+  const input = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0', step: '1', value: String(currentDays), 'data-testid': 'order-payment-due-days' });
+  const overdue = listTitles(ctx.store, { direction: 'receber', status: 'vencido' }).filter((row) => !row.title.cancelledAt);
+  const overdueTotal = overdue.reduce((sum, row) => sum + row.balance, 0);
+  const save = () => {
+    const days = Number(input.value);
+    if (input.value.trim() === '' || !Number.isSafeInteger(days) || days < 0) {
+      input.setCustomValidity('Informe um número inteiro de dias igual ou maior que zero.');
+      input.reportValidity();
+      return;
+    }
+    input.setCustomValidity('');
+    ctx.actions.setConfig({ orderPaymentDueDays: days });
+  };
+  input.addEventListener('input', () => input.setCustomValidity(''));
+  return el('section', { class: 'pa-card', 'data-testid': 'order-payment-due-settings' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Contas a receber' }), el('h2', { text: 'Vencimento das encomendas' })])]),
+    el('p', { class: 'pa-hint', text: 'Defina quantos dias após a entrega o pagamento deve vencer. Zero dia significa vencimento na própria data da entrega. Uma encomenda com saldo pendente passa a constar como vencida no dia seguinte ao vencimento.' }),
+    el('div', { class: 'pa-field' }, [el('label', { text: 'Prazo padrão após a entrega (dias)' }), input]),
+    el('p', { class: 'pa-hint', text: 'O prazo vale para encomendas existentes e futuras. Datas de vencimento alteradas manualmente na conta a receber são preservadas.' }),
+    el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', type: 'button', onclick: save }, 'Salvar prazo')]),
+    el('p', { text: `${overdue.length} conta(s) a receber vencida(s) · saldo ${brl(overdueTotal)}` }),
+    el('button', { class: 'pa-btn pa-ghost', type: 'button', onclick: () => { ctx.actions.setFinanceView({ finStatus: 'vencido', finPartyId: '', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }); ctx.actions.setTab('fin-receber'); } }, 'Ver contas vencidas'),
   ]);
 }
 

@@ -155,6 +155,7 @@ export async function boot(root) {
     },
     async setConfig(partial) {
       store.setConfig(partial);
+      maintainStore();
       saver.schedule(); scheduleSync();
       view.status = 'Salvando ajustes…'; rerender();
       try { await saver.flushNow(); view.status = 'Ajustes salvos.'; }

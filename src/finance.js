@@ -4,6 +4,7 @@
 import { saleNet } from './bundles.js';
 
 const financeDay = (iso) => String(iso || '').slice(0, 10);
+const localFinanceDay = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const financeNorm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const inRange = (iso, start, end) => (!start || financeDay(iso) >= start) && (!end || financeDay(iso) <= end);
 
@@ -175,13 +176,22 @@ export function ensureFinanceFoundation(store, idFactory = () => crypto.randomUU
 
 /** Create/update the financial title derived from an order. Idempotent by sourceType+sourceId. */
 export function syncOrderReceivable(store, order, idFactory = () => crypto.randomUUID()) {
-  let title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === order.id);
+  const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === order.id);
   const client = order.clienteId ? store.get('clients', order.clienteId) : null;
   const salesCat = categoryByKey(store, 'vendas');
+  const configuredDays = Number(store.getConfig().orderPaymentDueDays);
+  const dueDays = Number.isSafeInteger(configuredDays) && configuredDays >= 0 ? configuredDays : 0;
+  const deliveryDay = financeDay(order.deliveryDate || order.at);
+  const calculatedDue = new Date(`${deliveryDay}T12:00:00`);
+  if (Number.isFinite(calculatedDue.getTime())) calculatedDue.setDate(calculatedDue.getDate() + dueDays);
+  const automaticDueDate = Number.isFinite(calculatedDue.getTime()) ? calculatedDue.toISOString() : (order.deliveryDate || order.at);
+  const legacyManualDue = title?.paymentDueManual == null && title?.competenceDate && financeDay(title.dueDate) !== financeDay(title.competenceDate);
+  const paymentDueManual = Boolean(title?.paymentDueManual || legacyManualDue);
   const record = {
     ...(title || {}), id: title?.id || idFactory(), direction: 'receber',
     issuedAt: order.at || order.deliveryDate, competenceDate: order.deliveryDate || order.at,
-    dueDate: order.deliveryDate || order.at, amount: Number(order.total) || 0,
+    dueDate: paymentDueManual ? title.dueDate : automaticDueDate, paymentDueManual,
+    amount: Number(order.total) || 0,
     description: `Encomenda${client?.name ? ` · ${client.name}` : ''}`,
     categoryId: salesCat?.id, partyType: 'cliente', partyId: order.clienteId,
     partyName: client?.name || 'Sem cliente', sourceType: 'encomenda', sourceId: order.id,
@@ -241,7 +251,7 @@ export function titlePaid(store, title) {
   return titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind)).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
 }
 
-export function titleState(store, title, today = financeDay(new Date().toISOString())) {
+export function titleState(store, title, today = localFinanceDay()) {
   const paid = Math.max(0, titlePaid(store, title));
   const discounted = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'discount').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
   const credited = Math.max(0, titleSettlements(store, title).filter((s) => s.kind === 'credit').reduce((sum, s) => sum + (Number(s.amount) || 0), 0));
@@ -380,9 +390,9 @@ export function cashFlow(store, start, end, filters = {}) {
   return { start, end, opening: prior, days, totalIn: days.reduce((s, r) => s + r.in, 0), totalOut: days.reduce((s, r) => s + r.out, 0), projectedIn: days.reduce((s, r) => s + r.projectedIn, 0), projectedOut: days.reduce((s, r) => s + r.projectedOut, 0), ending: cumulative };
 }
 
-export function financeDashboard(store, month, today = financeDay(new Date().toISOString())) {
+export function financeDashboard(store, month, today = localFinanceDay()) {
   const start = `${month}-01`; const endDate = new Date(`${start}T12:00:00`); endDate.setMonth(endDate.getMonth() + 1); endDate.setDate(0);
-  const end = financeDay(endDate.toISOString());
+  const end = localFinanceDay(endDate);
   const flow = cashFlow(store, start, end, { projected: true });
   const receivables = listTitles(store, { direction: 'receber', status: 'aberto' });
   const payables = listTitles(store, { direction: 'pagar', status: 'aberto' });
@@ -391,6 +401,6 @@ export function financeDashboard(store, month, today = financeDay(new Date().toI
     receivable: receivables.reduce((s, r) => s + r.balance, 0), payable: payables.reduce((s, r) => s + r.balance, 0),
     overdueReceivable: receivables.filter((r) => r.status === 'vencido').reduce((s, r) => s + r.balance, 0),
     overduePayable: payables.filter((r) => r.status === 'vencido').reduce((s, r) => s + r.balance, 0),
-    dueSoon: [...receivables, ...payables].filter((r) => r.title.dueDate >= today && r.title.dueDate <= financeDay(new Date(new Date(`${today}T12:00:00`).getTime() + 7 * 86400000).toISOString())).length,
+    dueSoon: [...receivables, ...payables].filter((r) => financeDay(r.title.dueDate) >= today && financeDay(r.title.dueDate) <= localFinanceDay(new Date(new Date(`${today}T12:00:00`).getTime() + 7 * 86400000))).length,
   };
 }

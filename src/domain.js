@@ -336,6 +336,7 @@
  * @property {string} issuedAt
  * @property {string} competenceDate
  * @property {string} dueDate
+ * @property {boolean} [paymentDueManual] // order receivable has a manually chosen due date
  * @property {number} amount
  * @property {string} description
  * @property {string} [categoryId]
@@ -402,6 +403,7 @@
  * @property {number} targetMarginPct        // 0..1, goes in the markup divisor
  * @property {number} paymentFeePct          // 0..1, goes in the markup divisor
  * @property {number} commissionPct          // 0..1, goes in the markup divisor
+ * @property {number} orderPaymentDueDays    // default days from order delivery to payment due date
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
  * @property {number} expectedProductionMinutesMonth // production-time denominator for fixed costs
  * @property {Record<string, Record<string, string>>} [settingsHelperInputs] // saved calculator inputs by helper
