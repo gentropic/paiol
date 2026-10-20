@@ -1277,15 +1277,17 @@ function friendlyError(e) {
 // previsto — for stock, extras, or unplanned runs), a feito ✓, and a delete ✕ on avulso items.
 // Stored per date in a Comanda record: { productId, prevista?, realizado, feito }. Edits persist
 // WITHOUT a re-render (ctx.actions.persist) so inputs keep focus; indicators recompute in place.
-function dateRangeDays(start, end, limit = 31) {
-  const days = [];
-  const cursor = new Date(`${start}T12:00:00`);
-  const last = new Date(`${end}T12:00:00`);
-  while (cursor <= last && days.length < limit) {
-    days.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`);
-    cursor.setDate(cursor.getDate() + 1);
+function comandaDatesWithProducts(store, start, end) {
+  const days = new Set();
+  for (const order of store.state.encomendas) {
+    const date = dateOnly(order.deliveryDate);
+    if (!order.desistenciaAt && date >= start && date <= end && orderProduction(order).size > 0) days.add(date);
   }
-  return days;
+  for (const comanda of store.state.comandas) {
+    const date = dateOnly(comanda.date || comanda.id);
+    if (date >= start && date <= end && (comanda.itens || []).length > 0) days.add(date);
+  }
+  return [...days].sort();
 }
 
 function orderedProductionForDate(store, date) {
@@ -1427,13 +1429,13 @@ function comandaPeriodPanel(ctx) {
     ctx.actions.setComandaRange({ comandaStart: nextStart, comandaEnd: nextEnd });
   };
   startInput.addEventListener('change', updateRange); endInput.addEventListener('change', updateRange);
-  const days = dateRangeDays(start, end);
+  const days = comandaDatesWithProducts(store, start, end);
   return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produção' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF')]),
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produção' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', disabled: days.length === 0, onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF')]),
     el('div', { class: 'pa-period' }, [field('Data inicial', startInput), el('span', { class: 'pa-period-arrow', text: 'até' }), field('Data final', endInput)]),
-    el('p', { class: 'pa-hint', text: 'Todos os itens das encomendas do período aparecem abaixo. Ajuste quantidades e registre a produção diretamente em cada dia; não há uma segunda seleção de data.' }),
+    el('p', { class: 'pa-hint', text: 'Aparecem apenas as datas com produtos encomendados ou produção avulsa registrada. Ajuste quantidades e registre a produção diretamente em cada dia.' }),
     ...days.map((day) => comandaDaySection(ctx, day, unitCost)),
-    days.length >= 31 && el('p', { class: 'pa-callout', text: 'A visualização aceita no máximo 31 dias por vez. Escolha um período menor para ver os dias seguintes.' }),
+    days.length === 0 && el('p', { class: 'pa-empty', text: 'Período sem encomendas registradas.' }),
   ].filter(Boolean));
 }
 
@@ -1661,7 +1663,7 @@ function buildComandaSpec(store, date) {
 }
 
 function buildComandaPeriodSpec(store, start, end) {
-  const days = dateRangeDays(start, end).map((date) => ({ isoDate: date, ...buildComandaSpec(store, date) }));
+  const days = comandaDatesWithProducts(store, start, end).map((date) => ({ isoDate: date, ...buildComandaSpec(store, date) }));
   const consolidated = new Map();
   for (const day of days) for (const item of day.production) {
     const key = item.productId || norm(item.name);
