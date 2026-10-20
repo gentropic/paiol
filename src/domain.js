@@ -64,6 +64,10 @@
  * @property {number}     [weightTotal]   // optional peso total do lote — enables per-kg quoting (D1)
  * @property {Unit}       [weightUnit]    // "g" | "kg" — unit of weightTotal
  * @property {string[]}   [tags]          // etiquetas
+ * @property {number}    [targetMarginPct] // margin override used for pricing
+ * @property {number}    [paymentFeePct] // payment fee override; blank uses Config
+ * @property {number}    [commissionPct] // sales commission override; blank uses Config
+ * @property {number}    [salesTaxPct] // percentage tax on sales; MEI DAS excluded
  */
 
 /**
@@ -87,6 +91,9 @@
  * @property {number}             packagingCost // BRL per unit (embalagem)
  * @property {string}            [packagingDesc] // ex.: boleira, pacote, tubo, lata
  * @property {number}            [targetMarginPct] // optional per-product margin override (0..1); falls back to Config
+ * @property {number}            [paymentFeePct] // optional per-product payment fee override
+ * @property {number}            [commissionPct] // optional per-product commission override
+ * @property {number}            [salesTaxPct] // optional per-product tax on sales
  * @property {number}            [saleQty]        // quantity/weight sold as one catalog item
  * @property {Unit}              [saleUnit]       // unit shown in catalog/comanda
  * @property {number}            [salePrice]      // default price filled into sales and orders
@@ -204,6 +211,7 @@
  * @property {number}  unitPrice       // price actually charged
  * @property {number}  paymentFeePct   // snapshotted at time of sale
  * @property {number} [commissionPct]  // snapshotted sales commission
+ * @property {number} [salesTaxPct]    // snapshotted tax on sales
  * @property {number}  costSnapshot    // unit cost at time of sale
  * @property {number} [discount]       // total discount granted on this sale
  * @property {string} [channel]        // single optional tag in v0.1
@@ -403,6 +411,7 @@
  * @property {number} targetMarginPct        // 0..1, goes in the markup divisor
  * @property {number} paymentFeePct          // 0..1, goes in the markup divisor
  * @property {number} commissionPct          // 0..1, goes in the markup divisor
+ * @property {number} salesTaxPct            // 0..1, goes in the markup divisor when applicable
  * @property {number} orderPaymentDueDays    // default days from order delivery to payment due date
  * @property {number} expectedActiveMinutesMonth // pricing-lens rateio denominator
  * @property {number} expectedProductionMinutesMonth // production-time denominator for fixed costs

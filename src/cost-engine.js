@@ -374,19 +374,28 @@ export function productUnitCost(store, productId, config, lens) {
 
 /**
  * Suggested price from a unit cost (§4.4):
- *   price = unitCost / (1 - paymentFeePct - commissionPct - targetMarginPct)
- * Payment fee, sales commission and target margin go in the divisor — the MEI tax is already a
- * fixed cost. (Simples Nacional, by contrast, would put a tax % back in the divisor.)
+ *   price = unitCost / (1 - paymentFeePct - commissionPct - salesTaxPct - targetMarginPct)
+ * Payment fee, sales commission, tax proportional to sales and target margin go in the divisor.
+ * The fixed MEI DAS is already in the fixed cost pool, so salesTaxPct must exclude it.
  *
  * @param {number} unitCost
- * @param {{ paymentFeePct: number, targetMarginPct: number, commissionPct?: number }} config
+ * @param {{ paymentFeePct: number, targetMarginPct: number, commissionPct?: number, salesTaxPct?: number }} config
  * @returns {number}
  */
 export function priceFromCost(unitCost, config) {
   const commission = Number(config.commissionPct) || 0;
-  const divisor = 1 - config.paymentFeePct - commission - config.targetMarginPct;
-  if (divisor <= 0) throw new MarkupError(config.paymentFeePct, config.targetMarginPct, commission);
+  const salesTax = Number(config.salesTaxPct) || 0;
+  const divisor = 1 - config.paymentFeePct - commission - salesTax - config.targetMarginPct;
+  if (divisor <= 0) throw new MarkupError(config.paymentFeePct, config.targetMarginPct, commission, salesTax);
   return unitCost / divisor;
+}
+
+/** Percentages charged on a sale, using product-specific values when present. */
+export function effectiveSalesRates(product, config) {
+  const paymentFeePct = Number(product?.paymentFeePct ?? config.paymentFeePct) || 0;
+  const commissionPct = Number(product?.commissionPct ?? config.commissionPct) || 0;
+  const salesTaxPct = Number(product?.salesTaxPct ?? config.salesTaxPct) || 0;
+  return { paymentFeePct, commissionPct, salesTaxPct, total: paymentFeePct + commissionPct + salesTaxPct };
 }
 
 /**
@@ -397,11 +406,10 @@ export function priceFromCost(unitCost, config) {
  */
 export function productPrice(store, productId, config, lens) {
   const unitCost = productUnitCost(store, productId, config, lens);
-  // A product may override the target margin (Natalia: "uso margem diferente para cada produto").
-  // The payment fee stays global. Falls back to the config margin when unset.
+  // A product may override the margin and sales percentages; unset values use config defaults.
   const product = store.products.get(productId);
   const margin = product && product.targetMarginPct != null ? product.targetMarginPct : config.targetMarginPct;
-  return { unitCost, price: priceFromCost(unitCost, { ...config, targetMarginPct: margin }) };
+  return { unitCost, price: priceFromCost(unitCost, { ...config, ...effectiveSalesRates(product, config), targetMarginPct: margin }) };
 }
 
 /** The effective target margin for a product (its override, or the global config default). */
@@ -457,15 +465,16 @@ export class YieldError extends Error {
 }
 
 export class MarkupError extends Error {
-  /** @param {number} fee @param {number} margin @param {number} [commission] */
-  constructor(fee, margin, commission = 0) {
+  /** @param {number} fee @param {number} margin @param {number} [commission] @param {number} [salesTax] */
+  constructor(fee, margin, commission = 0, salesTax = 0) {
     super(
-      `Taxa (${fee}) + comissao (${commission}) + margem (${margin}) >= 100% — preco impossivel. ` +
-      `Reduza a margem, a taxa ou a comissao.`,
+      `Taxa (${fee}) + comissao (${commission}) + imposto (${salesTax}) + margem (${margin}) >= 100% — preco impossivel. ` +
+      `Reduza a margem ou os percentuais sobre a venda.`,
     );
     this.name = 'MarkupError';
     this.fee = fee;
     this.margin = margin;
     this.commission = commission;
+    this.salesTax = salesTax;
   }
 }

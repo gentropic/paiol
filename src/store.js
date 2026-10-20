@@ -63,6 +63,7 @@ export const DEFAULT_CONFIG = {
   targetMarginPct: 0.30,
   paymentFeePct: 0.05,
   commissionPct: 0,
+  salesTaxPct: 0,               // percentage on sales; MEI DAS stays in fixed costs
   orderPaymentDueDays: 0,          // default due date: days after the order delivery date
   settingsHelperInputs: {},          // inputs accepted in each "Calcular comigo" calculator
   paymentMethods: [

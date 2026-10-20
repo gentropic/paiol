@@ -11,7 +11,7 @@
 // recipe cost — but ONLY as an ESTIMATE for "which products earn most" (a decision tool), never in
 // the cash result.
 
-import { estimateLens, productUnitCost } from './cost-engine.js';
+import { estimateLens, productUnitCost, effectiveSalesRates } from './cost-engine.js';
 import { managerialDre } from './dre.js';
 import { isBundleProduct, orderItemUnitCost, saleNet } from './bundles.js';
 import { titleState } from './finance.js';
@@ -266,7 +266,9 @@ export function businessPeriodSummary(store, start, end) {
   for (const sale of store.state.sales) {
     if (store.isReversed('sale', sale.id) || !inPeriod(sale.at, start, end)) continue;
     const gross = (Number(sale.qty) || 0) * (Number(sale.unitPrice) || 0);
-    addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)), (sale.paymentFeePct ?? config.paymentFeePct) + (sale.commissionPct ?? config.commissionPct ?? 0));
+    const rates = effectiveSalesRates(store.get('products', sale.productId), config);
+    addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)),
+      (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? 0));
   }
   for (const order of store.state.encomendas) {
     if (order.desistenciaAt || !inPeriod(order.deliveryDate, start, end)) continue;
@@ -275,7 +277,10 @@ export function businessPeriodSummary(store, start, end) {
     client.orders += 1; client.total += Number(order.total) || 0; clients.set(clientId, client);
     const itemGross = (order.itens || []).reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), 0);
     const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(order.discount) || 0)) / itemGross : 1;
-    for (const item of order.itens || []) addProduct(item.productId, item.qty, (Number(item.qty) || 0) * (Number(item.unitPrice) || 0) * discountFactor, (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0), orderItemUnitCost(store, item, unitCost));
+    for (const item of order.itens || []) {
+      const rates = effectiveSalesRates(store.get('products', item.productId), config);
+      addProduct(item.productId, item.qty, (Number(item.qty) || 0) * (Number(item.unitPrice) || 0) * discountFactor, rates.total, orderItemUnitCost(store, item, unitCost));
+    }
   }
   const productRows = [...products.values()].map((row) => {
     const profit = row.costKnown ? row.revenue - row.cost - row.fees : null;

@@ -7,7 +7,7 @@
 
 import {
   indexStore, estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice, productBreakdown,
-  effectiveMargin, PriceError, CycleError, YieldError, MarkupError, RefError,
+  effectiveMargin, effectiveSalesRates, PriceError, CycleError, YieldError, MarkupError, RefError,
 } from './cost-engine.js';
 import { ConversionError } from './units.js';
 import { exportYaml } from './exchange.js';
@@ -119,7 +119,7 @@ const HELP_SCREENS = [
 const HELP_CONCEPTS = [
   { q: 'Por que um produto fica “sem preço”?', a: 'Quando algum insumo que ele usa ainda não tem preço cadastrado. Cadastre o preço em Insumos e o preço do produto aparece sozinho.' },
   { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir preços, e os dados reais (vendas e o que você produziu na comanda) pra mostrar a verdade nos relatórios.' },
-  { q: 'Margem e taxa', a: 'Margem é a parcela desejada do preço de venda que sobra após custos e taxas. A taxa de pagamento é a parcela cobrada pela maquininha ou plataforma. O preço sugerido considera ambas.' },
+  { q: 'Margem, taxa, comissão e imposto', a: 'O preço sugerido cobre insumos, gás, embalagem e custos fixos proporcionais. Depois reserva, sobre o preço de venda, a margem desejada, a taxa de pagamento, a comissão e eventual imposto percentual. O DAS do MEI já está nos custos fixos.' },
   { q: 'Meus dados estão seguros?', a: 'Ficam salvos no seu aparelho. Conecte o Dropbox em Ajustes pra ter backup e poder usar em mais de um lugar.' },
 ];
 
@@ -725,6 +725,14 @@ function receitaSheet(ctx, recipe) {
   const packaging = moneyField(initialPackaging || 0, 'rec-pkg');
   const packagingDesc = el('input', { class: 'pa-input', 'data-testid': 'rec-pkgdesc', type: 'text', placeholder: 'Ex.: caixinha, boleira ou saco', value: initialPackagingDesc || '' });
   const margin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-margin', type: 'text', inputmode: 'decimal', placeholder: `padrão ${pct(store.getConfig().targetMarginPct)}`, value: initialMargin != null ? String(pct(initialMargin)).replace('.', ',') : '' });
+  const rateInput = (key, testid, fallback) => {
+    const saved = currentLinked?.[key] ?? recipe?.[key];
+    return el('input', { class: 'pa-input pa-narrow', 'data-testid': testid, type: 'text', inputmode: 'decimal', placeholder: `padrão ${pct(fallback)}%`, value: saved != null ? String(pct(saved)).replace('.', ',') : '' });
+  };
+  const paymentFee = rateInput('paymentFeePct', 'rec-payment-fee', store.getConfig().paymentFeePct);
+  const commission = rateInput('commissionPct', 'rec-commission', store.getConfig().commissionPct);
+  const salesTax = rateInput('salesTaxPct', 'rec-sales-tax', store.getConfig().salesTaxPct);
+  salesTax.placeholder = '0 = sem imposto percentual';
   // Component editor (insumos + other recipes, never itself).
   const options = [
     ...store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
@@ -745,6 +753,7 @@ function receitaSheet(ctx, recipe) {
   const feedback = el('p', { class: 'pa-hint', 'data-testid': 'rec-catalog-feedback' });
   function draftRecipe() {
     const marginText = margin.value.trim();
+    const percentage = (input) => input.value.trim() === '' ? undefined : (parseNum(input.value) || 0) / 100;
     return {
       ...(recipe || { fermentMinutes: 0 }), id: draftId, name: name.value.trim(),
       yieldNominal: parseNum(yieldQty.value) || 0, yieldUnit: yieldUnit.value,
@@ -755,6 +764,7 @@ function receitaSheet(ctx, recipe) {
       packagingCost: parseNum(packaging.input.value) || 0,
       packagingDesc: packagingDesc.value.trim() || undefined,
       targetMarginPct: marginText === '' ? undefined : (parseNum(marginText) || 0) / 100,
+      paymentFeePct: percentage(paymentFee), commissionPct: percentage(commission), salesTaxPct: percentage(salesTax),
     };
   }
   function renderResult() { result.replaceChildren(recipeProfitabilityCard(store, draftRecipe(), currentLinked)); }
@@ -792,8 +802,16 @@ function receitaSheet(ctx, recipe) {
     };
     const config = store.getConfig();
     const requestedMargin = savedRecipe.targetMarginPct ?? config.targetMarginPct;
-    if (requestedMargin < 0 || requestedMargin + (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0) >= 1) {
-      feedback.textContent = 'A margem desejada precisa ser positiva e deixar espaço para as taxas de venda.';
+    const rateFields = [[margin, 'margem'], [paymentFee, 'taxa de pagamento'], [commission, 'comissão'], [salesTax, 'imposto sobre a venda']];
+    const invalid = rateFields.find(([input]) => input.value.trim() !== '' && (parseNum(input.value) == null || parseNum(input.value) < 0 || parseNum(input.value) >= 100));
+    if (invalid) {
+      feedback.textContent = `Informe ${invalid[1]} entre 0% e menos de 100%.`;
+      invalid[0].focus();
+      return;
+    }
+    const rates = effectiveSalesRates(savedRecipe, config);
+    if (requestedMargin + rates.total >= 1) {
+      feedback.textContent = 'Margem, taxa de pagamento, comissão e imposto sobre a venda precisam somar menos de 100%.';
       margin.focus();
       return;
     }
@@ -825,9 +843,10 @@ function receitaSheet(ctx, recipe) {
           saleKind: linked?.saleKind || 'normal', active: linked?.active !== false,
           packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc,
           targetMarginPct: savedRecipe.targetMarginPct,
+          paymentFeePct: savedRecipe.paymentFeePct, commissionPct: savedRecipe.commissionPct, salesTaxPct: savedRecipe.salesTaxPct,
         });
       } else if (currentLinked) {
-        s.upsertProduct({ ...currentLinked, packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc, targetMarginPct: savedRecipe.targetMarginPct });
+        s.upsertProduct({ ...currentLinked, packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc, targetMarginPct: savedRecipe.targetMarginPct, paymentFeePct: savedRecipe.paymentFeePct, commissionPct: savedRecipe.commissionPct, salesTaxPct: savedRecipe.salesTaxPct });
       }
     });
     if (destination === 'simulator') { ctx.view.simRecipeId = draftId; ctx.actions.setTab('simulador'); }
@@ -855,13 +874,19 @@ function receitaSheet(ctx, recipe) {
     el('p', { class: 'pa-hint', text: 'Se a embalagem já foi adicionada como insumo acima, seu custo vem do preço da compra. Use este campo apenas para embalagens ou complementos que ainda não estejam na lista, para não contar duas vezes.' }),
     field('Descrição da embalagem', packagingDesc),
     el('div', { class: 'pa-field' }, [el('label', { text: 'Margem desejada para esta receita (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'vazio = margem padrão dos Ajustes' })])]),
+    el('h3', { class: 'pa-h3', text: 'Percentuais sobre a venda' }),
+    el('p', { class: 'pa-hint', text: 'Campos vazios usam os valores de Ajustes. Preencha 0 quando esta receita não tiver a cobrança. Estes percentuais são descontados do preço de venda, junto com a margem desejada.' }),
+    field('Taxa de pagamento, cartão ou plataforma (%)', paymentFee),
+    field('Comissão de venda (%)', commission),
+    field('Imposto proporcional sobre a venda (%)', salesTax),
+    el('p', { class: 'pa-hint', text: 'Informe imposto percentual apenas quando incidir sobre o faturamento desta venda. O DAS do MEI já está incluído nos custos fixos de Ajustes e não deve ser lançado novamente aqui.' }),
     result,
     el('button', { class: 'pa-btn', 'data-testid': 'rec-open-simulator', onclick: () => save('simulator') }, '⚖ Salvar e abrir simulador'),
     el('button', { class: 'pa-btn pa-primary', 'data-testid': 'rec-add-catalog', onclick: () => save('catalog') }, currentLinked ? 'Atualizar produto no catálogo' : 'Salvar e incluir produto no catálogo'),
     feedback,
   ];
 
-  [name, yieldQty, yieldUnit, active, production, oven, packaging.input, packagingDesc, margin].forEach((control) => {
+  [name, yieldQty, yieldUnit, active, production, oven, packaging.input, packagingDesc, margin, paymentFee, commission, salesTax].forEach((control) => {
     control.addEventListener('input', renderResult);
     control.addEventListener('change', renderResult);
   });
@@ -1221,12 +1246,13 @@ function precosPanel(ctx) {
       const unitCost = productUnitCost(es, p.id, config, lens);
       const margin = effectiveMargin(es, p.id, config);
       const ownMargin = p.targetMarginPct != null;
-      const price = priceFromCost(unitCost, { ...config, targetMarginPct: margin });
+      const rates = effectiveSalesRates(p, config);
+      const price = priceFromCost(unitCost, { ...config, ...rates, targetMarginPct: margin });
       // Produtos displays the suggested price as a default when a sale price was not saved.
       // Use that same displayed value here, while identifying it as provisional.
       const practicedPrice = savedSalePrice == null ? sellingPrice(store, p.id) : savedSalePrice;
       const provisional = savedSalePrice == null;
-      const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+      const salesRate = rates.total;
       const lucroUnit = practicedPrice - unitCost - practicedPrice * salesRate;
       const practicedMargin = practicedPrice > 0 ? lucroUnit / practicedPrice : null;
       const activeHoursPerUnit = config.valorHora > 0 ? b.labor / config.valorHora : 0;
@@ -1241,7 +1267,7 @@ function precosPanel(ctx) {
         el('table', { class: 'pa-kv' }, [
           ...parts.map(([label, v]) => kv(label, v)),
           kv('Custo unitário', unitCost, 'pa-kv-total'),
-          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(config.paymentFeePct)}%, comissão ${pct(config.commissionPct || 0)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
+          el('tr', {}, [el('td', { text: `Preço sugerido (margem ${pct(margin)}%${ownMargin ? ' própria' : ''}, taxa ${pct(rates.paymentFeePct)}%, comissão ${pct(rates.commissionPct)}%, imposto ${pct(rates.salesTaxPct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
           el('tr', {}, [el('td', { text: provisional ? 'Valor de venda exibido em Produtos' : 'Preço de venda praticado (Produtos)' }), el('td', { class: 'pa-num pa-strong', text: brl(practicedPrice) })]),
           el('tr', {}, [el('td', { text: 'Diferença entre valor de venda e sugerido' }), el('td', { class: `pa-num${practicedPrice < price - 0.005 ? ' pa-bad' : ' pa-positive'}`, text: Math.abs(practicedPrice - price) < 0.005 ? brl(0) : `${practicedPrice < price ? '− ' : '+ '}${brl(Math.abs(practicedPrice - price))}` })]),
           el('tr', {}, [el('td', { text: `Lucro por unidade (${provisional ? 'valor exibido' : 'preço praticado'})` }), el('td', { class: `pa-num${lucroUnit < 0 ? ' pa-bad' : ''}`, text: brl(lucroUnit) })]),
@@ -1274,7 +1300,7 @@ function friendlyError(e) {
   if (e instanceof PriceError) return 'Defina o preço de todos os insumos usados nesta receita.';
   if (e instanceof CycleError) return 'Há um ciclo nas receitas (uma receita contém a si mesma).';
   if (e instanceof YieldError) return 'Rendimento inválido — verifique a receita.';
-  if (e instanceof MarkupError) return 'Margem + taxa + comissão somam 100% ou mais — ajuste em Ajustes.';
+  if (e instanceof MarkupError) return 'Margem + taxa + comissão + imposto somam 100% ou mais — ajuste os percentuais da receita ou em Ajustes.';
   if (e instanceof RefError) return 'A receita deste produto não foi encontrada.';
   if (e instanceof ConversionError) return `Unidade incompatível (${e.from}→${e.to}). Use a mesma unidade do insumo.`;
   return String(e && e.message ? e.message : e);
@@ -1781,12 +1807,13 @@ function recipePricing(store, recipe, linkedProduct = null) {
   const linkedQty = Number(linkedProduct?.components?.find((c) => c.kind === 'recipe' && c.id === recipe.id)?.qty) || 1;
   const unitCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * linkedQty + (Number(recipe.packagingCost) || 0);
   const targetMargin = recipe.targetMarginPct ?? config.targetMarginPct;
-  const suggested = Math.ceil(priceFromCost(unitCost, { ...config, targetMarginPct: targetMargin }) * 100 - 1e-9) / 100;
+  const rates = effectiveSalesRates(recipe, config);
+  const suggested = Math.ceil(priceFromCost(unitCost, { ...config, ...rates, targetMarginPct: targetMargin }) * 100 - 1e-9) / 100;
   const productUnits = yieldQty / linkedQty;
-  const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+  const salesRate = rates.total;
   const profitPerUnit = suggested * (1 - salesRate) - unitCost;
   const productionHours = (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0)) / 60;
-  return { breakdown, yieldQty, linkedQty, productUnits, unitCost, targetMargin, suggested,
+  return { breakdown, yieldQty, linkedQty, productUnits, unitCost, targetMargin, rates, suggested,
     salesRate, profitPerUnit, totalCost: unitCost * productUnits, totalSale: suggested * productUnits,
     totalProfit: profitPerUnit * productUnits, profitHour: productionHours > 0 ? profitPerUnit * productUnits / productionHours : null };
 }
@@ -1809,6 +1836,9 @@ function recipeProfitabilityCard(store, recipe, linkedProduct = null) {
         line('Custo total da receita', brl(p.totalCost)),
         line('Custo por produto', brl(p.unitCost)),
         line('Margem desejada', pctStr(p.targetMargin)),
+        line('Taxa de pagamento', pctStr(p.rates.paymentFeePct)),
+        line('Comissão', pctStr(p.rates.commissionPct)),
+        line('Imposto sobre a venda', pctStr(p.rates.salesTaxPct)),
         line('Preço sugerido por produto', brl(p.suggested), 'pa-strong'),
         line('Venda total da receita nesse preço', brl(p.totalSale)),
         line('Lucro por produto', brl(p.profitPerUnit), p.profitPerUnit >= 0 ? 'pa-positive' : 'pa-bad'),
@@ -1819,7 +1849,7 @@ function recipeProfitabilityCard(store, recipe, linkedProduct = null) {
           line('Margem no preço praticado', pctStr(practicedProfit / practiced), practicedProfit >= 0 ? 'pa-positive' : 'pa-bad'),
         ] : []),
       ]),
-      el('span', { class: 'pa-muted', text: `Valores recalculados conforme a margem digitada. Taxas de pagamento e comissão (${pctStr(p.salesRate)}) já descontadas do lucro. Mão de obra direta é apenas indicador, pois salários estão nos custos fixos.` }),
+      el('span', { class: 'pa-muted', text: `Valores recalculados conforme a margem e os percentuais digitados. Taxa, comissão e imposto (${pctStr(p.salesRate)}) já descontados do lucro. Mão de obra direta é apenas indicador, pois salários estão nos custos fixos.` }),
     ]);
   } catch (e) { return el('p', { class: 'pa-hint', text: `Confira os custos para ver o resultado: ${friendlyError(e)}` }); }
 }
@@ -2031,10 +2061,12 @@ function vendaSheet(ctx) {
     if (!p || !(q > 0) || up == null || discountValue > q * up + 0.005) { discount.input.focus(); return; }
     let cost = 0;
     try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
+    const rates = effectiveSalesRates(p, config);
     const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
     ctx.actions.mutate((s) => s.addSale({
       id: uuid(), at, productId: p.id, qty: q, unitPrice: up, discount: discountValue || undefined,
-      paymentFeePct: config.paymentFeePct, commissionPct: config.commissionPct || 0, costSnapshot: cost,
+      paymentFeePct: rates.paymentFeePct, commissionPct: rates.commissionPct,
+      salesTaxPct: rates.salesTaxPct, costSnapshot: cost,
       ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
     }));
   }
@@ -4510,7 +4542,8 @@ function simuladorBody(ctx, recipe, config) {
   }
   const registeredExtras = Math.max(0, registeredProductCost - baseRecipeCost * recipeQty);
 
-  const salesRate = (Number(config.paymentFeePct) || 0) + (Number(config.commissionPct) || 0);
+  const rates = effectiveSalesRates(product || recipe, config);
+  const salesRate = rates.total;
   const fmtHora = (v) => (v == null ? '—' : brl(v));
   const factor = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-factor', type: 'text', inputmode: 'decimal', value: '1,5' });
   const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-production', type: 'text', inputmode: 'numeric', value: String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) });
@@ -4520,7 +4553,7 @@ function simuladorBody(ctx, recipe, config) {
   const initialMargin = product?.targetMarginPct ?? recipe.targetMarginPct ?? config.targetMarginPct;
   const targetMargin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-margin', type: 'text', inputmode: 'decimal', value: String(pct(initialMargin)).replace('.', ',') });
   const initialPrice = product && product.salePrice != null && product.salePrice !== ''
-    ? Number(product.salePrice) : priceFromCost(registeredProductCost, { ...config, targetMarginPct: initialMargin });
+    ? Number(product.salePrice) : priceFromCost(registeredProductCost, { ...config, ...rates, targetMarginPct: initialMargin });
   const price = moneyField(initialPrice, 'sim-price');
   const results = el('div', { 'data-testid': 'sim-results' });
   // Capture the registered scenario once. Inputs below belong only to the simulated column.
@@ -4783,10 +4816,10 @@ function settingsHelperSheet(ctx, key) {
     if (calculated == null || !Number.isFinite(calculated) || calculated < 0) { Object.values(inputs)[0].focus(); return; }
     const stored = spec.percent ? calculated / 100 : calculated;
     const current = ctx.store.getConfig();
-    const otherRates = ['targetMarginPct', 'paymentFeePct', 'commissionPct']
+    const otherRates = ['targetMarginPct', 'paymentFeePct', 'commissionPct', 'salesTaxPct']
       .filter((rateKey) => rateKey !== spec.configKey)
       .reduce((sum, rateKey) => sum + (Number(current[rateKey]) || 0), 0);
-    if (spec.percent && stored + otherRates >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado à margem, à taxa de pagamento e à comissão.'); return; }
+    if (spec.percent && stored + otherRates >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado à margem, à taxa, à comissão e ao imposto sobre a venda.'); return; }
     const entered = Object.fromEntries(Object.entries(inputs).map(([fieldKey, input]) => [fieldKey, input.value.trim()]));
     ctx.actions.mutate((store) => store.setConfig({
       [spec.configKey]: stored,
@@ -4812,7 +4845,7 @@ function ajustesPanel(ctx) {
   function save() {
     const labels = {
       valorHora: 'valor da hora', taxaGas: 'gás por minuto', custosFixosMes: 'custos fixos',
-      expected: 'minutos de produção', margin: 'margem', fee: 'taxa de pagamento', commission: 'comissão',
+      expected: 'minutos de produção', margin: 'margem', fee: 'taxa de pagamento', commission: 'comissão', salesTax: 'imposto sobre a venda',
     };
     for (const [key, label] of Object.entries(labels)) {
       if (!Object.hasOwn(draft, key)) continue;
@@ -4831,12 +4864,13 @@ function ajustesPanel(ctx) {
       targetMarginPct: (parseNum(f.margin.value) ?? pct(c.targetMarginPct)) / 100,
       paymentFeePct: (parseNum(f.fee.value) ?? pct(c.paymentFeePct)) / 100,
       commissionPct: (parseNum(f.commission.value) ?? pct(c.commissionPct || 0)) / 100,
+      salesTaxPct: (parseNum(f.salesTax.value) ?? pct(c.salesTaxPct || 0)) / 100,
     };
-    const keys = { valorHora: 'valorHora', taxaGas: 'taxaGas', custosFixosMes: 'custosFixosMes', expected: 'expectedProductionMinutesMonth', margin: 'targetMarginPct', fee: 'paymentFeePct', commission: 'commissionPct' };
+    const keys = { valorHora: 'valorHora', taxaGas: 'taxaGas', custosFixosMes: 'custosFixosMes', expected: 'expectedProductionMinutesMonth', margin: 'targetMarginPct', fee: 'paymentFeePct', commission: 'commissionPct', salesTax: 'salesTaxPct' };
     const changed = Object.fromEntries(Object.entries(keys).filter(([inputKey]) => Object.hasOwn(draft, inputKey)).map(([inputKey, configKey]) => [configKey, next[configKey]]));
     const prospective = { ...store.getConfig(), ...changed };
-    if (prospective.targetMarginPct + prospective.paymentFeePct + prospective.commissionPct >= 1) {
-      window.alert('Margem, taxa de pagamento e comissão precisam somar menos de 100%.');
+    if (prospective.targetMarginPct + prospective.paymentFeePct + prospective.commissionPct + (prospective.salesTaxPct || 0) >= 1) {
+      window.alert('Margem, taxa de pagamento, comissão e imposto sobre a venda precisam somar menos de 100%.');
       return;
     }
     ctx.view.settingsDraft = null;
@@ -4872,6 +4906,7 @@ function ajustesPanel(ctx) {
           field('margin', 'Margem alvo (%)', pct(c.targetMarginPct), null, 'margin'),
           field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct), null, 'fee'),
           field('commission', 'Comissão sobre vendas (%)', pct(c.commissionPct || 0), 'Entra na formação do preço da mesma forma que a taxa de pagamento.', 'commission'),
+          field('salesTax', 'Imposto proporcional sobre a venda (%)', pct(c.salesTaxPct || 0), 'Use apenas quando incidir sobre o faturamento. O DAS do MEI já está nos custos fixos acima.'),
           el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar e usar valores manuais')]),
         ]),
         el('aside', { class: 'pa-settings-column pa-auto-card', 'data-testid': 'automatic-settings' }, [
@@ -4880,7 +4915,7 @@ function ajustesPanel(ctx) {
           ...autoRows,
           el('div', { class: 'pa-auto-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: 'Taxa financeira observada' }), el('span', { class: 'pa-muted', text: 'tarifas ÷ recebimentos; apenas comparação' })]), el('strong', { class: automatic.observedFeePct == null ? 'pa-muted' : '', text: automatic.observedFeePct == null ? 'dados insuficientes' : pctStr(automatic.observedFeePct) })]),
           el('button', { class: 'pa-btn pa-primary', 'data-testid': 'apply-automatic-settings', disabled: Object.keys(applicable).length === 0, onclick: applyAutomatic }, 'Adotar valores calculados na precificação'),
-          el('p', { class: 'pa-hint', text: 'Este botão substitui apenas os valores calculáveis acima: custo fixo mensal, gás, tempo de produção e valor da hora (indicador). A margem, a taxa de pagamento e a comissão continuam como você salvou à esquerda.' }),
+          el('p', { class: 'pa-hint', text: 'Este botão substitui apenas os valores calculáveis acima: custo fixo mensal, gás, tempo de produção e valor da hora (indicador). A margem, a taxa de pagamento, a comissão e o imposto sobre a venda continuam como você salvou à esquerda.' }),
         ]),
       ]),
     ]),
