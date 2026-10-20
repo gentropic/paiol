@@ -16,14 +16,26 @@ export function bundleKindLabel(product) {
   return ({ cesta: 'Cesta', kit: 'Kit', combo: 'Combo' })[productSaleKind(product)] || 'Produto';
 }
 
-/** Catalog composition of one bundle; orders copy it so later catalog edits keep history intact. */
+/** Legacy catalog composition, retained only to read older records. New bundles have no fixed contents. */
 export function bundleProductItems(product) {
   return (product?.components || []).filter((component) => component.kind === 'product' && component.id && Number(component.qty) > 0)
     .map((component) => ({ productId: component.id, qty: Number(component.qty) }));
 }
 
 export function orderItemGross(item) {
-  return Math.max(0, Number(item?.qty) || 0) * Math.max(0, Number(item?.unitPrice) || 0);
+  const contents = (item?.bundleItems || []).reduce((sum, child) => sum + Math.max(0, Number(child.qty) || 0) * Math.max(0, Number(child.unitPrice) || 0), 0);
+  return Math.max(0, Number(item?.qty) || 0) * (Math.max(0, Number(item?.unitPrice) || 0) + contents);
+}
+
+/** Financial/report lines. A set counts once as a set; its contents also count as sold products. */
+export function orderItemSaleLines(item) {
+  const parentQty = Math.max(0, Number(item?.qty) || 0);
+  const lines = [{ productId: item?.productId, qty: parentQty, total: parentQty * Math.max(0, Number(item?.unitPrice) || 0) }];
+  for (const child of item?.bundleItems || []) {
+    const qty = parentQty * Math.max(0, Number(child.qty) || 0);
+    if (child.productId && qty > 0) lines.push({ productId: child.productId, qty, total: qty * Math.max(0, Number(child.unitPrice) || 0) });
+  }
+  return lines;
 }
 
 export function saleNet(sale) {

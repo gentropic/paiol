@@ -81,10 +81,10 @@
  */
 
 /**
- * Produto — what is actually sold. A product is a bill of materials (cestas/kits/combos), so it
- * may roll up recipes, other products, and bought ingredients. A simple one-recipe product is
- * just a single `recipe` component. For a kit/cesta, `product` components are the default items
- * per set, while `ingredient` components are physical packaging/details. Cost includes both.
+ * Produto — what is actually sold. A simple one-recipe product has one `recipe` component.
+ * A kit/cesta catalog product represents its fixed packaging: `ingredient` components are the
+ * physical box, flowers and details. Its chosen internal products and their prices are stored
+ * on each EncomendaItem, because the composition changes for every customer.
  * @typedef {object} Product
  * @property {string}             id
  * @property {string}             name          // "Bolo de cenoura — 500 g", "Cesta de Natal"
@@ -124,7 +124,7 @@
  * @property {string} productId
  * @property {number} qty
  * @property {number} unitPrice    // sale price charged per unit (defaults to the suggested price)
- * @property {Array<{productId:string,qty:number}>} [bundleItems] // products inside each cesta/kit/combo
+ * @property {Array<{productId:string,qty:number,unitPrice:number}>} [bundleItems] // products and snapshotted prices chosen for this order's cesta/kit/combo
  */
 
 /**

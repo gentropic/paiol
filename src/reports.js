@@ -13,7 +13,7 @@
 
 import { estimateLens, productUnitCost, effectiveSalesRates } from './cost-engine.js';
 import { managerialDre } from './dre.js';
-import { isBundleProduct, orderItemUnitCost, saleNet } from './bundles.js';
+import { isBundleProduct, orderItemGross, orderItemSaleLines, saleNet } from './bundles.js';
 import { titleState } from './finance.js';
 
 const ym = (iso) => String(iso || '').slice(0, 7); // 'YYYY-MM'
@@ -157,7 +157,7 @@ export function productSummary(store, month) {
   }
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt || ym(e.deliveryDate) !== month) continue;
-    for (const it of e.itens || []) add(it.productId, it.qty || 0, (it.qty || 0) * (it.unitPrice || 0));
+    for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) add(line.productId, line.qty, line.total);
   }
   return [...map.entries()].map(([id, e]) => ({
     id, name: store.get('products', id)?.name || '(produto removido)',
@@ -248,13 +248,14 @@ export function businessPeriodSummary(store, start, end) {
     if (productCosts.has(id)) return productCosts.get(id);
     let value = null;
     const product = store.get('products', id);
-    try { if ((product?.components || []).length) value = productUnitCost(es, id, config, lens); } catch { /* incomplete technical sheet */ }
+    try { if ((product?.components || []).length || Number(product?.packagingCost) > 0) value = productUnitCost(es, id, config, lens); } catch { /* incomplete technical sheet */ }
     productCosts.set(id, value); return value;
   };
   // Only active catalog items count as "without sales". An inactive item is still added below if
   // it has a historical sale in this period, preserving the truth of past reports and rankings.
   const products = new Map(store.state.products.filter((p) => p.active !== false).map((p) => [p.id, { id: p.id, name: p.name, qty: 0, revenue: 0, cost: 0, fees: 0, costKnown: true }]));
   const clients = new Map();
+  let basketRevenue = 0;
   const addProduct = (id, qty, revenue, feePct, costOverride = null) => {
     const product = store.get('products', id);
     const row = products.get(id) || { id, name: product?.name || '(produto removido)', qty: 0, revenue: 0, cost: 0, fees: 0, costKnown: true };
@@ -267,6 +268,7 @@ export function businessPeriodSummary(store, start, end) {
     if (store.isReversed('sale', sale.id) || !inPeriod(sale.at, start, end)) continue;
     const gross = (Number(sale.qty) || 0) * (Number(sale.unitPrice) || 0);
     const rates = effectiveSalesRates(store.get('products', sale.productId), config);
+    if (isBundleProduct(store.get('products', sale.productId))) basketRevenue += saleNet(sale);
     addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)),
       (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? 0));
   }
@@ -275,12 +277,13 @@ export function businessPeriodSummary(store, start, end) {
     const clientId = order.clienteId || '__sem__';
     const client = clients.get(clientId) || { id: clientId, orders: 0, total: 0 };
     client.orders += 1; client.total += Number(order.total) || 0; clients.set(clientId, client);
-    const itemGross = (order.itens || []).reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.unitPrice) || 0), 0);
+    const itemGross = (order.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
     const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(order.discount) || 0)) / itemGross : 1;
-    for (const item of order.itens || []) {
-      const rates = effectiveSalesRates(store.get('products', item.productId), config);
-      addProduct(item.productId, item.qty, (Number(item.qty) || 0) * (Number(item.unitPrice) || 0) * discountFactor, rates.total, orderItemUnitCost(store, item, unitCost));
+    for (const item of order.itens || []) for (const line of orderItemSaleLines(item)) {
+      const rates = effectiveSalesRates(store.get('products', line.productId), config);
+      addProduct(line.productId, line.qty, line.total * discountFactor, rates.total);
     }
+    for (const item of order.itens || []) if (isBundleProduct(store.get('products', item.productId))) basketRevenue += orderItemGross(item) * discountFactor;
   }
   const productRows = [...products.values()].map((row) => {
     const profit = row.costKnown ? row.revenue - row.cost - row.fees : null;
@@ -300,7 +303,7 @@ export function businessPeriodSummary(store, start, end) {
     worstMarginProduct: marginKnown[marginKnown.length - 1] || null,
     baskets,
     basketQty: baskets.reduce((sum, p) => sum + p.qty, 0),
-    basketRevenue: baskets.reduce((sum, p) => sum + p.revenue, 0),
+    basketRevenue,
     productsWithoutSales: productRows.filter((p) => p.qty <= 0).length,
     soldProducts: sold,
     clients: clientRows,
@@ -369,7 +372,7 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
   for (const row of rows) {
     addClient(row.clientId, row.total, row.received, row.pending);
     if (row.kind === 'encomenda') {
-      for (const it of row.order.itens || []) addProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
+      for (const it of row.order.itens || []) for (const line of orderItemSaleLines(it)) addProduct(line.productId, line.qty, line.total);
     } else addProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
   }
 

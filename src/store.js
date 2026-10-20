@@ -7,7 +7,7 @@
 
 import { indexStore } from './cost-engine.js';
 import { toYaml, fromYaml } from './yaml-bridge.js';
-import { orderProduction } from './bundles.js';
+import { isBundleProduct, orderProduction } from './bundles.js';
 
 export const SCHEMA_VERSION = 4;
 
@@ -129,6 +129,9 @@ export class PaiolStore {
       // One-time compatibility for existing catalogs. From now on the type is stored explicitly,
       // so renaming a product never changes its dashboard classification.
       if (!p.saleKind) Object.assign(p, normalizeProductSaleKind(p));
+      // Cestas e kits têm embalagem fixa, mas os produtos internos são escolhidos em cada pedido.
+      // Os pedidos antigos já guardam sua própria composição em bundleItems.
+      if (isBundleProduct(p)) p.components = p.components.filter((c) => c.kind !== 'product');
     }
     // Read-model memo (§perf): the UI re-renders the whole panel on every action and looks records
     // up per-row, so id/price scans must be O(1). `_rev` bumps on every mutation; the lazily-built
@@ -207,7 +210,14 @@ export class PaiolStore {
   /** @param {import('./domain.js').Recipe} x */
   upsertRecipe(x) { return this._upsert('recipes', x); }
   /** @param {import('./domain.js').Product} x */
-  upsertProduct(x) { return this._upsert('products', { ...normalizeProductSaleKind(x), updatedAt: new Date().toISOString() }); }
+  upsertProduct(x) {
+    const product = normalizeProductSaleKind(x);
+    return this._upsert('products', {
+      ...product,
+      components: isBundleProduct(product) ? (product.components || []).filter((c) => c.kind !== 'product') : product.components,
+      updatedAt: new Date().toISOString(),
+    });
+  }
   /** @param {import('./domain.js').Cliente} x */
   upsertClient(x) { return this._upsert('clients', x); }
   /** @param {object} x */
