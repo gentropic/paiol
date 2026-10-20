@@ -1864,21 +1864,16 @@ function vendasPanel(ctx) {
   }
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
 
-  const productDetailRows = (productId) => visibleRows.filter((row) => row.kind === 'sale'
-    ? row.sale.productId === productId
-    : (row.order.itens || []).some((it) => it.productId === productId)).map((row) => {
+  const detailRows = visibleRows.map((row) => {
     if (row.kind === 'sale') return saleRow(ctx, row.sale);
     const enc = row.order;
     const cli = enc.clienteId ? store.get('clients', enc.clienteId) : null;
-    const matching = (enc.itens || []).filter((it) => it.productId === productId);
-    const qty = matching.reduce((sum, it) => sum + (Number(it.qty) || 0), 0);
-    const total = matching.reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
     return el('li', { class: 'pa-row-item', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: enc.id }) }, [
       el('div', { class: 'pa-grow' }, [
         el('div', { class: 'pa-enc-title' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: enc.entregue ? 'pa-badge pa-ok' : 'pa-badge', text: enc.entregue ? 'entregue' : 'não entregue' }), el('span', { class: row.paid ? 'pa-badge pa-ok' : 'pa-badge pa-warn', text: row.paid ? 'recebido' : 'a receber' })]),
-        el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} · ${fmtNum(qty)} un` }),
+        el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} · ${encomendaItemsResumo(store, enc)}` }),
       ]),
-      el('strong', { class: 'pa-num', text: brl(total) }),
+      el('strong', { class: 'pa-num', text: brl(rowMetrics(row).total) }),
       el('span', { class: 'pa-chev', text: '›' }),
     ]);
   });
@@ -1911,11 +1906,10 @@ function vendasPanel(ctx) {
         ])
       : el('div', {}, [
           el('div', { class: 'pa-statgrid' }, [statCard('Total vendido', brl(filteredTotals.total), 'navy'), statCard('Recebido', brl(filteredTotals.received), 'ok'), statCard('Pendente', brl(filteredTotals.pending), filteredTotals.pending > 0.005 ? 'warn' : 'soft')]),
+          filteredProducts.length > 0 && el('h3', { class: 'pa-h3', text: 'Produtos vendidos' }),
+          filteredProducts.length > 0 && el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { class: 'pa-num', text: brl(p.total) })]))),
           el('h3', { class: 'pa-h3', text: 'Vendidos no período' }),
-          filteredProducts.length ? el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('details', { class: 'pa-sold-group' }, [
-            el('summary', { class: 'pa-preview-line' }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { class: 'pa-num', text: brl(p.total) })]),
-            el('ul', { class: 'pa-list pa-rows' }, productDetailRows(p.id)),
-          ]))) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
+          detailRows.length ? el('ul', { class: 'pa-list pa-rows' }, detailRows) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
         ]),
   ].filter(Boolean));
 }
