@@ -83,7 +83,8 @@
 /**
  * Produto — what is actually sold. A product is a bill of materials (cestas/kits/combos), so it
  * may roll up recipes, other products, and bought ingredients. A simple one-recipe product is
- * just a single `recipe` component. Cost = sum of components + packaging.
+ * just a single `recipe` component. For a kit/cesta, `product` components are the default items
+ * per set, while `ingredient` components are physical packaging/details. Cost includes both.
  * @typedef {object} Product
  * @property {string}             id
  * @property {string}             name          // "Bolo de cenoura — 500 g", "Cesta de Natal"

@@ -16,6 +16,12 @@ export function bundleKindLabel(product) {
   return ({ cesta: 'Cesta', kit: 'Kit', combo: 'Combo' })[productSaleKind(product)] || 'Produto';
 }
 
+/** Catalog composition of one bundle; orders copy it so later catalog edits keep history intact. */
+export function bundleProductItems(product) {
+  return (product?.components || []).filter((component) => component.kind === 'product' && component.id && Number(component.qty) > 0)
+    .map((component) => ({ productId: component.id, qty: Number(component.qty) }));
+}
+
 export function orderItemGross(item) {
   return Math.max(0, Number(item?.qty) || 0) * Math.max(0, Number(item?.unitPrice) || 0);
 }
@@ -43,15 +49,22 @@ export function orderNet(order) {
  */
 export function orderItemUnitCost(store, item, unitCost) {
   const parent = store.get('products', item.productId);
-  const parentCost = isBundleProduct(parent) && !(parent?.components || []).length ? 0 : unitCost(item.productId);
+  const parentCost = unitCost(item.productId);
   if (parentCost == null) return null;
   let total = Number(parentCost) || 0;
+  // The catalog cost includes its standard products. Replace those with the composition
+  // saved on this particular order, which may have been customized at the time of sale.
+  if (isBundleProduct(parent)) for (const child of bundleProductItems(parent)) {
+    const childCost = unitCost(child.productId);
+    if (childCost == null) return null;
+    total -= child.qty * (Number(childCost) || 0);
+  }
   for (const child of item.bundleItems || []) {
     const childCost = unitCost(child.productId);
     if (childCost == null) return null;
     total += (Number(child.qty) || 0) * (Number(childCost) || 0);
   }
-  return total;
+  return Math.max(0, total);
 }
 
 /**

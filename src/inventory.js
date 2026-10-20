@@ -1,4 +1,5 @@
 import { convert } from './units.js';
+import { isBundleProduct } from './bundles.js';
 
 const add = (target, source, factor = 1) => {
   for (const [id, qty] of source) target.set(id, (target.get(id) || 0) + qty * factor);
@@ -41,7 +42,9 @@ export function productIngredientUsage(store, productId, stack = new Set()) {
   for (const component of product.components || []) {
     const qty = Number(component.qty) || 0;
     if (component.kind === 'recipe') add(result, recipeIngredientUsage(store, component.id), qty);
-    else if (component.kind === 'product') add(result, productIngredientUsage(store, component.id, stack), qty);
+    // Bundle children appear as separate produced rows in the comanda. Only its physical
+    // packaging/details are consumed on the parent row, preventing duplicate stock usage.
+    else if (component.kind === 'product' && !isBundleProduct(product)) add(result, productIngredientUsage(store, component.id, stack), qty);
     else if (component.kind === 'ingredient') result.set(component.id, (result.get(component.id) || 0) + qty);
   }
   stack.delete(productId);

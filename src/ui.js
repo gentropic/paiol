@@ -19,7 +19,7 @@ import { clientFinancialStatement } from './client-statement.js';
 import { managerialDre } from './dre.js';
 import { inventorySummary, ingredientInventory } from './inventory.js';
 import { APP_VERSION } from './config.js';
-import { productSaleKind, isBundleProduct, bundleKindLabel, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
+import { productSaleKind, isBundleProduct, bundleKindLabel, bundleProductItems, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
 import { findOpenOrderForClientDate, addOrAppendOrder } from './orders.js';
 
 const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
@@ -933,7 +933,7 @@ function produtosPanel(ctx) {
       el('h2', { class: 'pa-grow', text: 'Produtos' }),
       el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'prod-new', onclick: () => ctx.actions.openModal({ kind: 'produto-add' }) }, '+ Novo'),
     ]),
-    el('p', { class: 'pa-hint', text: 'Mantenha aqui todo o seu catálogo. Somente produtos ativos aparecem em novas vendas, encomendas, comandas avulsas e estimativas; ingredientes, embalagem e rentabilidade ficam em Receitas.' }),
+    el('p', { class: 'pa-hint', text: 'Mantenha aqui todo o seu catálogo. Cadastre também cestas, kits e combos com seus produtos internos e materiais de montagem. Somente produtos ativos aparecem em novas vendas, encomendas e comandas.' }),
     store.state.products.length === 0
       ? el('p', { class: 'pa-empty', text: 'Nenhum produto ainda.' })
       : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um produto para editar nome, unidade/peso e valor de venda.' }), searchInput('Buscar produto…', list, 'prod-search'), list]),
@@ -954,6 +954,7 @@ function produtoRow(ctx, product) {
     el('div', { class: 'pa-grow' }, [
       el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), isBundleProduct(product) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })].filter(Boolean)),
       el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} · ${savedSalePrice ? 'venda' : 'sugerido'} ${brl(sellingPrice(store, product.id))}` }),
+      isBundleProduct(product) && bundleProductItems(product).length > 0 && el('span', { class: 'pa-muted', text: bundleProductItems(product).map((item) => `${fmtNum(item.qty)}× ${store.get('products', item.productId)?.name || '(produto removido)'}`).join(' · ') }),
       semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem preço' }),
       tagChips(product.tags),
     ].filter(Boolean)),
@@ -978,6 +979,7 @@ function produtoSheet(ctx, product) {
   activeChk.checked = product ? productIsActive(product) : true;
   const linkedRecipe = product ? store.state.recipes.find((r) => (product.components || []).some((c) => c.kind === 'recipe' && c.id === r.id)) : null;
   const packagingItems = product ? (product.components || []).filter((c) => c.kind === 'ingredient').map((c) => ({ id: c.id, qty: Number(c.qty) || 0 })) : [];
+  const bundleItems = product ? bundleProductItems(product) : [];
   const packagingBox = el('div', { class: 'pa-detail-card' });
   const packagingList = el('ul', { class: 'pa-list pa-tight' });
   const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
@@ -989,7 +991,29 @@ function produtoSheet(ctx, product) {
   const addPackaging = () => { const q = parseNum(packagingQty.value); if (!packagingIngredient.value || !(q > 0)) { packagingQty.focus(); return; } const current = packagingItems.find((item) => item.id === packagingIngredient.value); if (current) current.qty += q; else packagingItems.push({ id: packagingIngredient.value, qty: q }); packagingQty.value = ''; renderPackaging(); };
   packagingBox.append(el('p', { class: 'pa-hint', text: 'Opcional: informe cesta, caixa, laço, cartão ou outro insumo físico consumido em cada conjunto. O estoque baixa quando a montagem for registrada na comanda.' }), packagingList, store.state.ingredients.length ? el('div', { class: 'pa-row pa-form' }, [packagingIngredient, packagingQty, el('button', { class: 'pa-btn pa-sm', 'data-testid': 'prod-bundle-insumo-add', onclick: addPackaging }, '+ detalhe')]) : el('p', { class: 'pa-hint', text: 'Cadastre as embalagens em Insumos para vinculá-las aqui.' }));
   renderPackaging();
-  const reconcileKind = () => { packagingBox.style.display = saleKind.value === 'normal' ? 'none' : ''; };
+  const bundleBox = el('div', { class: 'pa-detail-card', 'data-testid': 'prod-bundle-composition' });
+  const bundleList = el('ul', { class: 'pa-list pa-tight' });
+  const bundleSearch = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do produto para incluir…', 'data-testid': 'prod-bundle-search' });
+  const bundleSuggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:240px;overflow-y:auto' });
+  const renderBundle = () => bundleList.replaceChildren(...(bundleItems.length ? bundleItems.map((item, index) => {
+    const child = store.get('products', item.productId);
+    const quantity = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(item.qty), 'aria-label': `Quantidade de ${child?.name || 'produto'}` });
+    quantity.addEventListener('input', () => { item.qty = parseNum(quantity.value) || 0; });
+    return el('li', { class: 'pa-list-item' }, [quantity, el('span', { class: 'pa-grow', text: child?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', title: 'Retirar do conjunto', onclick: () => { bundleItems.splice(index, 1); renderBundle(); } }, '✕')]);
+  }) : [el('li', { class: 'pa-empty pa-sm', text: 'Adicione os produtos que compõem uma cesta, kit ou combo.' })]));
+  bundleSearch.addEventListener('input', () => {
+    const query = norm(bundleSearch.value);
+    const matches = query ? store.state.products.filter((child) => child.id !== product?.id && productIsActive(child) && !isBundleProduct(child) && norm(child.name).includes(query)).slice(0, 8) : [];
+    bundleSuggestions.replaceChildren(...matches.map((child) => el('li', { class: 'pa-row-item', 'data-testid': 'prod-bundle-result', onclick: () => {
+      const existing = bundleItems.find((item) => item.productId === child.id);
+      if (existing) existing.qty += 1; else bundleItems.push({ productId: child.id, qty: 1 });
+      bundleSearch.value = ''; bundleSuggestions.style.display = 'none'; renderBundle();
+    } }, [el('strong', { class: 'pa-grow', text: child.name }), el('span', { class: 'pa-add', text: '+' })])));
+    bundleSuggestions.style.display = matches.length ? '' : 'none';
+  });
+  renderBundle();
+  bundleBox.append(el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), el('p', { class: 'pa-hint', text: 'Cadastre a composição padrão uma única vez. Ela virá preenchida nas encomendas e na comanda.' }), bundleList, bundleSearch, bundleSuggestions);
+  const reconcileKind = () => { const visible = saleKind.value !== 'normal'; packagingBox.style.display = visible ? '' : 'none'; bundleBox.style.display = visible ? '' : 'none'; };
   saleKind.addEventListener('change', reconcileKind); reconcileKind();
 
   function save() {
@@ -997,9 +1021,10 @@ function produtoSheet(ctx, product) {
     const q = parseNum(saleQty.value);
     const price = parseNum(salePrice.input.value);
     if (!nm || !(q > 0) || price == null || price < 0) { (nm ? saleQty : name).focus(); return; }
+    if (saleKind.value !== 'normal' && (!bundleItems.length || bundleItems.some((item) => !(item.qty > 0)))) { window.alert('Adicione os produtos e suas quantidades para formar o conjunto.'); bundleSearch.focus(); return; }
     const components = saleKind.value === 'normal'
-      ? (product ? (product.components || []) : [])
-      : packagingItems.map((item) => ({ kind: 'ingredient', id: item.id, qty: item.qty }));
+      ? (product ? (isBundleProduct(product) ? (product.components || []).filter((component) => component.kind === 'recipe') : (product.components || [])) : [])
+      : [...packagingItems.map((item) => ({ kind: 'ingredient', id: item.id, qty: item.qty })), ...bundleItems.map((item) => ({ kind: 'product', id: item.productId, qty: item.qty }))];
     ctx.actions.mutate((s) => s.upsertProduct({
       ...(product || {}), id: product ? product.id : uuid(), name: nm,
       components, packagingCost: product?.packagingCost || 0,
@@ -1010,16 +1035,17 @@ function produtoSheet(ctx, product) {
   const rows = [
     field('Nome', name),
     field('Tipo para venda e Dashboard', saleKind),
-    el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para o sistema contar o conjunto no indicador correto e pedir os produtos internos ao lançar a encomenda.' }),
+    el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para contar o conjunto como um produto vendido. Cadastre os produtos internos abaixo; eles virão prontos na encomenda.' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Unidade ou peso vendido' }), saleQty, saleUnit]),
     field('Valor de venda', salePrice),
     product && (product.salePrice == null || product.salePrice === '') && el('p', { class: 'pa-hint', text: 'Este valor foi sugerido automaticamente. Ajuste se necessário e salve o produto para defini-lo como preço de venda praticado.' }),
+    bundleBox,
     packagingBox,
     el('label', { class: 'pa-check' }, [activeChk, el('span', { text: 'Ativo para venda' })]),
     el('p', { class: 'pa-hint', text: 'Se desativado, permanece cadastrado e ligado à receita, mas não aparece em novas vendas, encomendas, comandas avulsas ou estimativas.' }),
     linkedRecipe
       ? el('p', { class: 'pa-callout', text: `Ficha técnica relacionada: ${linkedRecipe.name}. Altere ingredientes, embalagem e margem no cadastro de Receitas.` })
-      : el('p', { class: 'pa-hint', text: 'Depois, em Receitas, você pode relacionar uma ficha técnica a este produto para calcular custo e rentabilidade.' }),
+      : el('p', { class: 'pa-hint', text: 'Para produtos comuns, a ficha técnica fica em Receitas. Para cestas, kits e combos, o custo dos produtos internos e dos materiais cadastrados acima compõe o custo do conjunto.' }),
   ];
 
   return sheet({
@@ -1475,7 +1501,7 @@ function comandaBundleSheet(ctx, modal) {
   const { store } = ctx; const product = store.get('products', modal.productId);
   if (!product || !isBundleProduct(product)) return sheet({ title: 'Conjunto não encontrado', rows: [] });
   const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: fmtNum(modal.qty || 1) });
-  const children = [];
+  const children = bundleProductItems(product);
   const itemsBox = el('div', { class: 'pa-detail-card' });
   const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== product.id);
   const render = () => {
@@ -1501,7 +1527,7 @@ function comandaBundleSheet(ctx, modal) {
     }
     ctx.actions.mutate((s) => s.upsertComanda({ id: modal.date, date: modal.date, itens: [...byId.values()] }));
   }
-  return sheet({ title: `Adicionar ${bundleKindLabel(product)} à comanda`, rows: [el('div', { class: 'pa-callout' }, [el('strong', { text: product.name }), el('span', { text: ` · ${fmtDate(`${modal.date}T12:00:00`)}` })]), field(`Quantidade de ${bundleKindLabel(product).toLowerCase()}s`, bundleQty), el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), itemsBox, el('p', { class: 'pa-hint', text: 'Aqui você planeja apenas a produção. Para registrar cliente, preço, desconto e valor a receber, crie uma Encomenda.' })], onSave: save, saveTestid: 'cmd-bundle-save' });
+  return sheet({ title: `Adicionar ${bundleKindLabel(product)} à comanda`, rows: [el('div', { class: 'pa-callout' }, [el('strong', { text: product.name }), el('span', { text: ` · ${fmtDate(`${modal.date}T12:00:00`)}` })]), field(`Quantidade de ${bundleKindLabel(product).toLowerCase()}s`, bundleQty), el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), el('p', { class: 'pa-hint', text: 'A composição padrão do cadastro já está preenchida. Você pode ajustá-la somente para esta produção.' }), itemsBox, el('p', { class: 'pa-hint', text: 'Aqui você planeja apenas a produção. Para registrar cliente, preço, desconto e valor a receber, crie uma Encomenda.' })], onSave: save, saveTestid: 'cmd-bundle-save' });
 }
 
 function comandaPeriodPanel(ctx) {
@@ -1884,13 +1910,20 @@ function vendasPanel(ctx) {
   const { vendaStart: start, vendaEnd: end, vendaStatus: status, vendaProductIds: requestedProductIds, vendaClientId: requestedClientId } = ctx.view;
   const productIds = [...new Set(Array.isArray(requestedProductIds) ? requestedProductIds : [])].filter((id) => products.some((p) => p.id === id));
   const hasProductFilter = productIds.length > 0;
+  const productKind = ['normal', 'cesta', 'kit', 'combo'].includes(ctx.view.vendaProductKind) ? ctx.view.vendaProductKind : '';
+  const hasItemFilter = hasProductFilter || Boolean(productKind);
+  const matchesProduct = (id) => (!hasProductFilter || productIds.includes(id)) && (!productKind || productSaleKind(store.get('products', id)) === productKind);
   const clientId = requestedClientId === '__sem__' || store.state.clients.some((c) => c.id === requestedClientId) ? requestedClientId : '';
   const report = salesPeriodSummary(store, start, end, status);
   const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), 'data-testid': `venda-f-${key}`, onclick: () => ctx.actions.setVendaPeriod({ vendaStatus: key }) }, label);
   const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setVendaPeriod({ vendaStart: s, vendaEnd: e }), 'venda');
   const productFilter = el('details', { 'data-testid': 'venda-product-filter' });
   const stagedProductIds = new Set(productIds);
-  const productChoices = products.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
+  const productChoices = products.filter((p) => !productKind || productSaleKind(p) === productKind).sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
+  const kindFilter = el('select', { class: 'pa-input', 'data-testid': 'venda-kind-filter' }, [
+    ['', 'Todos os tipos'], ['cesta', 'Cestas'], ['kit', 'Kits'], ['combo', 'Combos'], ['normal', 'Produtos comuns'],
+  ].map(([value, label]) => el('option', { value, text: label, ...(productKind === value ? { selected: 'selected' } : {}) })));
+  kindFilter.addEventListener('change', () => ctx.actions.setVendaPeriod({ vendaProductKind: kindFilter.value, vendaProductIds: [] }));
   const productSummary = el('summary', { class: 'pa-input', style: 'cursor:pointer', text: hasProductFilter ? `${productIds.length} produto(s) selecionado(s)` : 'Todos os produtos' });
   const productSearch = el('input', { class: 'pa-input', type: 'search', placeholder: 'Digite para localizar um produto…', 'aria-label': 'Buscar produto no filtro' });
   const productOptions = el('div', { style: 'max-height:240px;overflow-y:auto;margin:8px 0' });
@@ -1942,14 +1975,14 @@ function vendasPanel(ctx) {
     clientFilter.append(clientSearch, suggestions);
   }
 
-  const hasSelectedProduct = (row) => !hasProductFilter || (row.kind === 'sale'
-    ? productIds.includes(row.sale.productId)
-    : (row.order.itens || []).some((it) => productIds.includes(it.productId)));
+  const hasSelectedProduct = (row) => !hasItemFilter || (row.kind === 'sale'
+    ? matchesProduct(row.sale.productId)
+    : (row.order.itens || []).some((it) => matchesProduct(it.productId)));
   const visibleRows = report.rows.filter((row) => (row.kind === 'sale' || row.order.entregue) && (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
   const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
   const rowMetrics = (row) => {
-    if (!hasProductFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
-    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).filter((it) => productIds.includes(it.productId)).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
+    if (!hasItemFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
+    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).filter((it) => matchesProduct(it.productId)).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.unitPrice) || 0), 0);
     const ratio = row.total > 0 ? total / row.total : 0;
     const received = Math.min(total, (row.received || 0) * ratio);
     return { total, received, pending: Math.max(0, total - received) };
@@ -1959,7 +1992,7 @@ function vendasPanel(ctx) {
   const addFilteredProduct = (id, qty, total) => { const p = productSummaryMap.get(id) || { id, qty: 0, total: 0 }; p.qty += qty; p.total += total; productSummaryMap.set(id, p); };
   for (const row of visibleRows) {
     if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
-    else for (const it of row.order.itens || []) if (!hasProductFilter || productIds.includes(it.productId)) addFilteredProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
+    else for (const it of row.order.itens || []) if (matchesProduct(it.productId)) addFilteredProduct(it.productId, Number(it.qty) || 0, (Number(it.qty) || 0) * (Number(it.unitPrice) || 0));
   }
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
 
@@ -1996,7 +2029,7 @@ function vendasPanel(ctx) {
     ].filter(Boolean)),
     el('p', { class: 'pa-hint', text: 'Encomendas entregues e vendas rápidas, pela data de entrega registrada. Inclui valores recebidos e pendentes; desistências ficam separadas.' }),
     period,
-    el('div', { class: 'pa-filtergrid' }, [field('Filtrar por produto', productFilter), field('Filtrar por cliente', clientFilter)]),
+    el('div', { class: 'pa-filtergrid' }, [field('Tipo de produto', kindFilter), field('Filtrar por produto', productFilter), field('Filtrar por cliente', clientFilter)]),
     el('div', { class: 'pa-chiprow' }, [chip('todos', 'Todos'), chip('recebidos', 'Recebidos'), chip('naorecebidos', 'Não recebidos'), chip('desistencias', 'Desistências')]),
     status === 'desistencias'
       ? el('div', {}, [
@@ -2004,7 +2037,7 @@ function vendasPanel(ctx) {
           cancellationRows.length ? el('ul', { class: 'pa-list pa-rows' }, cancellationRows) : el('p', { class: 'pa-empty', text: 'Nenhuma desistência neste período.' }),
         ])
       : el('div', {}, [
-          el('div', { class: 'pa-statgrid' }, [statCard('Total vendido', brl(filteredTotals.total), 'navy'), statCard('Recebido', brl(filteredTotals.received), 'ok'), statCard('Pendente', brl(filteredTotals.pending), filteredTotals.pending > 0.005 ? 'warn' : 'soft')]),
+          el('div', { class: 'pa-statgrid' }, [statCard('Total vendido', brl(filteredTotals.total), 'navy'), statCard('Recebido', brl(filteredTotals.received), 'ok'), statCard('Pendente', brl(filteredTotals.pending), filteredTotals.pending > 0.005 ? 'warn' : 'soft'), productKind && statCard(`${({ cesta: 'Cestas', kit: 'Kits', combo: 'Combos', normal: 'Produtos comuns' })[productKind]} vendidos`, fmtNum(filteredProducts.reduce((sum, product) => sum + product.qty, 0)), 'teal')].filter(Boolean)),
           filteredProducts.length > 0 && el('h3', { class: 'pa-h3', text: 'Produtos vendidos' }),
           filteredProducts.length > 0 && el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { class: 'pa-num', text: brl(p.total) })]))),
           el('h3', { class: 'pa-h3', text: 'Vendidos no período' }),
@@ -2368,7 +2401,7 @@ function encomendaSheet(ctx, enc) {
       const select = el('select', { class: 'pa-input', 'data-testid': 'enc-bundle-product' }, candidates.map((p) => el('option', { value: p.id, text: p.name })));
       const qty = el('input', { class: 'pa-input pa-qty', 'data-testid': 'enc-bundle-qty', type: 'text', inputmode: 'decimal', value: '1' });
       const add = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-bundle-add', onclick: () => { const q = parseNum(qty.value); if (!select.value || !(q > 0)) return; const current = it.bundleItems.find((child) => child.productId === select.value); if (current) current.qty += q; else it.bundleItems.push({ productId: select.value, qty: q }); render(); } }, '+ produto');
-      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Essas quantidades serão multiplicadas pela quantidade do conjunto e aparecerão na comanda de produção.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, add]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }));
+      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Composição do cadastro já preenchida. Ajustes aqui valem só para este pedido. As quantidades serão multiplicadas pelo número de conjuntos e aparecerão na comanda.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que compõem este conjunto.' })]), candidates.length ? el('div', { class: 'pa-row pa-form' }, [select, qty, add]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }));
     };
     render();
     return box;
@@ -2401,8 +2434,8 @@ function encomendaSheet(ctx, enc) {
     if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
     const matches = store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(q)).slice(0, 6);
     results.style.display = matches.length ? '' : 'none';
-    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id), ...(isBundleProduct(p) ? { bundleItems: [] } : {}) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
-      el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: `${bundleKindLabel(p)} · escolher composição` })].filter(Boolean)), el('span', { class: 'pa-add', text: '+' }),
+    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id), ...(isBundleProduct(p) ? { bundleItems: bundleProductItems(p) } : {}) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
+      el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: `${bundleKindLabel(p)} · composição pronta` })].filter(Boolean)), el('span', { class: 'pa-add', text: '+' }),
     ])));
   }
   search.addEventListener('input', renderResults);
@@ -4709,7 +4742,7 @@ function automaticConfigSuggestions(store) {
     let total = 0;
     for (const component of product.components || []) {
       if (component.kind === 'recipe') total += (Number(component.qty) || 0) * recipeMinutesPerUnit(component.id, phase);
-      else if (component.kind === 'product') total += (Number(component.qty) || 0) * productMinutesPerUnit(component.id, phase, stack);
+      else if (component.kind === 'product' && !isBundleProduct(product)) total += (Number(component.qty) || 0) * productMinutesPerUnit(component.id, phase, stack);
     }
     stack.delete(productId);
     return total;
