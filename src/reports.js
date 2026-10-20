@@ -71,7 +71,7 @@ export function monthSummary(store, month) {
   let pagoFinanceiro = 0;
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
-    if (st.kind === 'discount') continue;
+    if (['discount', 'loss'].includes(st.kind)) continue;
     const title = store.get('financeTitles', st.titleId); if (title?.direction !== 'pagar') continue;
     const category = store.get('categories', title.categoryId); const value = st.amount || 0;
     pagoFinanceiro += value;
@@ -120,7 +120,7 @@ export function despesasByCategory(store, month) {
   }
   for (const st of store.state.financeSettlements || []) {
     if (ym(st.at) !== month || store.isReversed('financeSettlement', st.id)) continue;
-    if (st.kind === 'discount') continue;
+    if (['discount', 'loss'].includes(st.kind)) continue;
     const title = store.get('financeTitles', st.titleId);
     if (title?.direction !== 'pagar') continue;
     map.set(title.categoryId || '__sem__', (map.get(title.categoryId || '__sem__') || 0) + (st.amount || 0));

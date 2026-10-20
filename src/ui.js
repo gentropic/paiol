@@ -476,7 +476,14 @@ function birthdaysToday(store, date = todayInput()) {
 
 function inicioPanel(ctx) {
   const { store } = ctx;
-  const sum = monthSummary(store, currentMonth());
+  const month = currentMonth();
+  const sum = monthSummary(store, month);
+  const [year, monthNumber] = month.split('-').map(Number);
+  const payableMonth = listTitles(store, {
+    direction: 'pagar', start: `${month}-01`,
+    end: `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, '0')}`,
+    status: 'aberto',
+  }).reduce((total, row) => total + row.balance, 0);
   const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
   const vazio = !store.state.ingredients.length && !store.state.recipes.length && !store.state.products.length;
   const today = todayInput();
@@ -537,13 +544,15 @@ function inicioPanel(ctx) {
     ].filter(Boolean)),
     el('section', { class: 'pa-card' }, [
       el('div', { class: 'pa-row' }, [
-        el('h2', { class: 'pa-grow', text: `Este mês — ${monthLabel(currentMonth())}` }),
+        el('h2', { class: 'pa-grow', text: `Este mês — ${monthLabel(month)}` }),
       ]),
       el('table', { class: 'pa-kv' }, [
         el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(sum.recebido) })]),
-        sum.aReceber > 0 && el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
-      el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo de caixa' }), el('td', { class: 'pa-num' + (sum.saldoCaixa >= 0 ? '' : ' pa-bad'), text: brl(sum.saldoCaixa) })]),
-      ].filter(Boolean)),
+        el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
+        el('tr', {}, [el('td', { text: 'Pagos' }), el('td', { class: 'pa-num', text: brl(sum.despesas) })]),
+        el('tr', {}, [el('td', { text: 'A pagar' }), el('td', { class: 'pa-num', text: brl(payableMonth) })]),
+        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo de caixa' }), el('td', { class: 'pa-num' + (sum.saldoCaixa >= 0 ? '' : ' pa-bad'), text: brl(sum.saldoCaixa) })]),
+      ]),
       el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'home-rel', onclick: () => ctx.actions.setTab('relatorios') }, 'Ver relatório completo →'),
     ]),
     semPreco > 0 && el('section', { class: 'pa-card' }, [
