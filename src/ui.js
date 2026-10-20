@@ -5044,7 +5044,7 @@ function shoppingSettingsCard(ctx) {
     ctx.actions.mutate((store) => store.upsertShoppingItem({ id: uuid(), name: name.value.trim(), qty: Math.max(0, parseNum(qty.value) || 0) || undefined, unit: unit.value.trim() || undefined, createdAt: nowIso(), done: false }));
   };
   const automaticRows = automatic.map((row) => el('div', { class: 'pa-detail-card', 'data-testid': 'shopping-auto-item' }, [
-    el('div', { class: 'pa-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: row.ingredient.name }), el('span', { class: 'pa-muted', text: `Estoque ${fmtNum(row.current)} ${row.unit} · mínimo ${fmtNum(row.minimum)} ${row.unit}` })]), el('span', { class: 'pa-badge pa-warn', text: 'Estoque baixo' })]),
+    el('div', { class: 'pa-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: row.ingredient.name }), el('span', { class: 'pa-muted', text: `Estoque ${fmtNum(row.current)} ${row.ingredient.stockUnit} · mínimo ${fmtNum(row.minimum)} ${row.ingredient.stockUnit}` })]), el('span', { class: 'pa-badge pa-warn', text: 'Estoque baixo' })]),
     el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutate((store) => store.upsertIngredient({ ...row.ingredient, shoppingHidden: true })) }, 'Ocultar desta lista'),
   ]));
   const manualRows = manual.map((item) => el('div', { class: 'pa-row pa-detail-card', 'data-testid': 'shopping-manual-item' }, [
