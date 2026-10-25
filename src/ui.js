@@ -607,7 +607,7 @@ function inicioPanel(ctx) {
       ]),
       el('table', { class: 'pa-kv' }, [
         el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(sum.recebido) })]),
-        el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
+        el('tr', {}, [el('td', { text: 'A receber (saldo atual)' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
         el('tr', {}, [el('td', { text: 'Pagos' }), el('td', { class: 'pa-num', text: brl(sum.despesas) })]),
         el('tr', {}, [el('td', { text: 'A pagar' }), el('td', { class: 'pa-num', text: brl(payableMonth) })]),
         el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo de caixa' }), el('td', { class: 'pa-num' + (sum.saldoCaixa >= 0 ? '' : ' pa-bad'), text: brl(sum.saldoCaixa) })]),
@@ -2057,7 +2057,10 @@ function vendasPanel(ctx) {
   const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
   const rowMetrics = (row) => {
     if (!hasItemFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
-    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).reduce((sum, it) => sum + selectedOrderLines(it).reduce((lineSum, line) => lineSum + line.total, 0), 0);
+    const gross = row.kind === 'sale' ? row.total : (row.order.itens || []).reduce((sum, it) => sum + selectedOrderLines(it).reduce((lineSum, line) => lineSum + line.total, 0), 0);
+    const itemGross = row.kind === 'sale' ? gross : (row.order.itens || []).reduce((sum, it) => sum + orderItemGross(it), 0);
+    const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order?.discount) || 0)) / itemGross : 1;
+    const total = gross * discountFactor;
     const ratio = row.total > 0 ? total / row.total : 0;
     const received = Math.min(total, (row.received || 0) * ratio);
     return { total, received, pending: Math.max(0, total - received) };
@@ -2067,7 +2070,11 @@ function vendasPanel(ctx) {
   const addFilteredProduct = (id, qty, total) => { const p = productSummaryMap.get(id) || { id, qty: 0, total: 0 }; p.qty += qty; p.total += total; productSummaryMap.set(id, p); };
   for (const row of visibleRows) {
     if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
-    else for (const it of row.order.itens || []) for (const line of selectedOrderLines(it)) addFilteredProduct(line.productId, line.qty, line.total);
+    else {
+      const itemGross = (row.order.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+      const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order.discount) || 0)) / itemGross : 1;
+      for (const it of row.order.itens || []) for (const line of selectedOrderLines(it)) addFilteredProduct(line.productId, line.qty, line.total * discountFactor);
+    }
   }
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
 
@@ -4643,8 +4650,8 @@ function relatoriosPanel(ctx) {
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Entrou' })]),
     kv('Recebido', brl(sum.recebido)),
     sum.recebidoOutrasReceitas > 0 && kv('Outras receitas', brl(sum.recebidoOutrasReceitas)),
-    sum.faturado !== sum.recebidoVendas && kv('Faturado (entregue)', brl(sum.faturado)),
-    sum.aReceber > 0 && kv('A receber', brl(sum.aReceber)),
+    sum.faturado !== sum.recebidoVendas && kv('Vendas e encomendas do mês', brl(sum.faturado)),
+    sum.aReceber > 0 && kv('A receber (saldo atual)', brl(sum.aReceber)),
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Saiu' })]),
     kv('Despesas variáveis', brl(sum.despVar)),
     kv('Despesas fixas', brl(sum.despFix)),
@@ -4737,8 +4744,8 @@ function reportCsv(month, sum, despCat, byProduct, byClient) {
   const rows = [
     ['Relatório', month], [],
     ['Recebido', n2(sum.recebido)],
-    ['Faturado (entregue)', n2(sum.faturado)],
-    ['A receber', n2(sum.aReceber)],
+    ['Vendas e encomendas do mês', n2(sum.faturado)],
+    ['A receber (saldo atual)', n2(sum.aReceber)],
     ['Despesas variáveis', n2(sum.despVar)],
     ['Despesas fixas', n2(sum.despFix)],
     ['Custos', n2(sum.custos || 0)],
@@ -4920,7 +4927,7 @@ function simuladorBody(ctx, recipe, config) {
     el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cenário (meta de lucro sobre a venda, em %)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: 'A coluna Atual usa os valores cadastrados e permanece fixa. A margem desejada altera o preço recomendado; o lucro do cenário depende do preço de venda informado. Lucro ou margem negativos indicam que este preço não cobre o custo e os percentuais de venda.' }),
     el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
-    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão consideradas nos dois cenários: ${pctStr(salesRate)}.` }),
+    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão + imposto variável considerados nos dois cenários: ${pctStr(salesRate)}.` }),
     results,
   ]);
 }

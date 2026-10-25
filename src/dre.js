@@ -2,7 +2,7 @@
 // a receita/despesa pertence ao período, independentemente da data de recebimento ou pagamento.
 
 import { titleState } from './finance.js';
-import { orderGross, saleNet } from './bundles.js';
+import { bundleProductItems, isBundleProduct, orderGross, saleNet } from './bundles.js';
 import { estimateLens, productBreakdown } from './cost-engine.js';
 import { inventorySummary } from './inventory.js';
 import { depreciationSummary } from './assets.js';
@@ -16,21 +16,27 @@ export function orderMaterialEstimate(store, order) {
   const engine = store.toEngineStore();
   const config = store.getConfig(); const lens = estimateLens(config);
   let ingredients = 0; let packaging = 0; let missing = 0;
-  const one = (id, qty) => {
+  const one = (id, qty, sign = 1) => {
     if (!(qty > 0)) return;
     try {
       const product = store.get('products', id);
       const parts = productBreakdown(engine, id, config, lens);
-      ingredients += (Number(parts.ingredients) || 0) * qty;
-      packaging += ((Number(parts.packaging) || 0) + (Number(product?.packagingCost) || 0)) * qty;
+      ingredients += (Number(parts.ingredients) || 0) * qty * sign;
+      packaging += ((Number(parts.packaging) || 0) + (Number(product?.packagingCost) || 0)) * qty * sign;
     } catch { missing++; }
   };
   for (const item of order.itens || []) {
     const qty = Math.max(0, Number(item.qty) || 0);
     one(item.productId, qty);
+    // Older catalog bundles can contain standard products. An order with a saved custom
+    // composition replaces them, rather than consuming both sets of products.
+    const parent = store.get('products', item.productId);
+    if (isBundleProduct(parent) && Array.isArray(item.bundleItems)) {
+      for (const child of bundleProductItems(parent)) one(child.productId, qty * child.qty, -1);
+    }
     for (const child of item.bundleItems || []) one(child.productId, qty * Math.max(0, Number(child.qty) || 0));
   }
-  return { ingredients, packaging, missing };
+  return { ingredients: Math.max(0, ingredients), packaging: Math.max(0, packaging), missing };
 }
 
 export function managerialDre(store, start, end) {

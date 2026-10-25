@@ -384,7 +384,10 @@ export function cashMovements(store, { includeReversed = false } = {}) {
 }
 
 function projectedMovements(store, start, end, filters = {}) {
-  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.accountId || true) && (!filters.categoryId || canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId))).map((r) => ({
+  // An unpaid title has no cash account yet. Do not attribute company-wide forecasts
+  // to a specific account selected in the cash-flow filter.
+  if (filters.accountId) return [];
+  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.categoryId || canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId))).map((r) => ({
     id: `projected:${r.title.id}`, at: r.title.dueDate, direction: r.title.direction === 'receber' ? 'entrada' : 'saida', amount: r.balance,
     label: r.title.description, projected: true, titleId: r.title.id, categoryId: r.title.categoryId,
   }));

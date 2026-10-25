@@ -13,7 +13,7 @@
 
 import { estimateLens, productUnitCost, effectiveSalesRates } from './cost-engine.js';
 import { managerialDre } from './dre.js';
-import { isBundleProduct, orderItemGross, orderItemSaleLines, saleNet } from './bundles.js';
+import { bundleProductItems, isBundleProduct, orderItemGross, orderItemSaleLines, saleNet } from './bundles.js';
 import { titleState } from './finance.js';
 
 const ym = (iso) => String(iso || '').slice(0, 7); // 'YYYY-MM'
@@ -146,9 +146,9 @@ export function productSummary(store, month) {
   const lens = estimateLens(config);
   const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
   const map = new Map();
-  const add = (pid, qty, revenue) => {
+  const add = (pid, qty, revenue, costPerUnit = null) => {
     const e = map.get(pid) || { qty: 0, faturamento: 0, custoEst: 0 };
-    e.qty += qty; e.faturamento += revenue; e.custoEst += qty * unitCost(pid);
+    e.qty += qty; e.faturamento += revenue; e.custoEst += qty * (costPerUnit ?? unitCost(pid));
     map.set(pid, e);
   };
   for (const s of store.state.sales) {
@@ -157,7 +157,14 @@ export function productSummary(store, month) {
   }
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt || ym(e.quickSale ? e.at : e.deliveryDate) !== month) continue;
-    for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) add(line.productId, line.qty, line.total);
+    const itemGross = (e.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+    const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(e.discount) || 0)) / itemGross : 1;
+    for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) {
+      const parent = store.get('products', it.productId);
+      const replaced = line.productId === it.productId && isBundleProduct(parent) && Array.isArray(it.bundleItems);
+      const parentCost = replaced ? Math.max(0, unitCost(it.productId) - bundleProductItems(parent).reduce((sum, child) => sum + child.qty * unitCost(child.productId), 0)) : null;
+      add(line.productId, line.qty, line.total * discountFactor, parentCost);
+    }
   }
   return [...map.entries()].map(([id, e]) => ({
     id, name: store.get('products', id)?.name || '(produto removido)',
@@ -270,7 +277,7 @@ export function businessPeriodSummary(store, start, end) {
     const rates = effectiveSalesRates(store.get('products', sale.productId), config);
     if (isBundleProduct(store.get('products', sale.productId))) basketRevenue += saleNet(sale);
     addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)),
-      (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? 0));
+      (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? rates.salesTaxPct));
   }
   for (const order of store.state.encomendas) {
     if (order.desistenciaAt || !inPeriod(order.quickSale ? order.at : order.deliveryDate, start, end)) continue;
@@ -281,7 +288,14 @@ export function businessPeriodSummary(store, start, end) {
     const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(order.discount) || 0)) / itemGross : 1;
     for (const item of order.itens || []) for (const line of orderItemSaleLines(item)) {
       const rates = effectiveSalesRates(store.get('products', line.productId), config);
-      addProduct(line.productId, line.qty, line.total * discountFactor, rates.total);
+      const parent = store.get('products', item.productId);
+      const replaced = line.productId === item.productId && isBundleProduct(parent) && Array.isArray(item.bundleItems);
+      const standardChildren = replaced ? bundleProductItems(parent) : [];
+      const standardCosts = standardChildren.map((child) => ({ qty: child.qty, cost: unitCost(child.productId) }));
+      const parentUnitCost = replaced ? unitCost(item.productId) : null;
+      const parentCost = replaced && parentUnitCost != null && standardCosts.every((child) => child.cost != null)
+        ? Math.max(0, parentUnitCost - standardCosts.reduce((sum, child) => sum + child.qty * child.cost, 0)) : null;
+      addProduct(line.productId, line.qty, line.total * discountFactor, rates.total, parentCost);
     }
     for (const item of order.itens || []) if (isBundleProduct(store.get('products', item.productId))) basketRevenue += orderItemGross(item) * discountFactor;
   }
@@ -372,7 +386,9 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
   for (const row of rows) {
     addClient(row.clientId, row.total, row.received, row.pending);
     if (row.kind === 'encomenda') {
-      for (const it of row.order.itens || []) for (const line of orderItemSaleLines(it)) addProduct(line.productId, line.qty, line.total);
+      const itemGross = (row.order.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+      const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order.discount) || 0)) / itemGross : 1;
+      for (const it of row.order.itens || []) for (const line of orderItemSaleLines(it)) addProduct(line.productId, line.qty, line.total * discountFactor);
     } else addProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
   }
 

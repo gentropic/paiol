@@ -1,9 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import ExcelJS from 'exceljs'; // devDependency — the app uses the vendored UMD; tests inject the lib
+import { readFile } from 'node:fs/promises';
 import { PaiolStore } from '../src/store.js';
 import { workbookBytes, parseInterchange, previewExchange } from '../src/xlsx-exchange.js';
 import { applyExchange } from '../src/exchange.js';
+
+// Exercise the exact ExcelJS bundle shipped to users, without a separate npm install.
+const excelSource = await readFile(new URL('../vendor/exceljs/exceljs.min.js', import.meta.url), 'utf8');
+const excelModule = { exports: {} };
+Function('exports', 'module', excelSource)(excelModule.exports, excelModule);
+const ExcelJS = excelModule.exports;
 
 function seeded() {
   const s = new PaiolStore();
