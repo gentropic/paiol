@@ -74,7 +74,9 @@ export function inventorySummary(store) {
     const losses = lost.get(ingredient.id) || 0;
     const current = opening + purchases - production - losses;
     const minimum = Math.max(0, Number(ingredient.minStockQty) || 0);
-    return { ingredient, opening, purchases, production, losses, current, minimum, low: minimum > 0 && current <= minimum };
+    // A missing minimum must not hide an impossible negative balance. Small floating-point
+    // residue is ignored so conversions do not create a false shortage warning.
+    return { ingredient, opening, purchases, production, losses, current, minimum, low: current < -0.000001 || (minimum > 0 && current <= minimum) };
   });
 }
 

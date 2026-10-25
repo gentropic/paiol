@@ -592,7 +592,7 @@ function inicioPanel(ctx) {
       ])),
       ...birthdays.map((person) => el('div', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `🎂 Aniversário: ${person.name}` }), el('span', { class: 'pa-badge', text: person.type })])),
       lowStock.length > 0 && el('div', { class: 'pa-callout' }, [
-        el('strong', { text: 'Lista de compras · estoque mínimo' }),
+        el('strong', { text: 'Lista de compras · estoque baixo ou negativo' }),
         el('ul', { class: 'pa-list pa-tight' }, lowStock.map((row) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: row.ingredient.name }), el('strong', { class: 'pa-bad', text: `${fmtNum(row.current)} ${row.ingredient.stockUnit}` })]))),
       ]),
       manualShopping.length > 0 && el('div', { class: 'pa-callout' }, [
@@ -3803,7 +3803,9 @@ function financeCashFlowPanel(ctx) {
     el('p', { class: 'pa-hint', text: 'A DRE usa este mesmo período e considera toda a empresa. Os filtros de conta e categoria abaixo servem apenas para analisar o caixa.' }),
     el('div', { class: 'pa-filtergrid' }, [field('Conta', account), field('Categoria', category)]),
     el('div', { class: 'pa-statgrid' }, [statCard('Entradas realizadas', brl(flow.totalIn), 'ok'), statCard('Saídas realizadas', brl(flow.totalOut), flow.totalOut ? 'warn' : 'soft'), statCard('Saldo realizado', brl(flow.totalIn - flow.totalOut), flow.totalIn - flow.totalOut >= 0 ? 'navy' : 'bad'), statCard('Saldo acumulado', brl(flow.ending), flow.ending >= 0 ? 'navy' : 'bad')]),
-    view.finProjected && el('div', { class: 'pa-callout' }, [el('strong', { text: `Previsão do período: +${brl(flow.projectedIn)} · −${brl(flow.projectedOut)}` }), el('span', { text: ' Contas pendentes não alteram o realizado. Vencidos anteriores também aparecem no alerta abaixo.' })]),
+    view.finProjected && el('div', { class: 'pa-callout' }, view.finAccountId
+      ? [el('strong', { text: 'Previsão por conta indisponível' }), el('span', { text: ' Contas ainda não quitadas não têm conta de caixa definida. Selecione “Todas as contas” para ver a previsão da empresa; os valores realizados continuam filtrados pela conta escolhida.' })]
+      : [el('strong', { text: `Previsão do período: +${brl(flow.projectedIn)} · −${brl(flow.projectedOut)}` }), el('span', { text: ' Contas pendentes não alteram o realizado. Vencidos anteriores também aparecem no alerta abaixo.' })]),
     el('h3', { class: 'pa-h3', text: 'Tudo que entrou e saiu' }),
     actualRows.length ? el('div', { class: 'pa-cash-list' }, [detailHeader(), ...actualRows]) : el('p', { class: 'pa-empty', text: 'Nenhuma entrada ou saída realizada neste período.' }),
     view.finProjected && el('h3', { class: 'pa-h3', text: 'Valores a quitar' }),
@@ -5486,7 +5488,7 @@ function shoppingSettingsCard(ctx) {
   ]));
   return el('section', { class: 'pa-card', 'data-testid': 'shopping-settings' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Reposição de materiais' }), el('h2', { text: 'Lista de compras' })])]),
-    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque mínimo. Você também pode acrescentar itens livres.' }),
+    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque mínimo ou ficaram com saldo negativo. Saldo negativo pede conferência das compras, do estoque inicial e da produção registrada. Você também pode acrescentar itens livres.' }),
     ...automaticRows,
     ...manualRows,
     (!automaticRows.length && !manualRows.length) && el('p', { class: 'pa-empty', text: 'Nenhum item aguardando compra.' }),

@@ -17,3 +17,14 @@ test('inventory uses opening + purchases - production - ingredient losses, never
   assert.equal(row.production, 2);
   assert.equal(row.low, false);
 });
+
+test('negative stock warns even when the minimum has not been entered', () => {
+  const state = emptyState();
+  state.ingredients = [{ id: 'flour', name: 'Farinha', stockUnit: 'kg', stockQty: 0, minStockQty: 0 }];
+  state.recipes = [{ id: 'r', name: 'Massa', yieldNominal: 1, yieldUnit: 'un', components: [{ ref: { kind: 'ingredient', id: 'flour' }, qty: 0.5, unit: 'kg' }] }];
+  state.products = [{ id: 'p', name: 'Pão', components: [{ kind: 'recipe', id: 'r', qty: 1 }] }];
+  state.comandas = [{ id: 'cmd', date: '2026-07-02', itens: [{ productId: 'p', realizado: 1 }] }];
+  const row = inventorySummary(new PaiolStore(state))[0];
+  assert.equal(row.current, -0.5);
+  assert.equal(row.low, true);
+});
