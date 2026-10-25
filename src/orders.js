@@ -18,6 +18,8 @@ export function addOrAppendOrder(store, newOrder) {
     itens: [...(existing.itens || []), ...(newOrder.itens || [])],
     total: amount(existing.total) + amount(newOrder.total),
     costSnapshot: amount(existing.costSnapshot) + amount(newOrder.costSnapshot),
+    materialCostSnapshot: existing.materialCostSnapshot == null || newOrder.materialCostSnapshot == null ? undefined : amount(existing.materialCostSnapshot) + amount(newOrder.materialCostSnapshot),
+    packagingCostSnapshot: existing.packagingCostSnapshot == null || newOrder.packagingCostSnapshot == null ? undefined : amount(existing.packagingCostSnapshot) + amount(newOrder.packagingCostSnapshot),
     frete: amount(existing.frete) + amount(newOrder.frete) || undefined,
     discount: amount(existing.discount) + amount(newOrder.discount) || undefined,
     notes: [existing.notes, newOrder.notes].filter(Boolean).join('\n') || undefined,

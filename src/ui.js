@@ -15,7 +15,8 @@ import { workbookBytes, parseInterchange, previewExchange } from './xlsx-exchang
 import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend, salesPeriodSummary, businessPeriodSummary, businessProfitTrend } from './reports.js';
 import { DEFAULT_CHART, listTitles, titleState, titleSettlements, cashMovements, cashFlow, financeDashboard, categoryByKey, canonicalCategoryId, defaultCashAccount } from './finance.js';
 import { clientFinancialStatement } from './client-statement.js';
-import { managerialDre } from './dre.js';
+import { managerialDre, orderMaterialEstimate } from './dre.js';
+import { assetDepreciation } from './assets.js';
 import { inventorySummary, ingredientInventory } from './inventory.js';
 import { APP_VERSION } from './config.js';
 import { productSaleKind, isBundleProduct, bundleKindLabel, orderItemGross, orderItemSaleLines, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
@@ -736,7 +737,7 @@ function receitaSheet(ctx, recipe) {
   const draftId = recipe?.id || uuid();
   // Local draft of the component list — committed atomically on Salvar (so a new recipe and its
   // items are created in one mutation, and Cancelar discards everything).
-  const comps = recipe ? recipe.components.map((c) => ({ ref: { ...c.ref }, qty: c.qty, unit: c.unit })) : [];
+  const comps = recipe ? recipe.components.map((c) => ({ ref: { ...c.ref }, qty: c.qty, unit: c.unit, ...(c.purpose ? { purpose: c.purpose } : {}) })) : [];
 
   const name = el('input', { class: 'pa-input', 'data-testid': 'rec-name', type: 'text', placeholder: 'Nome (ex.: Massa base de bolo)', value: recipe ? recipe.name : '' });
   const yieldQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-yield', type: 'text', inputmode: 'decimal', placeholder: 'Rend.', value: recipe ? String(recipe.yieldNominal).replace('.', ',') : '' });
@@ -773,6 +774,7 @@ function receitaSheet(ctx, recipe) {
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
   const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-compqty', type: 'text', inputmode: 'decimal', placeholder: 'qtd' });
+  const isPackaging = el('input', { type: 'checkbox', 'data-testid': 'rec-comp-packaging' });
   const unit = el('select', { class: 'pa-input', 'data-testid': 'rec-compunit' });
   function fillUnits() {
     const o = options[Number(refSel.value)] || options[0];
@@ -794,7 +796,7 @@ function receitaSheet(ctx, recipe) {
       productionMinutes: parseNum(production.value) || 0,
       ovenMinutes: parseNum(oven.value) || 0,
       components: comps,
-      packagingCost: parseNum(packaging.input.value) || 0,
+      packagingCost: comps.some((component) => component.purpose === 'packaging') ? 0 : parseNum(packaging.input.value) || 0,
       packagingDesc: packagingDesc.value.trim() || undefined,
       targetMarginPct: marginText === '' ? undefined : (parseNum(marginText) || 0) / 100,
       paymentFeePct: percentage(paymentFee), commissionPct: percentage(commission), salesTaxPct: percentage(salesTax),
@@ -804,7 +806,7 @@ function receitaSheet(ctx, recipe) {
   function renderItems() {
     itemsList.replaceChildren(...(comps.length
       ? comps.map((c, idx) => ({ c, idx })).sort((a, b) => refName(store, a.c.ref).localeCompare(refName(store, b.c.ref), 'pt-BR', { sensitivity: 'base' })).map(({ c, idx }) => el('li', { class: 'pa-list-item' }, [
-          el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} — ${refName(store, c.ref)}` }),
+          el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} — ${refName(store, c.ref)}${c.purpose === 'packaging' ? ' · embalagem' : ''}` }),
           el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { comps.splice(idx, 1); renderItems(); } }, '✕'),
         ]))
       : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda.' })]));
@@ -816,8 +818,9 @@ function receitaSheet(ctx, recipe) {
     const q = parseNum(qty.value);
     const o = options[Number(refSel.value)];
     if (!o || !(q > 0)) { qty.focus(); return; }
-    comps.push({ ref: { kind: o.kind, id: o.id }, qty: q, unit: unit.value });
+    comps.push({ ref: { kind: o.kind, id: o.id }, qty: q, unit: unit.value, ...(o.kind === 'ingredient' && isPackaging.checked ? { purpose: 'packaging' } : {}) });
     qty.value = '';
+    isPackaging.checked = false;
     renderItems();
   }
 
@@ -901,11 +904,11 @@ function receitaSheet(ctx, recipe) {
     itemsList,
     options.length === 0
       ? el('p', { class: 'pa-hint', text: 'Cadastre insumos primeiro para montar a receita.' })
-      : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit,
+      : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit, el('label', { class: 'pa-check' }, [isPackaging, el('span', { text: 'É embalagem' })]),
           el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
     el('h3', { class: 'pa-h3', text: 'Embalagem e rentabilidade' }),
-    field('Custo da embalagem por produto', packaging),
-    el('p', { class: 'pa-hint', text: 'Se a embalagem já foi adicionada como insumo acima, seu custo vem do preço da compra. Use este campo apenas para embalagens ou complementos que ainda não estejam na lista, para não contar duas vezes.' }),
+    el('p', { class: 'pa-hint', text: 'Cadastre a embalagem em Insumos e adicione sua quantidade acima marcando “É embalagem”. A compra valoriza o estoque; a receita desconta a quantidade utilizada na produção.' }),
+    el('details', {}, [el('summary', { text: 'Custo antigo de embalagem sem insumo' }), field('Valor por produto (legado)', packaging), el('p', { class: 'pa-hint', text: 'Este valor antigo só entra se não houver embalagem marcada na lista. Ao escolher um insumo de embalagem, o valor antigo é zerado para evitar duplicidade.' })]),
     field('Descrição da embalagem', packagingDesc),
     el('div', { class: 'pa-field' }, [el('label', { text: 'Margem desejada para esta receita (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'vazio = margem padrão dos Ajustes' })])]),
     el('h3', { class: 'pa-h3', text: 'Percentuais sobre a venda' }),
@@ -1864,7 +1867,7 @@ function recipePricing(store, recipe, linkedProduct = null) {
   const breakdown = costBreakdown(es, recipe.id, config, lens);
   const yieldQty = Number(recipe.yieldNominal) || 0;
   const linkedQty = Number(linkedProduct?.components?.find((c) => c.kind === 'recipe' && c.id === recipe.id)?.qty) || 1;
-  const unitCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * linkedQty + (Number(recipe.packagingCost) || 0);
+  const unitCost = (breakdown.ingredients + breakdown.packaging + breakdown.gas + breakdown.fixed) * linkedQty + (Number(recipe.packagingCost) || 0);
   const targetMargin = recipe.targetMarginPct ?? config.targetMarginPct;
   const rates = effectiveSalesRates(recipe, config);
   const suggested = Math.ceil(priceFromCost(unitCost, { ...config, ...rates, targetMarginPct: targetMargin }) * 100 - 1e-9) / 100;
@@ -1891,7 +1894,7 @@ function recipeProfitabilityCard(store, recipe, linkedProduct = null) {
         line('Ingredientes', brl(p.breakdown.ingredients * p.yieldQty)),
         line('Gás', brl(p.breakdown.gas * p.yieldQty)),
         line('Custos fixos proporcionais', brl(p.breakdown.fixed * p.yieldQty)),
-        line('Embalagens', brl((Number(recipe.packagingCost) || 0) * p.productUnits)),
+        line('Embalagens', brl((p.breakdown.packaging || 0) * p.yieldQty + (Number(recipe.packagingCost) || 0) * p.productUnits)),
         line('Custo total da receita', brl(p.totalCost)),
         line('Custo por produto', brl(p.unitCost)),
         line('Margem desejada', pctStr(p.targetMargin)),
@@ -2145,12 +2148,15 @@ function vendaSheet(ctx) {
     try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
     const rates = effectiveSalesRates(p, config);
     const orderId = uuid(); const at = nowIso(); const total = Math.max(0, q * up - discountValue);
+    const materials = orderMaterialEstimate(store, { itens: [{ productId: p.id, qty: q }] });
     ctx.actions.mutate((s) => {
       s.upsertEncomenda({
         id: orderId, at, deliveryDate: dateIso(date.value || todayInput()),
         clienteId: client.value() || undefined, customerName: client.value() ? undefined : looseName.value.trim() || undefined,
         itens: [{ productId: p.id, qty: q, unitPrice: up }], total, discount: discountValue || undefined,
-        costSnapshot: q * cost, paymentFeePct: rates.paymentFeePct, commissionPct: rates.commissionPct,
+        costSnapshot: q * cost,
+        ...(materials.missing ? {} : { materialCostSnapshot: materials.ingredients, packagingCostSnapshot: materials.packaging }),
+        paymentFeePct: rates.paymentFeePct, commissionPct: rates.commissionPct,
         salesTaxPct: rates.salesTaxPct, deliveryMethod: delivery.value, entregue: delivered.checked,
         quickSale: true, ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
       });
@@ -2534,6 +2540,7 @@ function encomendaSheet(ctx, enc) {
     const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
     if (discountValue > grossTotal() + 0.005) { discount.input.setCustomValidity('O desconto não pode ser maior que o total bruto.'); discount.input.reportValidity(); return; }
     const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * (orderItemUnitCost(store, it, unitCost) || 0), 0);
+    const materials = orderMaterialEstimate(store, { itens: items });
     const fr = parseNum(frete.input.value);
     const ob = notes.value.trim();
     if (enc && !window.confirm('Salvar alterações neste pedido? O total e a comanda podem mudar.')) return;
@@ -2548,6 +2555,7 @@ function encomendaSheet(ctx, enc) {
         total: grandTotal(),
         discount: discountValue || undefined,
         costSnapshot: cost,
+        ...(materials.missing ? {} : { materialCostSnapshot: materials.ingredients, packagingCostSnapshot: materials.packaging }),
         deliveryMethod: entrega.value,
         frete: fr == null ? undefined : fr,
         notes: ob || undefined,
@@ -3755,19 +3763,34 @@ function dreReportRows(ctx, start, end) {
     finally { pdf.textContent = original; pdf.disabled = false; }
   });
   return [
-    el('p', { class: 'pa-callout', text: `Competência de ${fmtDate(`${start}T12:00:00`)} até ${fmtDate(`${end}T12:00:00`)}. Valores quitados e pendentes entram integralmente; investimentos e transferências ficam fora.` }),
+    el('p', { class: 'pa-callout', text: `Competência de ${fmtDate(`${start}T12:00:00`)} até ${fmtDate(`${end}T12:00:00`)}. Vendas entram quando marcadas como entregues. Compras ficam em estoque até o consumo dos produtos vendidos.` }),
     dre.grossRevenue === 0 && dre.directCosts === 0 && dre.operatingExpenses === 0 && el('p', { class: 'pa-empty', text: 'Nenhum registro financeiro neste período. Selecione outras datas para consultar a DRE.' }),
     el('table', { class: 'pa-kv pa-report', 'data-testid': 'dre-table' }, [
-      line('Receita de vendas', dre.salesRevenue), line('Outras receitas operacionais', dre.otherRevenue), line('Receita operacional', dre.grossRevenue, { total: true }),
-      ...dre.costRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })), line('Custos diretos', dre.directCosts, { total: true, negative: true }),
+      line('Receita bruta de vendas', dre.salesGross),
+      line('Descontos concedidos', dre.salesDiscounts, { detail: true, negative: true }),
+      line('Devoluções registradas', dre.salesReturns, { detail: true, negative: true }),
+      line('Tributos variáveis sobre vendas', dre.salesTaxes, { detail: true, negative: true }),
+      line('Receita líquida de vendas', dre.salesRevenue - dre.salesReturns - dre.salesTaxes, { total: true }),
+      line('Outras receitas', dre.otherRevenue), line('Receita total líquida', dre.grossRevenue, { total: true }),
+      line('Insumos dos produtos vendidos (estimado)', dre.materialCosts, { detail: true, negative: true }),
+      line('Embalagens dos produtos vendidos (estimado)', dre.packagingCosts, { detail: true, negative: true }),
+      ...dre.costRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })),
+      line('Depreciação de equipamentos de produção', dre.productionDepreciation, { detail: true, negative: true }),
+      line('Custos dos produtos vendidos e produção', dre.directCosts, { total: true, negative: true }),
       line('Lucro bruto', dre.grossProfit, { total: true, bad: dre.grossProfit < 0, good: dre.grossProfit >= 0 }),
-      ...dre.expenseRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })), line('Despesas operacionais', dre.operatingExpenses, { total: true, negative: true }),
-      line('Resultado do período', dre.netResult, { total: true, bad: dre.netResult < 0, good: dre.netResult >= 0 }),
+      ...dre.sellingRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })),
+      line('Frete, taxas e comissões de venda', dre.sellingExpenses, { total: true, negative: true }),
+      ...dre.expenseRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })),
+      line('Despesas operacionais', dre.operatingExpenses, { total: true, negative: true }),
+      line('Depreciação administrativa', dre.administrationDepreciation, { detail: true, negative: true }),
+      line('Lucro líquido / prejuízo do período', dre.netResult, { total: true, bad: dre.netResult < 0, good: dre.netResult >= 0 }),
     ]),
+    el('p', { class: 'pa-hint', text: `Dentro dos custos de produção: ${brl(dre.indirectCosts)} classificados como indiretos. Dentro das despesas operacionais: ${brl(dre.fixedExpenses)} classificados como fixos e ${brl(dre.clientLosses)} de perdas confirmadas com clientes. Contas apenas vencidas não são perda.` }),
+    el('p', { class: 'pa-callout', text: `Estoque de insumos e embalagens: ${brl(dre.inventoryValue)} estimados. É patrimônio em estoque, não despesa adicional desta DRE.${dre.unpricedInventory ? ` ${dre.unpricedInventory} item(ns) sem preço não entraram na soma.` : ''}` }),
     el('div', { class: 'pa-statgrid' }, [statCard('Margem bruta', dre.grossMarginPct == null ? 'Sem receita' : `${Math.round(dre.grossMarginPct * 100)}%`, dre.grossProfit >= 0 ? 'navy' : 'bad'), statCard('Margem líquida', dre.netMarginPct == null ? 'Sem receita' : `${Math.round(dre.netMarginPct * 100)}%`, dre.netResult >= 0 ? 'ok' : 'bad'), statCard('Ainda a receber', brl(dre.openReceivables), dre.openReceivables ? 'warn' : 'soft'), statCard('Ainda a pagar', brl(dre.openPayables), dre.openPayables ? 'warn' : 'soft')]),
     el('h3', { class: 'pa-h3', text: 'Diagnóstico automático' }), ...diagnosis,
     el('p', { class: 'pa-hint', text: 'Esta é uma DRE gerencial simplificada para decisão. Para obrigações fiscais e contábeis formais, valide a classificação com seu contador.' }),
-    el('div', { class: 'pa-sheet-actions' }, [pdf]),
+    el('div', { class: 'pa-sheet-actions' }, [pdf, el('button', { class: 'pa-btn', onclick: () => { ctx.actions.closeModal(); ctx.actions.setTab('fin-plano'); } }, 'Editar plano de contas'), el('button', { class: 'pa-btn', onclick: () => { ctx.actions.closeModal(); ctx.actions.setTab('ajustes'); } }, 'Abrir patrimônio em Ajustes')]),
   ].filter(Boolean);
 }
 
@@ -4365,9 +4388,15 @@ function categoriasSheet(ctx) {
     el('span', { class: 'pa-num pa-muted pa-category-code', text: category.code || '' }),
     el('div', { class: 'pa-grow pa-category-info' }, [el('strong', { text: `${category.parentId ? '— ' : ''}${category.name}` }), el('span', { class: 'pa-muted', text: [kindShort(category.kind) || category.nature, category.duplicateOf ? `Consolidada em ${store.get('categories', category.duplicateOf)?.name || 'outra categoria'}` : category.archived ? 'Arquivada' : 'Ativa'].join(' · ') })]),
     !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-edit', onclick: () => ctx.actions.openModal({ kind: 'category-edit', id: category.id }) }, 'Editar'),
-    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Arquivar', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: true })) }, '🗄'),
+    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Arquivar', onclick: () => {
+      if (!window.confirm(`Arquivar a categoria “${category.name}”? Os lançamentos antigos continuam vinculados, mas ela sairá das novas escolhas.`)) return;
+      ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: true }));
+    } }, '🗄'),
     category.archived && !category.duplicateOf && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: false })) }, 'Reativar'),
-    !category.archived && !category.systemKey && !categoryInUse(store, category.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir categoria nunca usada', onclick: () => ctx.actions.mutateModal((s) => s.removeCategory(category.id)) }, '✕'),
+    !category.archived && !category.systemKey && !categoryInUse(store, category.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir categoria nunca usada', onclick: () => {
+      if (!window.confirm(`Excluir a categoria “${category.name}”? Esta opção só está disponível porque ela não possui lançamentos vinculados.`)) return;
+      ctx.actions.mutateModal((s) => s.removeCategory(category.id));
+    } }, '✕'),
   ].filter(Boolean));
 
   return sheet({
@@ -4696,7 +4725,7 @@ function simulateRecipeBreakdown(store, recipeId, factor, production, active, ov
   return costBreakdown(indexStore(raw), recipeId, config, estimateLens(config));
 }
 // Direct labor is diagnostic only: salaries and payroll charges already live in fixed costs.
-const breakdownTotal = (b) => b.ingredients + b.gas + b.fixed;
+const breakdownTotal = (b) => b.ingredients + (b.packaging || 0) + b.gas + b.fixed;
 
 function simuladorPanel(ctx) {
   const { store } = ctx;
@@ -5105,7 +5134,7 @@ function ajustesPanel(ctx) {
           field('margin', 'Margem alvo (%)', pct(c.targetMarginPct), null, 'margin'),
           field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct), null, 'fee'),
           field('commission', 'Comissão sobre vendas (%)', pct(c.commissionPct || 0), 'Entra na formação do preço da mesma forma que a taxa de pagamento.', 'commission'),
-          field('salesTax', 'Imposto proporcional sobre a venda (%)', pct(c.salesTaxPct || 0), 'Use apenas quando incidir sobre o faturamento. O DAS do MEI já está nos custos fixos acima.'),
+          field('salesTax', 'Tributo variável sobre faturamento (%) — para formar preço', pct(c.salesTaxPct || 0), 'É só uma estimativa para a precificação; não cria lançamento na DRE. Deixe 0% se paga apenas o DAS mensal fixo. Registre DAS, taxas de nota fiscal e tributos efetivos no Financeiro, na categoria apropriada, sem contar o mesmo valor duas vezes.'),
           el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar e usar valores manuais')]),
         ]),
         el('aside', { class: 'pa-settings-column pa-auto-card', 'data-testid': 'automatic-settings' }, [
@@ -5119,6 +5148,7 @@ function ajustesPanel(ctx) {
       ]),
     ]),
     orderPaymentDueCard(ctx),
+    patrimonioCard(ctx),
     notificationSettingsCard(ctx),
     shoppingSettingsCard(ctx),
     empresaCard(ctx),
@@ -5126,6 +5156,56 @@ function ajustesPanel(ctx) {
     trashPanel(ctx),
     dropboxPanel(ctx),
   ]);
+}
+
+function patrimonioCard(ctx) {
+  const assets = ctx.store.state.assets.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const month = todayInput().slice(0, 7);
+  const monthEnd = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0);
+  const end = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
+  const current = assets.reduce((sum, asset) => sum + assetDepreciation(asset, `${month}-01`, end), 0);
+  return el('section', { class: 'pa-card', 'data-testid': 'settings-assets' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Máquinas e itens duráveis' }), el('h2', { text: 'Patrimônio e depreciação' })]), el('button', { class: 'pa-btn pa-primary pa-sm', onclick: () => ctx.actions.openModal({ kind: 'asset-edit' }) }, '+ Bem')]),
+    el('p', { class: 'pa-hint', text: 'Informe o custo do bem, valor residual, data em que começou a ser usado e vida útil estimada. A compra fica fora do lucro imediato; o desgaste estimado entra na DRE durante o uso. Registre também a compra no Financeiro para acompanhar o caixa.' }),
+    el('p', { class: 'pa-hint', text: `Depreciação estimada neste mês: ${brl(current)}. O cálculo usa linha reta e distribui dias parciais proporcionalmente.` }),
+    assets.length ? el('ul', { class: 'pa-list pa-tight' }, assets.map((asset) => el('li', { class: 'pa-list-item' }, [
+      el('div', { class: 'pa-grow' }, [el('strong', { text: asset.name }), el('span', { class: 'pa-muted', text: `${asset.use === 'producao' ? 'Produção' : 'Administrativo'} · ${brl(asset.cost)} · ${asset.usefulMonths} meses · desde ${fmtDate(`${asset.inUseDate}T12:00:00`)}` })]),
+      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'asset-edit', id: asset.id }) }, 'Editar'),
+    ]))) : el('p', { class: 'pa-empty', text: 'Nenhum bem cadastrado. A DRE ainda não calcula depreciação.' }),
+  ]);
+}
+
+MODALS['asset-edit'] = (ctx, modal) => assetEditSheet(ctx, modal.id);
+function assetEditSheet(ctx, id) {
+  const asset = id ? ctx.store.get('assets', id) : null;
+  const name = el('input', { class: 'pa-input', type: 'text', value: asset?.name || '', placeholder: 'Ex.: forno elétrico' });
+  const cost = el('input', { class: 'pa-input', type: 'text', inputmode: 'decimal', value: asset?.cost != null ? fmtMoneyInput(asset.cost) : '' });
+  const residual = el('input', { class: 'pa-input', type: 'text', inputmode: 'decimal', value: asset?.residualValue != null ? fmtMoneyInput(asset.residualValue) : '0' });
+  const months = el('input', { class: 'pa-input', type: 'number', min: '1', step: '1', value: asset?.usefulMonths || '60' });
+  const start = el('input', { class: 'pa-input', type: 'date', value: asset?.inUseDate || todayInput() });
+  const disposal = el('input', { class: 'pa-input', type: 'date', value: asset?.disposalDate || '' });
+  const use = el('select', { class: 'pa-input' }, [['producao', 'Produção'], ['administracao', 'Administrativo']].map(([value, label]) => el('option', { value, text: label, ...(value === (asset?.use || 'producao') ? { selected: 'selected' } : {}) })));
+  const error = el('p', { class: 'pa-sheet-msg', role: 'alert' });
+  const save = () => {
+    const value = parseNum(cost.value); const rest = parseNum(residual.value); const life = Number(months.value);
+    if (!name.value.trim() || !(value > 0) || rest == null || rest < 0 || rest >= value || !Number.isSafeInteger(life) || life < 1 || !start.value || (disposal.value && disposal.value < start.value)) {
+      error.textContent = 'Confira nome, custo positivo, valor residual menor que o custo, vida útil em meses e datas.';
+      return;
+    }
+    if (asset && !window.confirm(`Salvar alterações de ${asset.name}? A DRE histórica pode ser recalculada.`)) return;
+    ctx.actions.mutate((store) => store.upsertAsset({ ...(asset || { id: uuid() }), name: name.value.trim(), cost: value, residualValue: rest, usefulMonths: life, inUseDate: start.value, disposalDate: disposal.value || undefined, use: use.value }));
+  };
+  const remove = asset && el('button', { class: 'pa-btn pa-ghost', onclick: () => {
+    if (!window.confirm(`Excluir ${asset.name} do patrimônio? O cálculo de depreciação será removido da DRE, inclusive dos períodos anteriores.`)) return;
+    ctx.actions.mutate((store) => store.removeAsset(asset.id));
+  } }, 'Excluir bem');
+  return sheet({ title: asset ? 'Editar bem do patrimônio' : 'Novo bem do patrimônio', rows: [
+    field('Bem', name), field('Custo de aquisição (R$)', cost), field('Valor residual esperado ao fim do uso (R$)', residual),
+    field('Vida útil estimada (meses)', months), field('Disponível para uso desde', start), field('Uso principal', use),
+    field('Data da baixa/venda (opcional)', disposal),
+    el('p', { class: 'pa-hint', text: 'Se a aquisição foi registrada como investimento em Lançamentos, ela não reduz o lucro integralmente. A depreciação será custo de produção ou despesa administrativa conforme o uso principal.' }),
+    error, remove,
+  ].filter(Boolean), onSave: save, saveLabel: 'Salvar bem' });
 }
 
 function orderPaymentDueCard(ctx) {

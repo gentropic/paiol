@@ -14,7 +14,7 @@ export const SCHEMA_VERSION = 4;
 /** Append-only, immutable event collections (§2.2). */
 const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals', 'workTimeEvents'];
 /** Mutable master-data collections (§2.1). */
-const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems'];
+const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems', 'assets'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
 
 function normalizeProductSaleKind(product) {
@@ -102,7 +102,7 @@ export function emptyState() {
     config: { ...DEFAULT_CONFIG },
     configUpdatedAt: {},
     ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
-    suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], trashItems: [],
+    suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], assets: [], trashItems: [],
     notifications: [], shoppingItems: [],
     priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [], workTimeEvents: [],
   };
@@ -244,6 +244,8 @@ export class PaiolStore {
   upsertNotification(x) { return this._upsert('notifications', x); }
   /** @param {object} x */
   upsertShoppingItem(x) { return this._upsert('shoppingItems', x); }
+  /** Machinery and durable items; purchase stays outside the DRE, depreciation enters over time. */
+  upsertAsset(x) { return this._upsertDated('assets', x); }
 
   removeIngredient(id, at) { return this._trash('ingredients', id, at); }
   removeRecipe(id, at) { return this._trash('recipes', id, at); }
@@ -259,6 +261,7 @@ export class PaiolStore {
   removeCashAccount(id, at) { return this._trash('cashAccounts', id, at); }
   removeNotification(id, at) { return this._trash('notifications', id, at); }
   removeShoppingItem(id, at) { return this._trash('shoppingItems', id, at); }
+  removeAsset(id, at) { return this._trash('assets', id, at); }
 
   /** Deleted master records retained for 30 days, newest first. */
   activeTrash() {
@@ -436,7 +439,7 @@ export class PaiolStore {
       for (const rec of o[c] || []) {
         if (this._trashBlocks(c, rec.id)) continue;
         // Legacy records without updatedAt remain compatible: a dated edit wins over them.
-        if (['products', 'encomendas', 'ingredients', 'recipes', 'comandas', 'financeTitles'].includes(c)) {
+        if (['products', 'encomendas', 'ingredients', 'recipes', 'comandas', 'financeTitles', 'assets'].includes(c)) {
           const local = this.get(c, rec.id);
           if (local && String(local.updatedAt || '') > String(rec.updatedAt || '')) continue;
           if (local && JSON.stringify(local) === JSON.stringify(rec)) continue;

@@ -227,6 +227,7 @@ export function costBreakdown(store, recipeId, config, lens, stack = new Set()) 
   // The recipe's own (non-component) costs.
   const out = {
     ingredients: 0,
+    packaging: 0,
     labor: (config.valorHora * (active / 60)) / yield_,
     gas: (config.taxaGas * oven) / yield_,
     fixed: fixedShare(config, lens, production) / yield_,
@@ -237,7 +238,7 @@ export function costBreakdown(store, recipeId, config, lens, stack = new Set()) 
       const ing = store.ingredients.get(c.ref.id);
       if (!ing) throw new RefError('ingredient', c.ref.id);
       const qtyInStock = convert(c.qty, c.unit, ing.stockUnit, ing.conversions);
-      out.ingredients += (qtyInStock * priceOf(store, ing.id, lens.priceAt)) / yield_;
+      out[c.purpose === 'packaging' ? 'packaging' : 'ingredients'] += (qtyInStock * priceOf(store, ing.id, lens.priceAt)) / yield_;
     } else {
       const sub = store.recipes.get(c.ref.id);
       if (!sub) throw new RefError('recipe', c.ref.id);
@@ -246,6 +247,7 @@ export function costBreakdown(store, recipeId, config, lens, stack = new Set()) 
       const qtyInYield = convert(c.qty, c.unit, sub.yieldUnit); // recipe refs use built-in units only
       const share = qtyInYield / yield_;
       out.ingredients += subPerUnit.ingredients * share;
+      out.packaging += (subPerUnit.packaging || 0) * share;
       out.labor += subPerUnit.labor * share;
       out.gas += subPerUnit.gas * share;
       out.fixed += subPerUnit.fixed * share;
@@ -282,7 +284,8 @@ function fixedShare(config, lens, production) {
  * @returns {number}
  */
 export function cmvPerUnit(store, recipeId, config, lens) {
-  return costBreakdown(store, recipeId, config, lens).ingredients;
+  const d = costBreakdown(store, recipeId, config, lens);
+  return d.ingredients + d.packaging;
 }
 
 /**
@@ -294,7 +297,7 @@ export function cmvPerUnit(store, recipeId, config, lens) {
  */
 export function recipeUnitCost(store, recipeId, config, lens) {
   const d = costBreakdown(store, recipeId, config, lens);
-  return d.ingredients + d.gas + d.fixed;
+  return d.ingredients + d.packaging + d.gas + d.fixed;
 }
 
 /**

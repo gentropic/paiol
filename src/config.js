@@ -3,7 +3,7 @@
 // Dropbox App Console; we pick by origin.
 
 export const DROPBOX_APP_KEY = 'co3pz3u3sqx84m2';
-export const APP_VERSION = '0.3.32';
+export const APP_VERSION = '0.3.33';
 
 // Where Dropbox stores everything (App-folder app → relative to /Apps/Paiol/).
 export const REMOTE_BUSINESS_PATH = '/business.yaml';

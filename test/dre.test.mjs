@@ -11,7 +11,7 @@ function fixture() {
   const nextId = ids(); ensureFinanceFoundation(store, nextId);
   store.upsertClient({ id: 'client', name: 'Cliente' });
   store.upsertProduct({ id: 'product', name: 'Bolo', components: [], packagingCost: 0 });
-  store.upsertEncomenda({ id: 'order', at: '2026-07-01T12:00:00Z', deliveryDate: '2026-07-05T12:00:00Z', clienteId: 'client', itens: [{ productId: 'product', qty: 1, unitPrice: 100 }], total: 100 });
+  store.upsertEncomenda({ id: 'order', at: '2026-07-01T12:00:00Z', deliveryDate: '2026-07-05T12:00:00Z', entregue: true, clienteId: 'client', itens: [{ productId: 'product', qty: 1, unitPrice: 100 }], total: 100 });
   ensureFinanceFoundation(store, nextId);
   store.addSale({ id: 'sale', at: '2026-07-06T12:00:00Z', productId: 'product', qty: 1, unitPrice: 50, paymentFeePct: 0, costSnapshot: 0 });
   store.upsertFinanceTitle({ id: 'other', direction: 'receber', issuedAt: '2026-07-07', competenceDate: '2026-07-07', dueDate: '2026-07-20', amount: 20, description: 'Outra receita', categoryId: categoryByKey(store, 'outras-receitas').id, sourceType: 'manual' });
@@ -35,7 +35,7 @@ test('managerialDre uses competence, includes paid and pending titles, and exclu
   assert.equal(dre.openPayables, 60);
   assert.equal(dre.excluded, 500);
   assert.ok(dre.diagnostics.some((row) => row.title === 'Resultado positivo'));
-  assert.ok(dre.diagnostics.some((row) => row.title === 'Valores fora da DRE'));
+  assert.ok(dre.diagnostics.some((row) => row.title === 'Aquisições e investimentos fora do lucro'));
 });
 
 test('managerialDre follows competenceDate rather than due or settlement date', () => {
@@ -49,6 +49,7 @@ test('a stock-only purchase does not enter Accounts Payable or the DRE', () => {
   store.upsertPurchase({ id: 'stock-only', at: '2026-07-12', items: [], total: 90, financiallyTracked: false });
   store.upsertPurchase({ id: 'legacy-financial', at: '2026-07-13', items: [], total: 40 });
   const dre = managerialDre(store, '2026-07-01', '2026-07-31');
-  assert.equal(dre.directCosts, 40);
+  assert.equal(dre.directCosts, 0);
+  assert.equal(dre.excluded, 130);
   assert.equal(store.state.financeTitles.length, 0);
 });
