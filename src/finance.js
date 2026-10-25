@@ -336,28 +336,45 @@ export function listTitles(store, filters = {}) {
 }
 
 /** Actual cash movements only. Losses are managerial/stock facts and intentionally absent. */
-export function cashMovements(store) {
+export function cashMovements(store, { includeReversed = false } = {}) {
   const out = [];
   const fallbackAccount = defaultCashAccount(store)?.id;
-  for (const s of store.state.sales) if (!store.isReversed('sale', s.id)) out.push({ id: `sale:${s.id}`, at: s.at, direction: 'entrada', amount: saleNet(s), label: 'Venda rápida', sourceType: 'sale', sourceId: s.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'vendas')?.id });
-  for (const p of store.state.payments) if (!store.isReversed('payment', p.id)) {
-    const order = store.get('encomendas', p.encomendaId); const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === p.encomendaId);
-    out.push({ id: `payment:${p.id}`, at: p.at, direction: 'entrada', amount: Number(p.valor) || 0, label: title?.partyName || 'Recebimento de venda', method: p.forma, sourceType: 'payment', sourceId: p.id, accountId: fallbackAccount, categoryId: title?.categoryId, order });
+  for (const s of store.state.sales) {
+    const reversed = store.isReversed('sale', s.id);
+    if (!reversed || includeReversed) out.push({ id: `sale:${s.id}`, at: s.at, direction: 'entrada', amount: saleNet(s), label: 'Venda rápida', sourceType: 'sale', sourceId: s.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'vendas')?.id, reversed });
   }
-  for (const i of store.state.incomes) if (!store.isReversed('income', i.id)) out.push({ id: `income:${i.id}`, at: i.at, direction: 'entrada', amount: Number(i.valor) || 0, label: i.description || 'Outra receita', sourceType: 'income', sourceId: i.id, accountId: fallbackAccount, categoryId: i.categoryId });
-  for (const d of store.state.despesas) if (!store.isReversed('despesa', d.id)) out.push({ id: `despesa:${d.id}`, at: d.at, direction: 'saida', amount: Number(d.valor) || 0, label: d.description || store.get('categories', d.categoryId)?.name || 'Despesa', sourceType: 'despesa', sourceId: d.id, accountId: fallbackAccount, categoryId: d.categoryId });
-  for (const v of store.state.variableCosts) if (!store.isReversed('variableCost', v.id)) out.push({ id: `variableCost:${v.id}`, at: v.at, direction: 'saida', amount: Number(v.amount) || 0, label: v.description || v.note || 'Custo antigo', sourceType: 'variableCost', sourceId: v.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'outros-custos')?.id });
+  for (const p of store.state.payments) {
+    const reversed = store.isReversed('payment', p.id);
+    if (reversed && !includeReversed) continue;
+    const order = store.get('encomendas', p.encomendaId); const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === p.encomendaId);
+    out.push({ id: `payment:${p.id}`, at: p.at, direction: 'entrada', amount: Number(p.valor) || 0, label: title?.partyName || 'Recebimento de venda', method: p.forma, sourceType: 'payment', sourceId: p.id, accountId: fallbackAccount, categoryId: title?.categoryId, order, reversed });
+  }
+  for (const i of store.state.incomes) {
+    const reversed = store.isReversed('income', i.id);
+    if (!reversed || includeReversed) out.push({ id: `income:${i.id}`, at: i.at, direction: 'entrada', amount: Number(i.valor) || 0, label: i.description || 'Outra receita', sourceType: 'income', sourceId: i.id, accountId: fallbackAccount, categoryId: i.categoryId, reversed });
+  }
+  for (const d of store.state.despesas) {
+    const reversed = store.isReversed('despesa', d.id);
+    if (!reversed || includeReversed) out.push({ id: `despesa:${d.id}`, at: d.at, direction: 'saida', amount: Number(d.valor) || 0, label: d.description || store.get('categories', d.categoryId)?.name || 'Despesa', sourceType: 'despesa', sourceId: d.id, accountId: fallbackAccount, categoryId: d.categoryId, reversed });
+  }
+  for (const v of store.state.variableCosts) {
+    const reversed = store.isReversed('variableCost', v.id);
+    if (!reversed || includeReversed) out.push({ id: `variableCost:${v.id}`, at: v.at, direction: 'saida', amount: Number(v.amount) || 0, label: v.description || v.note || 'Custo antigo', sourceType: 'variableCost', sourceId: v.id, accountId: fallbackAccount, categoryId: categoryByKey(store, 'outros-custos')?.id, reversed });
+  }
   for (const st of store.state.financeSettlements) {
-    if (store.isReversed('financeSettlement', st.id)) continue;
+    const reversed = store.isReversed('financeSettlement', st.id);
+    if (reversed && !includeReversed) continue;
     if (['discount', 'credit', 'loss', 'client-payment-allocation'].includes(st.kind)) continue;
     const title = store.get('financeTitles', st.titleId); if (!title) continue;
-    out.push({ id: `financeSettlement:${st.id}`, at: st.at, direction: title.direction === 'receber' ? 'entrada' : 'saida', amount: Number(st.amount) || 0, label: title.description, method: st.method, sourceType: 'financeSettlement', sourceId: st.id, titleId: title.id, accountId: st.accountId || fallbackAccount, categoryId: title.categoryId });
+    out.push({ id: `financeSettlement:${st.id}`, at: st.at, direction: title.direction === 'receber' ? 'entrada' : 'saida', amount: Number(st.amount) || 0, label: title.description, method: st.method, sourceType: 'financeSettlement', sourceId: st.id, titleId: title.id, accountId: st.accountId || fallbackAccount, categoryId: title.categoryId, reversed });
   }
-  for (const a of store.state.cashAdjustments) if (!store.isReversed('cashAdjustment', a.id)) {
+  for (const a of store.state.cashAdjustments) {
+    const reversed = store.isReversed('cashAdjustment', a.id);
+    if (reversed && !includeReversed) continue;
     if (a.kind === 'transfer') {
-      out.push({ id: `cashAdjustment:${a.id}:out`, at: a.at, direction: 'saida', amount: Number(a.amount) || 0, label: a.description || 'Transferência', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.accountId, transfer: true });
-      out.push({ id: `cashAdjustment:${a.id}:in`, at: a.at, direction: 'entrada', amount: Number(a.amount) || 0, label: a.description || 'Transferência', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.toAccountId, transfer: true });
-    } else out.push({ id: `cashAdjustment:${a.id}`, at: a.at, direction: a.direction || 'entrada', amount: Number(a.amount) || 0, label: a.description || 'Ajuste financeiro', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.accountId || fallbackAccount, categoryId: a.categoryId, adjustment: true });
+      out.push({ id: `cashAdjustment:${a.id}:out`, at: a.at, direction: 'saida', amount: Number(a.amount) || 0, label: a.description || 'Transferência', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.accountId, transfer: true, reversed });
+      out.push({ id: `cashAdjustment:${a.id}:in`, at: a.at, direction: 'entrada', amount: Number(a.amount) || 0, label: a.description || 'Transferência', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.toAccountId, transfer: true, reversed });
+    } else out.push({ id: `cashAdjustment:${a.id}`, at: a.at, direction: a.direction || 'entrada', amount: Number(a.amount) || 0, label: a.description || 'Ajuste financeiro', sourceType: 'cashAdjustment', sourceId: a.id, accountId: a.accountId || fallbackAccount, categoryId: a.categoryId, adjustment: true, reversed });
   }
   return out.sort((a, b) => (a.at < b.at ? 1 : -1));
 }

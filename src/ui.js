@@ -3996,6 +3996,7 @@ function financeReportsPanel(ctx) {
   const { store, view } = ctx;
   const start = view.finStart; const end = view.finEnd;
   const mode = view.finReportMode || 'realizado';
+  const hideReversals = view.finHideReversals !== false;
   const openPeriod = view.finReportOpenPeriod || 'all';
   const filterStart = mode === 'aberto' && openPeriod === 'all' ? null : start;
   const filterEnd = mode === 'aberto' && openPeriod === 'all' ? null : end;
@@ -4008,7 +4009,7 @@ function financeReportsPanel(ctx) {
       direction: row.title.direction === 'receber' ? 'entrada' : 'saida', amount: row.balance,
       label: row.title.description, partyName: row.title.partyName, status: row.status, categoryId: row.title.categoryId,
     }))
-    : cashMovements(store).filter((movement) => !movement.transfer);
+    : cashMovements(store, { includeReversed: !hideReversals }).filter((movement) => !movement.transfer);
   const allMovements = baseMovements.flatMap((movement) => {
     if (!movement.titleId || movement.direction !== 'saida') return [movement];
     const title = store.get('financeTitles', movement.titleId);
@@ -4053,10 +4054,11 @@ function financeReportsPanel(ctx) {
     && (direction === 'todos' || m.direction === direction)
     && (!selectedCategory || categoryId(m) === selectedCategory));
   const openTitleCount = mode === 'aberto' ? new Set(movements.map((movement) => movement.titleId)).size : 0;
-  const inTotal = movements.filter((m) => m.direction === 'entrada').reduce((s, m) => s + m.amount, 0);
-  const outTotal = movements.filter((m) => m.direction === 'saida').reduce((s, m) => s + m.amount, 0);
+  const inTotal = movements.filter((m) => !m.reversed && m.direction === 'entrada').reduce((s, m) => s + m.amount, 0);
+  const outTotal = movements.filter((m) => !m.reversed && m.direction === 'saida').reduce((s, m) => s + m.amount, 0);
   const byCategory = new Map();
   for (const movement of movements) {
+    if (movement.reversed) continue;
     const id = categoryId(movement);
     const totals = byCategory.get(id) || { entrada: 0, saida: 0 };
     totals[movement.direction] += movement.amount;
@@ -4068,10 +4070,10 @@ function financeReportsPanel(ctx) {
     el('td', { class: 'pa-num', text: brl(totals.entrada) }),
     el('td', { class: 'pa-num', text: brl(totals.saida) }),
   ]));
-  const movementRows = movements.map((movement) => el('tr', {}, [
+  const movementRows = movements.map((movement) => el('tr', { class: movement.reversed ? 'pa-reversed' : '' }, [
     el('td', { text: fmtDate(movement.at) }),
     mode === 'aberto' && el('td', { text: movement.partyName || 'Não informado' }),
-    el('td', {}, mode === 'aberto' ? el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: movement.titleId }) }, movement.label) : movement.label),
+    el('td', {}, mode === 'aberto' ? el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: movement.titleId }) }, movement.label) : [el('span', { text: movement.label }), movement.reversed && el('span', { class: 'pa-badge', text: 'estornado' })].filter(Boolean)),
     el('td', { text: categoryName(categoryId(movement)) }),
     mode === 'aberto' && el('td', { text: FIN_STATUS[movement.status]?.[0] || movement.status || 'Em aberto' }),
     el('td', { class: `pa-num${movement.direction === 'saida' ? ' pa-bad' : ' pa-positive'}`, text: `${movement.direction === 'saida' ? '− ' : '+ '}${brl(movement.amount)}` }),
@@ -4082,7 +4084,7 @@ function financeReportsPanel(ctx) {
   ]));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Decisões com clareza' }), el('h2', { text: 'Relatórios financeiros' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => {
-      const lines = [['Data', 'Tipo', 'Pessoa / fornecedor', 'Descrição', 'Plano de conta', 'Situação', 'Valor'], ...movements.map((m) => [dateOnly(m.at), m.direction === 'entrada' ? 'Entrada' : 'Saída', m.partyName || '', m.label, categoryName(categoryId(m)), mode === 'aberto' ? FIN_STATUS[m.status]?.[0] || m.status || 'Em aberto' : 'Realizado', m.amount.toFixed(2).replace('.', ',')])];
+      const lines = [['Data', 'Tipo', 'Pessoa / fornecedor', 'Descrição', 'Plano de conta', 'Situação', 'Valor'], ...movements.map((m) => [dateOnly(m.at), m.direction === 'entrada' ? 'Entrada' : 'Saída', m.partyName || '', m.label, categoryName(categoryId(m)), m.reversed ? 'Estornado' : mode === 'aberto' ? FIN_STATUS[m.status]?.[0] || m.status || 'Em aberto' : 'Realizado', m.amount.toFixed(2).replace('.', ',')])];
       downloadFile(`financeiro-${mode}-${filterStart || 'inicio'}-${filterEnd || 'fim'}.csv`, lines.map((r) => r.map(csvCell).join(';')).join('\n'), 'text/csv');
     } }, 'Exportar CSV')]),
     el('div', { class: 'pa-chiprow' }, [
@@ -4094,6 +4096,7 @@ function financeReportsPanel(ctx) {
       el('button', { class: `pa-chip${openPeriod === 'custom' ? ' pa-chip-on' : ''}`, 'data-testid': 'fin-report-period-custom', onclick: () => ctx.actions.setFinanceView({ finReportOpenPeriod: 'custom' }) }, 'Selecionar datas'),
     ]),
     (mode === 'realizado' || openPeriod === 'custom') && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), 'fin-report'),
+    mode === 'realizado' && el('label', { class: 'pa-toggle' }, [el('input', { type: 'checkbox', 'data-testid': 'fin-report-hide-reversals', ...(hideReversals ? { checked: 'checked' } : {}), onchange: (event) => ctx.actions.setFinanceView({ finHideReversals: event.target.checked }) }), el('span', { text: 'Ocultar estornos' })]),
     el('div', { class: 'pa-filtergrid' }, [
       field(mode === 'aberto' ? 'Tipo de conta' : 'Tipo de movimentação', el('select', { class: 'pa-input', 'data-testid': 'fin-report-direction', onchange: (event) => ctx.actions.setFinanceView({ finReportDirection: event.target.value, finReportCategoryId: '' }) }, mode === 'aberto' ? [
         el('option', { value: 'todos', text: 'A receber e a pagar', ...(direction === 'todos' ? { selected: 'selected' } : {}) }),
@@ -4111,7 +4114,7 @@ function financeReportsPanel(ctx) {
     ]),
     el('p', { class: 'pa-hint', text: mode === 'aberto'
       ? 'Mostra o saldo que ainda falta receber ou pagar. Com datas selecionadas, o filtro usa o vencimento; pagamentos parciais já foram abatidos. Nas compras, os valores adicionais são distribuídos proporcionalmente ao saldo restante.'
-      : 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto não entram neste total. Nas compras, frete, impostos, juros e encargos aparecem em contas próprias; os itens permanecem na categoria escolhida no registro.' }),
+      : 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto e registros estornados não entram nos totais. Nas compras, frete, impostos, juros e encargos aparecem em contas próprias; os itens permanecem na categoria escolhida no registro.' }),
     el('div', { class: 'pa-statgrid' }, [statCard(mode === 'aberto' ? 'A receber' : 'Entradas recebidas', brl(inTotal), 'ok'), statCard(mode === 'aberto' ? 'A pagar' : 'Saídas pagas', brl(outTotal), outTotal ? 'warn' : 'soft'), statCard(mode === 'aberto' ? 'Diferença do filtro' : 'Saldo do filtro', brl(inTotal - outTotal), inTotal - outTotal >= 0 ? 'navy' : 'bad')]),
     el('h3', { class: 'pa-h3', text: 'Total por plano de conta' }),
     categoryRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Plano de conta' }), el('td', { class: 'pa-num', text: mode === 'aberto' ? 'A receber' : 'Entradas' }), el('td', { class: 'pa-num', text: mode === 'aberto' ? 'A pagar' : 'Saídas' })]), ...categoryRows])) : el('p', { class: 'pa-empty', text: 'Nenhuma conta encontrada para estes filtros.' }),
@@ -4183,6 +4186,8 @@ function financeiroPanel(ctx) {
   for (const a of store.state.cashAdjustments) movements.push({ id: a.id, at: a.at, type: a.direction === 'saida' ? 'despesa' : 'receita', label: a.kind === 'transfer' ? 'Transferência entre contas' : a.kind === 'client-payment' ? 'Pagamento total de cliente' : 'Ajuste financeiro', description: a.description || '', amount: a.amount || 0, reversalKind: 'cashAdjustment', reversed: store.isReversed('cashAdjustment', a.id), transfer: a.kind === 'transfer' });
   let items = movements.filter((m) => monthOf(m.at) === month);
   if (type !== 'todos') items = items.filter((m) => m.type === type);
+  const hideReversals = ctx.view.finHideReversals !== false;
+  if (hideReversals) items = items.filter((m) => !m.reversed);
   items.sort((a, b) => (a.at < b.at ? 1 : -1));
   const entrada = items.reduce((s, m) => !m.reversed && !m.pending && !m.noncash && !m.transfer && m.type === 'receita' ? s + m.amount : s, 0);
   const saida = items.reduce((s, m) => !m.reversed && !m.pending && !m.noncash && !m.transfer && m.type !== 'receita' ? s + m.amount : s, 0);
@@ -4212,6 +4217,7 @@ function financeiroPanel(ctx) {
     el('div', { class: 'pa-row pa-period-title' }, [el('span', { class: 'pa-lab', text: 'Mês de referência' }), monthInput]),
     el('div', { class: 'pa-statgrid' }, [statCard('Entradas', brl(entrada), 'ok'), statCard('Saídas', brl(saida), saida > 0 ? 'warn' : 'soft'), statCard('Saldo', brl(entrada - saida), entrada - saida >= 0 ? 'navy' : 'bad')]),
     el('div', { class: 'pa-chiprow' }, [chip('todos', 'Todos'), chip('receita', 'Receitas'), chip('despesa', 'Despesas'), chip('custo', 'Custos')]),
+    el('label', { class: 'pa-toggle' }, [el('input', { type: 'checkbox', 'data-testid': 'fin-entries-hide-reversals', ...(hideReversals ? { checked: 'checked' } : {}), onchange: (event) => ctx.actions.setFinanceView({ finHideReversals: event.target.checked }) }), el('span', { text: 'Ocultar estornos' })]),
     items.length ? el('div', {}, [searchInput('Buscar movimentação…', list, 'fin-search'), list]) : el('p', { class: 'pa-empty', text: 'Nenhuma movimentação com este filtro.' }),
   ]);
 }
