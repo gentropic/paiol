@@ -8,11 +8,12 @@
 import { indexStore } from './cost-engine.js';
 import { toYaml, fromYaml } from './yaml-bridge.js';
 import { isBundleProduct, orderProduction } from './bundles.js';
+import { productIngredientUsage } from './inventory.js';
 
 export const SCHEMA_VERSION = 4;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals', 'workTimeEvents'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'inventoryAdjustments', 'reversals', 'workTimeEvents'];
 /** Mutable master-data collections (§2.1). */
 const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems', 'assets'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
@@ -104,7 +105,7 @@ export function emptyState() {
     ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
     suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], assets: [], trashItems: [],
     notifications: [], shoppingItems: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [], workTimeEvents: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], inventoryAdjustments: [], reversals: [], workTimeEvents: [],
   };
 }
 
@@ -229,7 +230,16 @@ export class PaiolStore {
     return this._upsert('encomendas', { ...x, updatedAt });
   }
   /** @param {import('./domain.js').Comanda} x */
-  upsertComanda(x) { return this._upsertDated('comandas', x); }
+  upsertComanda(x) {
+    const previous = this.get('comandas', x.id);
+    const itens = (x.itens || []).map((item) => {
+      if (!(Number(item.realizado) > 0)) return item;
+      const prior = previous?.itens?.find((row) => row.productId === item.productId);
+      const usage = item.ingredientUsagePerUnit || prior?.ingredientUsagePerUnit;
+      return { ...item, ingredientUsagePerUnit: usage || Object.fromEntries(productIngredientUsage(this, item.productId)) };
+    });
+    return this._upsertDated('comandas', { ...x, itens });
+  }
   /** @param {import('./domain.js').Category} x */
   upsertCategory(x) { return this._upsert('categories', x); }
   /** @param {object} x */
@@ -317,6 +327,8 @@ export class PaiolStore {
   addFinanceSettlement(ev) { return this._append('financeSettlements', ev); }
   /** @param {object} ev */
   addCashAdjustment(ev) { return this._append('cashAdjustments', ev); }
+  /** Physical inventory count difference; kept in the event log for audit and sync. */
+  addInventoryAdjustment(ev) { return this._append('inventoryAdjustments', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
   /** Start or end of the observed working day; a reference, not direct recipe labor. */

@@ -6149,6 +6149,103 @@ function bundleCompositionText(store, item) {
   }).join(', ');
 }
 
+// ── src/inventory.js ──
+const add = (target, source, factor = 1) => {
+  for (const [id, qty] of source) target.set(id, (target.get(id) || 0) + qty * factor);
+  return target;
+};
+
+/** Ingredient quantities in stock units consumed by one yield-unit of a recipe. */
+function recipeIngredientUsage(store, recipeId, stack = new Set()) {
+  const recipe = store.get('recipes', recipeId);
+  if (!recipe || stack.has(recipeId) || !(Number(recipe.yieldNominal) > 0)) return new Map();
+  stack.add(recipeId);
+  const result = new Map();
+  for (const component of recipe.components || []) {
+    if (component.ref?.kind === 'ingredient') {
+      const ingredient = store.get('ingredients', component.ref.id);
+      if (!ingredient) continue;
+      try {
+        const stockQty = convert(Number(component.qty) || 0, component.unit, ingredient.stockUnit, ingredient.conversions);
+        result.set(ingredient.id, (result.get(ingredient.id) || 0) + stockQty / Number(recipe.yieldNominal));
+      } catch { /* incompatible legacy unit: do not invent a stock movement */ }
+    } else if (component.ref?.kind === 'recipe') {
+      const nested = store.get('recipes', component.ref.id);
+      if (!nested) continue;
+      try {
+        const nestedYieldUnits = convert(Number(component.qty) || 0, component.unit, nested.yieldUnit);
+        add(result, recipeIngredientUsage(store, nested.id, stack), nestedYieldUnits / Number(recipe.yieldNominal));
+      } catch { /* incompatible legacy unit */ }
+    }
+  }
+  stack.delete(recipeId);
+  return result;
+}
+
+/** Ingredient quantities in stock units consumed by one produced unit of a product. */
+function productIngredientUsage(store, productId, stack = new Set()) {
+  const product = store.get('products', productId);
+  if (!product || stack.has(productId)) return new Map();
+  stack.add(productId);
+  const result = new Map();
+  for (const component of product.components || []) {
+    const qty = Number(component.qty) || 0;
+    if (component.kind === 'recipe') add(result, recipeIngredientUsage(store, component.id), qty);
+    // Bundle children appear as separate produced rows in the comanda. Only its physical
+    // packaging/details are consumed on the parent row, preventing duplicate stock usage.
+    else if (component.kind === 'product' && !isBundleProduct(product)) add(result, productIngredientUsage(store, component.id, stack), qty);
+    else if (component.kind === 'ingredient') result.set(component.id, (result.get(component.id) || 0) + qty);
+  }
+  stack.delete(productId);
+  return result;
+}
+
+/** Current ingredient stock. Sales never enter this calculation. */
+function inventorySummary(store) {
+  const purchased = new Map();
+  for (const purchase of store.state.purchases || []) {
+    for (const item of purchase.items || []) purchased.set(item.ingredientId, (purchased.get(item.ingredientId) || 0) + (Number(item.qty) || 0));
+  }
+  const producedUsage = new Map();
+  for (const command of store.state.comandas || []) for (const item of command.itens || []) {
+    const produced = Number(item.realizado) || 0;
+    if (produced > 0) {
+      const usage = item.ingredientUsagePerUnit
+        ? new Map(Object.entries(item.ingredientUsagePerUnit).filter(([, qty]) => Number.isFinite(Number(qty))).map(([id, qty]) => [id, Number(qty)]))
+        : productIngredientUsage(store, item.productId);
+      add(producedUsage, usage, produced);
+    }
+  }
+  const lost = new Map();
+  for (const loss of store.state.perdas || []) {
+    if (store.isReversed('perda', loss.id) || loss.refKind !== 'insumo' || !loss.refId) continue;
+    lost.set(loss.refId, (lost.get(loss.refId) || 0) + (Number(loss.qty) || 0));
+  }
+  const adjustments = new Map();
+  for (const adjustment of store.state.inventoryAdjustments || []) {
+    if (store.isReversed('inventoryAdjustment', adjustment.id)) continue;
+    const delta = Number(adjustment.delta);
+    if (!Number.isFinite(delta)) continue;
+    adjustments.set(adjustment.ingredientId, (adjustments.get(adjustment.ingredientId) || 0) + delta);
+  }
+  return (store.state.ingredients || []).map((ingredient) => {
+    const opening = Number(ingredient.stockQty) || 0;
+    const purchases = purchased.get(ingredient.id) || 0;
+    const production = producedUsage.get(ingredient.id) || 0;
+    const losses = lost.get(ingredient.id) || 0;
+    const adjustment = adjustments.get(ingredient.id) || 0;
+    const current = opening + purchases - production - losses + adjustment;
+    const minimum = Math.max(0, Number(ingredient.minStockQty) || 0);
+    // A missing minimum must not hide an impossible negative balance. Small floating-point
+    // residue is ignored so conversions do not create a false shortage warning.
+    return { ingredient, opening, purchases, production, losses, adjustment, current, minimum, low: current < -0.000001 || (minimum > 0 && current <= minimum) };
+  });
+}
+
+function ingredientInventory(store, ingredientId) {
+  return inventorySummary(store).find((row) => row.ingredient.id === ingredientId) || null;
+}
+
 // ── src/store.js ──
 // paiol — the business store. The whole business is one in-memory state object that
 // serializes to a single diffable YAML document (§5). Master data is mutable; the
@@ -6161,10 +6258,11 @@ function bundleCompositionText(store, item) {
 
 
 
+
 const SCHEMA_VERSION = 4;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals', 'workTimeEvents'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'inventoryAdjustments', 'reversals', 'workTimeEvents'];
 /** Mutable master-data collections (§2.1). */
 const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems', 'assets'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
@@ -6256,7 +6354,7 @@ function emptyState() {
     ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
     suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], assets: [], trashItems: [],
     notifications: [], shoppingItems: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [], workTimeEvents: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], inventoryAdjustments: [], reversals: [], workTimeEvents: [],
   };
 }
 
@@ -6381,7 +6479,16 @@ class PaiolStore {
     return this._upsert('encomendas', { ...x, updatedAt });
   }
   /** @param {import('./domain.js').Comanda} x */
-  upsertComanda(x) { return this._upsertDated('comandas', x); }
+  upsertComanda(x) {
+    const previous = this.get('comandas', x.id);
+    const itens = (x.itens || []).map((item) => {
+      if (!(Number(item.realizado) > 0)) return item;
+      const prior = previous?.itens?.find((row) => row.productId === item.productId);
+      const usage = item.ingredientUsagePerUnit || prior?.ingredientUsagePerUnit;
+      return { ...item, ingredientUsagePerUnit: usage || Object.fromEntries(productIngredientUsage(this, item.productId)) };
+    });
+    return this._upsertDated('comandas', { ...x, itens });
+  }
   /** @param {import('./domain.js').Category} x */
   upsertCategory(x) { return this._upsert('categories', x); }
   /** @param {object} x */
@@ -6469,6 +6576,8 @@ class PaiolStore {
   addFinanceSettlement(ev) { return this._append('financeSettlements', ev); }
   /** @param {object} ev */
   addCashAdjustment(ev) { return this._append('cashAdjustments', ev); }
+  /** Physical inventory count difference; kept in the event log for audit and sync. */
+  addInventoryAdjustment(ev) { return this._append('inventoryAdjustments', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
   /** Start or end of the observed working day; a reference, not direct recipe labor. */
@@ -7206,7 +7315,7 @@ class DropboxAuthError extends Error {
 // Dropbox App Console; we pick by origin.
 
 const DROPBOX_APP_KEY = 'co3pz3u3sqx84m2';
-const APP_VERSION = '0.3.37';
+const APP_VERSION = '0.3.40';
 
 // Where Dropbox stores everything (App-folder app → relative to /Apps/Paiol/).
 const REMOTE_BUSINESS_PATH = '/business.yaml';
@@ -8707,7 +8816,10 @@ function cashMovements(store, { includeReversed = false } = {}) {
 }
 
 function projectedMovements(store, start, end, filters = {}) {
-  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.accountId || true) && (!filters.categoryId || canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId))).map((r) => ({
+  // An unpaid title has no cash account yet. Do not attribute company-wide forecasts
+  // to a specific account selected in the cash-flow filter.
+  if (filters.accountId) return [];
+  return listTitles(store, { status: 'aberto' }).filter((r) => r.balance > 0.005 && inRange(r.title.dueDate, start, end) && (!filters.categoryId || canonicalCategoryId(store, r.title.categoryId) === canonicalCategoryId(store, filters.categoryId))).map((r) => ({
     id: `projected:${r.title.id}`, at: r.title.dueDate, direction: r.title.direction === 'receber' ? 'entrada' : 'saida', amount: r.balance,
     label: r.title.description, projected: true, titleId: r.title.id, categoryId: r.title.categoryId,
   }));
@@ -8747,88 +8859,6 @@ function financeDashboard(store, month, today = localFinanceDay()) {
     overduePayable: payables.filter((r) => r.status === 'vencido').reduce((s, r) => s + r.balance, 0),
     dueSoon: [...receivables, ...payables].filter((r) => financeDay(r.title.dueDate) >= today && financeDay(r.title.dueDate) <= localFinanceDay(new Date(new Date(`${today}T12:00:00`).getTime() + 7 * 86400000))).length,
   };
-}
-
-// ── src/inventory.js ──
-const add = (target, source, factor = 1) => {
-  for (const [id, qty] of source) target.set(id, (target.get(id) || 0) + qty * factor);
-  return target;
-};
-
-/** Ingredient quantities in stock units consumed by one yield-unit of a recipe. */
-function recipeIngredientUsage(store, recipeId, stack = new Set()) {
-  const recipe = store.get('recipes', recipeId);
-  if (!recipe || stack.has(recipeId) || !(Number(recipe.yieldNominal) > 0)) return new Map();
-  stack.add(recipeId);
-  const result = new Map();
-  for (const component of recipe.components || []) {
-    if (component.ref?.kind === 'ingredient') {
-      const ingredient = store.get('ingredients', component.ref.id);
-      if (!ingredient) continue;
-      try {
-        const stockQty = convert(Number(component.qty) || 0, component.unit, ingredient.stockUnit, ingredient.conversions);
-        result.set(ingredient.id, (result.get(ingredient.id) || 0) + stockQty / Number(recipe.yieldNominal));
-      } catch { /* incompatible legacy unit: do not invent a stock movement */ }
-    } else if (component.ref?.kind === 'recipe') {
-      const nested = store.get('recipes', component.ref.id);
-      if (!nested) continue;
-      try {
-        const nestedYieldUnits = convert(Number(component.qty) || 0, component.unit, nested.yieldUnit);
-        add(result, recipeIngredientUsage(store, nested.id, stack), nestedYieldUnits / Number(recipe.yieldNominal));
-      } catch { /* incompatible legacy unit */ }
-    }
-  }
-  stack.delete(recipeId);
-  return result;
-}
-
-/** Ingredient quantities in stock units consumed by one produced unit of a product. */
-function productIngredientUsage(store, productId, stack = new Set()) {
-  const product = store.get('products', productId);
-  if (!product || stack.has(productId)) return new Map();
-  stack.add(productId);
-  const result = new Map();
-  for (const component of product.components || []) {
-    const qty = Number(component.qty) || 0;
-    if (component.kind === 'recipe') add(result, recipeIngredientUsage(store, component.id), qty);
-    // Bundle children appear as separate produced rows in the comanda. Only its physical
-    // packaging/details are consumed on the parent row, preventing duplicate stock usage.
-    else if (component.kind === 'product' && !isBundleProduct(product)) add(result, productIngredientUsage(store, component.id, stack), qty);
-    else if (component.kind === 'ingredient') result.set(component.id, (result.get(component.id) || 0) + qty);
-  }
-  stack.delete(productId);
-  return result;
-}
-
-/** Current ingredient stock. Sales never enter this calculation. */
-function inventorySummary(store) {
-  const purchased = new Map();
-  for (const purchase of store.state.purchases || []) {
-    for (const item of purchase.items || []) purchased.set(item.ingredientId, (purchased.get(item.ingredientId) || 0) + (Number(item.qty) || 0));
-  }
-  const producedUsage = new Map();
-  for (const command of store.state.comandas || []) for (const item of command.itens || []) {
-    const produced = Number(item.realizado) || 0;
-    if (produced > 0) add(producedUsage, productIngredientUsage(store, item.productId), produced);
-  }
-  const lost = new Map();
-  for (const loss of store.state.perdas || []) {
-    if (store.isReversed('perda', loss.id) || loss.refKind !== 'insumo' || !loss.refId) continue;
-    lost.set(loss.refId, (lost.get(loss.refId) || 0) + (Number(loss.qty) || 0));
-  }
-  return (store.state.ingredients || []).map((ingredient) => {
-    const opening = Number(ingredient.stockQty) || 0;
-    const purchases = purchased.get(ingredient.id) || 0;
-    const production = producedUsage.get(ingredient.id) || 0;
-    const losses = lost.get(ingredient.id) || 0;
-    const current = opening + purchases - production - losses;
-    const minimum = Math.max(0, Number(ingredient.minStockQty) || 0);
-    return { ingredient, opening, purchases, production, losses, current, minimum, low: minimum > 0 && current <= minimum };
-  });
-}
-
-function ingredientInventory(store, ingredientId) {
-  return inventorySummary(store).find((row) => row.ingredient.id === ingredientId) || null;
 }
 
 // ── src/assets.js ──
@@ -8891,21 +8921,27 @@ function orderMaterialEstimate(store, order) {
   const engine = store.toEngineStore();
   const config = store.getConfig(); const lens = estimateLens(config);
   let ingredients = 0; let packaging = 0; let missing = 0;
-  const one = (id, qty) => {
+  const one = (id, qty, sign = 1) => {
     if (!(qty > 0)) return;
     try {
       const product = store.get('products', id);
       const parts = productBreakdown(engine, id, config, lens);
-      ingredients += (Number(parts.ingredients) || 0) * qty;
-      packaging += ((Number(parts.packaging) || 0) + (Number(product?.packagingCost) || 0)) * qty;
+      ingredients += (Number(parts.ingredients) || 0) * qty * sign;
+      packaging += ((Number(parts.packaging) || 0) + (Number(product?.packagingCost) || 0)) * qty * sign;
     } catch { missing++; }
   };
   for (const item of order.itens || []) {
     const qty = Math.max(0, Number(item.qty) || 0);
     one(item.productId, qty);
+    // Older catalog bundles can contain standard products. An order with a saved custom
+    // composition replaces them, rather than consuming both sets of products.
+    const parent = store.get('products', item.productId);
+    if (isBundleProduct(parent) && Array.isArray(item.bundleItems)) {
+      for (const child of bundleProductItems(parent)) one(child.productId, qty * child.qty, -1);
+    }
     for (const child of item.bundleItems || []) one(child.productId, qty * Math.max(0, Number(child.qty) || 0));
   }
-  return { ingredients, packaging, missing };
+  return { ingredients: Math.max(0, ingredients), packaging: Math.max(0, packaging), missing };
 }
 
 function managerialDre(store, start, end) {
@@ -9026,8 +9062,9 @@ function managerialDre(store, start, end) {
   }
   const depreciation = depreciationSummary(store, start, end);
   const inventory = inventorySummary(store);
-  let inventoryValue = 0; let unpricedInventory = 0;
+  let inventoryValue = 0; let unpricedInventory = 0; let negativeInventory = 0;
   for (const row of inventory) {
+    if (row.current < -0.000001) negativeInventory++;
     if (!(row.current > 0)) continue;
     const price = store.currentPrice(row.ingredient.id);
     if (price == null) unpricedInventory++;
@@ -9060,12 +9097,13 @@ function managerialDre(store, start, end) {
   if (missingMaterials) note('warn', 'Custos de produtos incompletos', `${missingMaterials} item(ns) vendidos não tiveram o custo de insumos calculado. Confira o cadastro e os preços de compra.`);
   if (legacyCostEstimates) note('info', 'Vendas antigas sem custo congelado', `${legacyCostEstimates} venda(s) antigas usam os preços atuais de insumos como estimativa. Mudanças de preço podem alterar a DRE histórica.`);
   if (unpricedInventory) note('warn', 'Estoque sem preço', `${unpricedInventory} insumo(s) com estoque não têm preço e ficaram fora do valor estimado.`);
+  if (negativeInventory) note('warn', 'Estoque negativo', `${negativeInventory} insumo(s) apresentam saldo negativo. Confira as contagens físicas antes de usar o valor de estoque para decidir.`);
 
   const rows = (map) => [...map.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   return {
     start, end, salesRevenue: salesRevenue - settlementDiscounts, salesGross: salesRevenue + salesDiscounts, salesDiscounts: salesDiscounts + settlementDiscounts, salesReturns, salesTaxes,
     otherRevenue, grossRevenue, directCosts, materialCosts, packagingCosts, productionDepreciation: depreciation.production,
-    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, missingMaterials, legacyCostEstimates,
+    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, negativeInventory, missingMaterials, legacyCostEstimates,
     grossProfit, sellingExpenses, indirectCosts, clientLosses,
     operatingExpenses, fixedExpenses, variableExpenses, netResult, grossMarginPct, netMarginPct,
     openReceivables, openPayables, overdueReceivables, excluded, unclassified, diagnostics,
@@ -9222,9 +9260,9 @@ function productSummary(store, month) {
   const lens = estimateLens(config);
   const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
   const map = new Map();
-  const add = (pid, qty, revenue) => {
+  const add = (pid, qty, revenue, costPerUnit = null) => {
     const e = map.get(pid) || { qty: 0, faturamento: 0, custoEst: 0 };
-    e.qty += qty; e.faturamento += revenue; e.custoEst += qty * unitCost(pid);
+    e.qty += qty; e.faturamento += revenue; e.custoEst += qty * (costPerUnit ?? unitCost(pid));
     map.set(pid, e);
   };
   for (const s of store.state.sales) {
@@ -9233,7 +9271,14 @@ function productSummary(store, month) {
   }
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt || ym(e.quickSale ? e.at : e.deliveryDate) !== month) continue;
-    for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) add(line.productId, line.qty, line.total);
+    const itemGross = (e.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+    const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(e.discount) || 0)) / itemGross : 1;
+    for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) {
+      const parent = store.get('products', it.productId);
+      const replaced = line.productId === it.productId && isBundleProduct(parent) && Array.isArray(it.bundleItems);
+      const parentCost = replaced ? Math.max(0, unitCost(it.productId) - bundleProductItems(parent).reduce((sum, child) => sum + child.qty * unitCost(child.productId), 0)) : null;
+      add(line.productId, line.qty, line.total * discountFactor, parentCost);
+    }
   }
   return [...map.entries()].map(([id, e]) => ({
     id, name: store.get('products', id)?.name || '(produto removido)',
@@ -9346,7 +9391,7 @@ function businessPeriodSummary(store, start, end) {
     const rates = effectiveSalesRates(store.get('products', sale.productId), config);
     if (isBundleProduct(store.get('products', sale.productId))) basketRevenue += saleNet(sale);
     addProduct(sale.productId, sale.qty, Math.max(0, gross - (Number(sale.discount) || 0)),
-      (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? 0));
+      (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? rates.salesTaxPct));
   }
   for (const order of store.state.encomendas) {
     if (order.desistenciaAt || !inPeriod(order.quickSale ? order.at : order.deliveryDate, start, end)) continue;
@@ -9357,7 +9402,14 @@ function businessPeriodSummary(store, start, end) {
     const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(order.discount) || 0)) / itemGross : 1;
     for (const item of order.itens || []) for (const line of orderItemSaleLines(item)) {
       const rates = effectiveSalesRates(store.get('products', line.productId), config);
-      addProduct(line.productId, line.qty, line.total * discountFactor, rates.total);
+      const parent = store.get('products', item.productId);
+      const replaced = line.productId === item.productId && isBundleProduct(parent) && Array.isArray(item.bundleItems);
+      const standardChildren = replaced ? bundleProductItems(parent) : [];
+      const standardCosts = standardChildren.map((child) => ({ qty: child.qty, cost: unitCost(child.productId) }));
+      const parentUnitCost = replaced ? unitCost(item.productId) : null;
+      const parentCost = replaced && parentUnitCost != null && standardCosts.every((child) => child.cost != null)
+        ? Math.max(0, parentUnitCost - standardCosts.reduce((sum, child) => sum + child.qty * child.cost, 0)) : null;
+      addProduct(line.productId, line.qty, line.total * discountFactor, rates.total, parentCost);
     }
     for (const item of order.itens || []) if (isBundleProduct(store.get('products', item.productId))) basketRevenue += orderItemGross(item) * discountFactor;
   }
@@ -9448,7 +9500,9 @@ function salesPeriodSummary(store, start, end, status = 'todos') {
   for (const row of rows) {
     addClient(row.clientId, row.total, row.received, row.pending);
     if (row.kind === 'encomenda') {
-      for (const it of row.order.itens || []) for (const line of orderItemSaleLines(it)) addProduct(line.productId, line.qty, line.total);
+      const itemGross = (row.order.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+      const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order.discount) || 0)) / itemGross : 1;
+      for (const it of row.order.itens || []) for (const line of orderItemSaleLines(it)) addProduct(line.productId, line.qty, line.total * discountFactor);
     } else addProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
   }
 
@@ -10200,7 +10254,7 @@ function inicioPanel(ctx) {
       ])),
       ...birthdays.map((person) => el('div', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `🎂 Aniversário: ${person.name}` }), el('span', { class: 'pa-badge', text: person.type })])),
       lowStock.length > 0 && el('div', { class: 'pa-callout' }, [
-        el('strong', { text: 'Lista de compras · estoque mínimo' }),
+        el('strong', { text: 'Lista de compras · estoque baixo ou negativo' }),
         el('ul', { class: 'pa-list pa-tight' }, lowStock.map((row) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: row.ingredient.name }), el('strong', { class: 'pa-bad', text: `${fmtNum(row.current)} ${row.ingredient.stockUnit}` })]))),
       ]),
       manualShopping.length > 0 && el('div', { class: 'pa-callout' }, [
@@ -10215,7 +10269,7 @@ function inicioPanel(ctx) {
       ]),
       el('table', { class: 'pa-kv' }, [
         el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(sum.recebido) })]),
-        el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
+        el('tr', {}, [el('td', { text: 'A receber (saldo atual)' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
         el('tr', {}, [el('td', { text: 'Pagos' }), el('td', { class: 'pa-num', text: brl(sum.despesas) })]),
         el('tr', {}, [el('td', { text: 'A pagar' }), el('td', { class: 'pa-num', text: brl(payableMonth) })]),
         el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo de caixa' }), el('td', { class: 'pa-num' + (sum.saldoCaixa >= 0 ? '' : ' pa-bad'), text: brl(sum.saldoCaixa) })]),
@@ -10291,6 +10345,7 @@ function insumoSheet(ctx, ing) {
   const supplier = el('input', { class: 'pa-input', 'data-testid': 'ins-supplier', type: 'text', placeholder: 'fornecedor da última compra', value: ing ? (ing.lastSupplier || '') : '' });
   const stockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.stockQty != null ? String(ing.stockQty).replace('.', ',') : '' });
   const minStockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-min-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.minStockQty != null ? String(ing.minStockQty).replace('.', ',') : '' });
+  const physicalQty = ing && el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-physical-stock', type: 'text', inputmode: 'decimal', placeholder: 'Digite a contagem de hoje' });
   const tags = tagsInput(ing && ing.tags, 'ins-tags');
 
   function save() {
@@ -10300,28 +10355,48 @@ function insumoSheet(ctx, ing) {
     const sup = supplier.value.trim();
     const tg = tags.value();
     const id = ing ? ing.id : uuid();
+    const counted = physicalQty?.value.trim() ? parseNum(physicalQty.value) : null;
+    if (physicalQty?.value.trim() && (counted == null || !Number.isFinite(counted) || counted < 0)) { physicalQty.focus(); return; }
     if (ing && !window.confirm(`Salvar alterações no insumo ${ing.name}?`)) return;
     ctx.actions.mutate((s) => {
       s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined,
         stockQty: Math.max(0, parseNum(stockQty.value) || 0), minStockQty: Math.max(0, parseNum(minStockQty.value) || 0), shoppingHidden: false });
+      if (counted != null) {
+        const before = ingredientInventory(s, id)?.current || 0;
+        const delta = counted - before;
+        if (Math.abs(delta) > 0.000001) s.addInventoryAdjustment({ id: uuid(), at: nowIso(), ingredientId: id, before, after: counted, delta, reason: 'Contagem física' });
+      }
       const cur = ing ? s.currentPrice(id) : null;
       if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
     });
   }
 
   const history = ing ? ctx.store.priceHistory(ing.id) : [];
+  const stockHistory = ing ? (ctx.store.state.inventoryAdjustments || []).filter((entry) => entry.ingredientId === ing.id && !ctx.store.isReversed('inventoryAdjustment', entry.id)).slice().sort((a, b) => String(b.at).localeCompare(String(a.at))) : [];
+  const currentStock = ing ? ingredientInventory(ctx.store, ing.id) : null;
   const rows = [
     field('Nome', name),
     field('Unidade de compra', unit),
     field('Preço (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
-    el('div', { class: 'pa-filtergrid' }, [field('Quantidade inicial/base em estoque', stockQty), field('Estoque mínimo permitido', minStockQty)]),
-    el('p', { class: 'pa-hint', text: 'O saldo atual soma as compras e desconta apenas a produção registrada e as perdas de insumos. Vendas não alteram o estoque.' }),
+    el('div', { class: 'pa-filtergrid' }, [field('Estoque inicial/base (não é o saldo de hoje)', stockQty), field('Estoque mínimo permitido', minStockQty)]),
+    ing && el('div', { class: 'pa-detail-card' }, [
+      el('strong', { text: `Saldo calculado agora: ${fmtNum(currentStock?.current || 0)} ${ing.stockUnit}` }),
+      field('Contagem física de hoje (opcional)', physicalQty),
+      el('p', { class: 'pa-hint', text: 'Digite aqui a quantidade que existe de verdade. Ao salvar, a diferença vira um ajuste registrado no histórico; você não precisa alterar o estoque inicial para acertar o saldo atual.' }),
+    ]),
+    el('p', { class: 'pa-hint', text: 'O saldo atual soma estoque inicial, compras e ajustes de contagem, depois desconta a produção registrada e as perdas. Vendas não alteram o estoque.' }),
     field('Fornecedor (opcional)', supplier),
     field('Etiquetas (opcional)', tags.el),
     history.length > 1 && el('details', { class: 'pa-history' }, [
       el('summary', { text: `histórico de preços (${history.length})` }),
       el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
         el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} — ${brl(h.price)}` })]))),
+    ]),
+    stockHistory.length > 0 && el('details', { class: 'pa-history' }, [
+      el('summary', { text: `Histórico de contagens (${stockHistory.length})` }),
+      el('ul', { class: 'pa-list pa-tight' }, stockHistory.map((entry) => el('li', { class: 'pa-list-item' }, [
+        el('span', { class: 'pa-muted', text: `${fmtDate(entry.at)} · ${fmtNum(entry.before)} → ${fmtNum(entry.after)} ${ing.stockUnit}` }),
+      ]))),
     ]),
   ].filter(Boolean);
 
@@ -11665,7 +11740,10 @@ function vendasPanel(ctx) {
   const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
   const rowMetrics = (row) => {
     if (!hasItemFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
-    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).reduce((sum, it) => sum + selectedOrderLines(it).reduce((lineSum, line) => lineSum + line.total, 0), 0);
+    const gross = row.kind === 'sale' ? row.total : (row.order.itens || []).reduce((sum, it) => sum + selectedOrderLines(it).reduce((lineSum, line) => lineSum + line.total, 0), 0);
+    const itemGross = row.kind === 'sale' ? gross : (row.order.itens || []).reduce((sum, it) => sum + orderItemGross(it), 0);
+    const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order?.discount) || 0)) / itemGross : 1;
+    const total = gross * discountFactor;
     const ratio = row.total > 0 ? total / row.total : 0;
     const received = Math.min(total, (row.received || 0) * ratio);
     return { total, received, pending: Math.max(0, total - received) };
@@ -11675,7 +11753,11 @@ function vendasPanel(ctx) {
   const addFilteredProduct = (id, qty, total) => { const p = productSummaryMap.get(id) || { id, qty: 0, total: 0 }; p.qty += qty; p.total += total; productSummaryMap.set(id, p); };
   for (const row of visibleRows) {
     if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
-    else for (const it of row.order.itens || []) for (const line of selectedOrderLines(it)) addFilteredProduct(line.productId, line.qty, line.total);
+    else {
+      const itemGross = (row.order.itens || []).reduce((sum, item) => sum + orderItemGross(item), 0);
+      const discountFactor = itemGross > 0 ? Math.max(0, itemGross - (Number(row.order.discount) || 0)) / itemGross : 1;
+      for (const it of row.order.itens || []) for (const line of selectedOrderLines(it)) addFilteredProduct(line.productId, line.qty, line.total * discountFactor);
+    }
   }
   const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
 
@@ -13404,7 +13486,9 @@ function financeCashFlowPanel(ctx) {
     el('p', { class: 'pa-hint', text: 'A DRE usa este mesmo período e considera toda a empresa. Os filtros de conta e categoria abaixo servem apenas para analisar o caixa.' }),
     el('div', { class: 'pa-filtergrid' }, [field('Conta', account), field('Categoria', category)]),
     el('div', { class: 'pa-statgrid' }, [statCard('Entradas realizadas', brl(flow.totalIn), 'ok'), statCard('Saídas realizadas', brl(flow.totalOut), flow.totalOut ? 'warn' : 'soft'), statCard('Saldo realizado', brl(flow.totalIn - flow.totalOut), flow.totalIn - flow.totalOut >= 0 ? 'navy' : 'bad'), statCard('Saldo acumulado', brl(flow.ending), flow.ending >= 0 ? 'navy' : 'bad')]),
-    view.finProjected && el('div', { class: 'pa-callout' }, [el('strong', { text: `Previsão do período: +${brl(flow.projectedIn)} · −${brl(flow.projectedOut)}` }), el('span', { text: ' Contas pendentes não alteram o realizado. Vencidos anteriores também aparecem no alerta abaixo.' })]),
+    view.finProjected && el('div', { class: 'pa-callout' }, view.finAccountId
+      ? [el('strong', { text: 'Previsão por conta indisponível' }), el('span', { text: ' Contas ainda não quitadas não têm conta de caixa definida. Selecione “Todas as contas” para ver a previsão da empresa; os valores realizados continuam filtrados pela conta escolhida.' })]
+      : [el('strong', { text: `Previsão do período: +${brl(flow.projectedIn)} · −${brl(flow.projectedOut)}` }), el('span', { text: ' Contas pendentes não alteram o realizado. Vencidos anteriores também aparecem no alerta abaixo.' })]),
     el('h3', { class: 'pa-h3', text: 'Tudo que entrou e saiu' }),
     actualRows.length ? el('div', { class: 'pa-cash-list' }, [detailHeader(), ...actualRows]) : el('p', { class: 'pa-empty', text: 'Nenhuma entrada ou saída realizada neste período.' }),
     view.finProjected && el('h3', { class: 'pa-h3', text: 'Valores a quitar' }),
@@ -13453,7 +13537,7 @@ function dreReportRows(ctx, start, end) {
       line('Lucro líquido / prejuízo do período', dre.netResult, { total: true, bad: dre.netResult < 0, good: dre.netResult >= 0 }),
     ]),
     el('p', { class: 'pa-hint', text: `Dentro dos custos de produção: ${brl(dre.indirectCosts)} classificados como indiretos. Dentro das despesas operacionais: ${brl(dre.fixedExpenses)} classificados como fixos e ${brl(dre.clientLosses)} de perdas confirmadas com clientes. Contas apenas vencidas não são perda.` }),
-    el('p', { class: 'pa-callout', text: `Estoque de insumos e embalagens: ${brl(dre.inventoryValue)} estimados. É patrimônio em estoque, não despesa adicional desta DRE.${dre.unpricedInventory ? ` ${dre.unpricedInventory} item(ns) sem preço não entraram na soma.` : ''}` }),
+    el('p', { class: 'pa-callout', text: `Estoque de insumos e embalagens: ${brl(dre.inventoryValue)} estimados pelo preço mais recente. É patrimônio em estoque, não despesa adicional desta DRE.${dre.unpricedInventory ? ` ${dre.unpricedInventory} item(ns) sem preço não entraram na soma.` : ''}${dre.negativeInventory ? ` ${dre.negativeInventory} item(ns) com saldo negativo precisam de conferência.` : ''}` }),
     el('div', { class: 'pa-statgrid' }, [statCard('Margem bruta', dre.grossMarginPct == null ? 'Sem receita' : `${Math.round(dre.grossMarginPct * 100)}%`, dre.grossProfit >= 0 ? 'navy' : 'bad'), statCard('Margem líquida', dre.netMarginPct == null ? 'Sem receita' : `${Math.round(dre.netMarginPct * 100)}%`, dre.netResult >= 0 ? 'ok' : 'bad'), statCard('Ainda a receber', brl(dre.openReceivables), dre.openReceivables ? 'warn' : 'soft'), statCard('Ainda a pagar', brl(dre.openPayables), dre.openPayables ? 'warn' : 'soft')]),
     el('h3', { class: 'pa-h3', text: 'Diagnóstico automático' }), ...diagnosis,
     el('p', { class: 'pa-hint', text: 'Esta é uma DRE gerencial simplificada para decisão. Para obrigações fiscais e contábeis formais, valide a classificação com seu contador.' }),
@@ -14251,8 +14335,8 @@ function relatoriosPanel(ctx) {
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Entrou' })]),
     kv('Recebido', brl(sum.recebido)),
     sum.recebidoOutrasReceitas > 0 && kv('Outras receitas', brl(sum.recebidoOutrasReceitas)),
-    sum.faturado !== sum.recebidoVendas && kv('Faturado (entregue)', brl(sum.faturado)),
-    sum.aReceber > 0 && kv('A receber', brl(sum.aReceber)),
+    sum.faturado !== sum.recebidoVendas && kv('Vendas e encomendas do mês', brl(sum.faturado)),
+    sum.aReceber > 0 && kv('A receber (saldo atual)', brl(sum.aReceber)),
     el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Saiu' })]),
     kv('Despesas variáveis', brl(sum.despVar)),
     kv('Despesas fixas', brl(sum.despFix)),
@@ -14345,8 +14429,8 @@ function reportCsv(month, sum, despCat, byProduct, byClient) {
   const rows = [
     ['Relatório', month], [],
     ['Recebido', n2(sum.recebido)],
-    ['Faturado (entregue)', n2(sum.faturado)],
-    ['A receber', n2(sum.aReceber)],
+    ['Vendas e encomendas do mês', n2(sum.faturado)],
+    ['A receber (saldo atual)', n2(sum.aReceber)],
     ['Despesas variáveis', n2(sum.despVar)],
     ['Despesas fixas', n2(sum.despFix)],
     ['Custos', n2(sum.custos || 0)],
@@ -14528,7 +14612,7 @@ function simuladorBody(ctx, recipe, config) {
     el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cenário (meta de lucro sobre a venda, em %)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: 'A coluna Atual usa os valores cadastrados e permanece fixa. A margem desejada altera o preço recomendado; o lucro do cenário depende do preço de venda informado. Lucro ou margem negativos indicam que este preço não cobre o custo e os percentuais de venda.' }),
     el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
-    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão consideradas nos dois cenários: ${pctStr(salesRate)}.` }),
+    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão + imposto variável considerados nos dois cenários: ${pctStr(salesRate)}.` }),
     results,
   ]);
 }
@@ -15087,7 +15171,7 @@ function shoppingSettingsCard(ctx) {
   ]));
   return el('section', { class: 'pa-card', 'data-testid': 'shopping-settings' }, [
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Reposição de materiais' }), el('h2', { text: 'Lista de compras' })])]),
-    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque mínimo. Você também pode acrescentar itens livres.' }),
+    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque mínimo ou ficaram com saldo negativo. Saldo negativo pede conferência das compras, do estoque inicial e da produção registrada. Você também pode acrescentar itens livres.' }),
     ...automaticRows,
     ...manualRows,
     (!automaticRows.length && !manualRows.length) && el('p', { class: 'pa-empty', text: 'Nenhum item aguardando compra.' }),

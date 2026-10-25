@@ -60,23 +60,36 @@ export function inventorySummary(store) {
   const producedUsage = new Map();
   for (const command of store.state.comandas || []) for (const item of command.itens || []) {
     const produced = Number(item.realizado) || 0;
-    if (produced > 0) add(producedUsage, productIngredientUsage(store, item.productId), produced);
+    if (produced > 0) {
+      const usage = item.ingredientUsagePerUnit
+        ? new Map(Object.entries(item.ingredientUsagePerUnit).filter(([, qty]) => Number.isFinite(Number(qty))).map(([id, qty]) => [id, Number(qty)]))
+        : productIngredientUsage(store, item.productId);
+      add(producedUsage, usage, produced);
+    }
   }
   const lost = new Map();
   for (const loss of store.state.perdas || []) {
     if (store.isReversed('perda', loss.id) || loss.refKind !== 'insumo' || !loss.refId) continue;
     lost.set(loss.refId, (lost.get(loss.refId) || 0) + (Number(loss.qty) || 0));
   }
+  const adjustments = new Map();
+  for (const adjustment of store.state.inventoryAdjustments || []) {
+    if (store.isReversed('inventoryAdjustment', adjustment.id)) continue;
+    const delta = Number(adjustment.delta);
+    if (!Number.isFinite(delta)) continue;
+    adjustments.set(adjustment.ingredientId, (adjustments.get(adjustment.ingredientId) || 0) + delta);
+  }
   return (store.state.ingredients || []).map((ingredient) => {
     const opening = Number(ingredient.stockQty) || 0;
     const purchases = purchased.get(ingredient.id) || 0;
     const production = producedUsage.get(ingredient.id) || 0;
     const losses = lost.get(ingredient.id) || 0;
-    const current = opening + purchases - production - losses;
+    const adjustment = adjustments.get(ingredient.id) || 0;
+    const current = opening + purchases - production - losses + adjustment;
     const minimum = Math.max(0, Number(ingredient.minStockQty) || 0);
     // A missing minimum must not hide an impossible negative balance. Small floating-point
     // residue is ignored so conversions do not create a false shortage warning.
-    return { ingredient, opening, purchases, production, losses, current, minimum, low: current < -0.000001 || (minimum > 0 && current <= minimum) };
+    return { ingredient, opening, purchases, production, losses, adjustment, current, minimum, low: current < -0.000001 || (minimum > 0 && current <= minimum) };
   });
 }
 

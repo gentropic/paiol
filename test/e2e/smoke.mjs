@@ -5,7 +5,7 @@
 //
 // Not part of `npm test` (named *.mjs, not *.test.mjs). Run with `npm run test:e2e`.
 
-import { test, before, after, describe } from 'node:test';
+import { test, before, after, afterEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
@@ -82,7 +82,8 @@ async function addReceita(page, { name, yield: y, yunit, active, oven, comp, pro
   if (yunit) await page.selectOption('[data-testid="rec-yunit"]', yunit);
   if (active != null) await page.fill('[data-testid="rec-active"]', String(active));
   if (oven != null) await page.fill('[data-testid="rec-oven"]', String(oven));
-  if (product) await page.selectOption('[data-testid="rec-product-link"]', { label: product });
+  if (active != null || oven != null) await page.fill('[data-testid="rec-production"]', String((Number(active) || 0) + (Number(oven) || 0)));
+  if (product && product !== name) throw new Error('O produto criado pela receita usa o mesmo nome da receita.');
   if (comp) {
     await page.selectOption('[data-testid="rec-compref"]', { label: comp.ref });
     await page.fill('[data-testid="rec-compqty"]', String(comp.qty));
@@ -90,7 +91,7 @@ async function addReceita(page, { name, yield: y, yunit, active, oven, comp, pro
     await page.click('[data-testid="rec-compadd"]');
     await page.waitForSelector('.pa-sheet .pa-list-item');
   }
-  await page.click('[data-testid="rec-save"]');
+  await page.click(product ? '[data-testid="rec-add-catalog"]' : '[data-testid="rec-save"]');
   await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 }
 
@@ -130,10 +131,8 @@ async function seedBusiness(page) {
   await page.reload({ waitUntil: 'networkidle' });
   await goto(page, 'Insumos');
   await addInsumo(page, 'Farinha', 'kg', '5');
-  await goto(page, 'Produtos');
-  await addProduto(page, { name: 'Pãozinho', price: 12 });
   await goto(page, 'Receitas');
-  await addReceita(page, { name: 'Pão', yield: 10, yunit: 'un', active: 30, oven: 40, product: 'Pãozinho', comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
+  await addReceita(page, { name: 'Pãozinho', yield: 10, yunit: 'un', active: 30, oven: 40, product: 'Pãozinho', comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
   await goto(page, 'Produtos');
 }
 
@@ -150,6 +149,12 @@ describe('paiol UI smoke', () => {
     const browserExecutable = process.env.PAIOL_BROWSER_EXECUTABLE || systemChrome;
     browser = await chromium.launch(existsSync(browserExecutable) ? { executablePath: browserExecutable } : {});
     context = await browser.newContext();
+    context.setDefaultTimeout(8000);
+  });
+
+  afterEach(async () => {
+    // A failed assertion must not leave a page open and block IndexedDB deletion in the next test.
+    for (const page of context?.pages() || []) await page.close();
   });
 
   after(async () => {
@@ -226,6 +231,32 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('a physical ingredient count sets the current stock and survives reload', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(() => new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase('paiol');
+      req.onsuccess = req.onerror = req.onblocked = resolve;
+    }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await addInsumo(page, 'Farinha conferida', 'kg', '6');
+    await page.locator('.pa-row-item', { hasText: 'Farinha conferida' }).click();
+    await page.fill('[data-testid="ins-physical-stock"]', '4,5');
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.click('[data-testid="ins-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    assert.match(await page.locator('.pa-row-item', { hasText: 'Farinha conferida' }).textContent(), /Estoque: 4,5 kg/);
+    await page.waitForTimeout(1200);
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    assert.match(await page.locator('.pa-row-item', { hasText: 'Farinha conferida' }).textContent(), /Estoque: 4,5 kg/);
+    await page.locator('.pa-row-item', { hasText: 'Farinha conferida' }).click();
+    assert.equal(await page.inputValue('[data-testid="ins-stock"]'), '0');
+    assert.match(await page.locator('.pa-history').last().innerText(), /Histórico de contagens/);
+    await page.close();
+  });
+
   test('full flow: insumo → receita → produto → a suggested price appears', async () => {
     const page = await context.newPage();
     const errors = [];
@@ -242,11 +273,9 @@ describe('paiol UI smoke', () => {
     await addInsumo(page, 'Farinha', 'kg', '5');
     await page.waitForSelector('.pa-row-item');
 
-    // Product is the simple sale catalog record; the recipe links the technical sheet to it.
-    await goto(page, 'Produtos');
-    await addProduto(page, { name: 'Pãozinho', price: 12 });
+    // A precificada recipe creates its catalog product with the same name.
     await goto(page, 'Receitas');
-    await addReceita(page, { name: 'Pão', yield: 10, yunit: 'un', active: 30, oven: 40, product: 'Pãozinho', comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
+    await addReceita(page, { name: 'Pãozinho', yield: 10, yunit: 'un', active: 30, oven: 40, product: 'Pãozinho', comp: { ref: 'Insumo: Farinha', qty: 500, unit: 'g' } });
 
     // Preços: a real suggested price, no "incompleto".
     await goto(page, 'Preços');
@@ -270,9 +299,9 @@ describe('paiol UI smoke', () => {
     await page.fill('[data-testid="enc-prodsearch"]', 'Cesta');
     await page.click('[data-testid="enc-prodresult"]');
     await page.waitForSelector('[data-testid="enc-bundle-editor"]');
-    await page.selectOption('[data-testid="enc-bundle-product"]', { label: 'Pãozinho' });
-    await page.fill('[data-testid="enc-bundle-qty"]', '2');
-    await page.click('[data-testid="enc-bundle-add"]');
+    await page.fill('[data-testid="enc-bundle-product"]', 'Pãozinho');
+    await page.locator('[data-testid="enc-bundle-result"]', { hasText: 'Pãozinho' }).click();
+    await page.fill('[aria-label="quantidade dentro do conjunto"]', '2');
     await page.click('[data-testid="enc-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     await goto(page, 'Comanda');
@@ -318,16 +347,16 @@ describe('paiol UI smoke', () => {
     // Venda — price comes pre-filled from the suggested price; just register.
     await goto(page, 'Vendas');
     await addVenda(page, { product: 'Pãozinho', qty: 3 });
-    await page.waitForSelector('.pa-list-item');
-    assert.match(await page.textContent('.pa-list'), /Pãozinho/);
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
+    assert.match(await page.locator('ul.pa-list.pa-rows .pa-row-item').first().textContent(), /Pãozinho/);
     assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
 
     // Survives reload (events persisted to IndexedDB).
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Vendas');
-    await page.waitForSelector('.pa-list-item');
-    assert.match(await page.textContent('.pa-list'), /Pãozinho/);
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
+    assert.match(await page.locator('ul.pa-list.pa-rows .pa-row-item').first().textContent(), /Pãozinho/);
 
     assert.deepEqual(errors, [], `errors during actuals flow: ${errors.join(' | ')}`);
     await page.close();
@@ -398,10 +427,12 @@ describe('paiol UI smoke', () => {
     await page.fill('[data-testid="cmd-avulso-qty"]', '10');
     await page.click('[data-testid="cmd-avulso-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    await page.waitForSelector('[data-testid="cmd-prevista"]');
-    assert.equal(await page.inputValue('[data-testid="cmd-prevista"]'), '10');
+    await page.waitForSelector('[data-testid="cmd-manual"]');
+    assert.equal(await page.inputValue('[data-testid="cmd-manual"]'), '10');
+    assert.equal(await page.textContent('[data-testid="cmd-prevista"]'), '0');
     // The planned quantity tracks work; all avulso production is available for sale.
     await page.fill('[data-testid="cmd-realizado"]', '8');
+    await page.dispatchEvent('[data-testid="cmd-realizado"]', 'change');
     assert.match(await page.textContent('.pa-cmd-item'), /saldo a produzir/); // 10 prevista − 8 produzido
     assert.match(await page.textContent('[data-testid="cmd-disponivel"]'), /\b8\b/);
     await page.check('[data-testid="cmd-feito"]');
@@ -412,8 +443,8 @@ describe('paiol UI smoke', () => {
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Comanda');
     await setComandaToday(page);
-    await page.waitForSelector('[data-testid="cmd-prevista"]');
-    assert.equal(await page.inputValue('[data-testid="cmd-prevista"]'), '10', 'avulso prevista did not persist');
+    await page.waitForSelector('[data-testid="cmd-manual"]');
+    assert.equal(await page.inputValue('[data-testid="cmd-manual"]'), '10', 'avulso production did not persist');
     assert.equal(await page.inputValue('[data-testid="cmd-realizado"]'), '8', 'produzido did not persist');
     assert.equal(await page.isChecked('[data-testid="cmd-feito"]'), true, 'feito did not persist');
 
@@ -422,8 +453,7 @@ describe('paiol UI smoke', () => {
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Comanda');
-    await setComandaToday(page);
-    assert.equal(await page.locator('[data-testid="cmd-prevista"]').count(), 0, 'deleted avulso came back');
+    assert.equal(await page.locator('[data-testid="cmd-manual"]').count(), 0, 'deleted avulso came back');
     await page.close();
   });
 
@@ -469,7 +499,7 @@ describe('paiol UI smoke', () => {
     assert.match(preview, /Comanda gerada em/);
     assert.match(preview, /Bolo de teste/);
     assert.equal(await page.locator('[data-testid="cmd-preview-item"]').count(), 1, 'repeated products should be consolidated');
-    assert.match(await page.textContent('[data-testid="cmd-preview-item"]'), /2 previsto/);
+    assert.match(await page.textContent('[data-testid="cmd-preview-item"]'), /2 encomendada \+ avulsa/);
     await page.evaluate(() => Object.defineProperty(navigator, 'canShare', { value: undefined, configurable: true }));
     let pdfError = '';
     page.once('dialog', async (dialog) => { pdfError = dialog.message(); await dialog.dismiss(); });
@@ -500,7 +530,7 @@ describe('paiol UI smoke', () => {
     await page.fill('[data-testid="rec-oven"]', '40');
     await page.click('[data-testid="rec-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    await page.click('[data-testid="rec-simulator"]');
+    await goto(page, 'Simulador');
     await page.waitForSelector('[data-testid="sim-production"]');
     assert.equal(await page.inputValue('[data-testid="sim-production"]'), '90');
     const results = await page.textContent('[data-testid="sim-results"]');
@@ -510,7 +540,7 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Ajustes');
     const commissionLabel = page.locator('.pa-field').filter({ hasText: 'Comissão sobre vendas' });
     await commissionLabel.locator('input').fill('7,5');
-    await page.getByRole('button', { name: 'Salvar valores manuais' }).click();
+    await page.getByRole('button', { name: 'Salvar e usar valores manuais' }).click();
     await goto(page, 'Ajustes');
     assert.equal(await page.locator('.pa-field').filter({ hasText: 'Comissão sobre vendas' }).locator('input').inputValue(), '7,5');
     await page.close();
@@ -661,12 +691,13 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Insumos');
     await page.locator('.pa-row-item', { hasText: 'Farinha' }).click();   // open edit sheet
     await page.fill('[data-testid="ins-name"]', 'Farinha especial');
+    page.once('dialog', (dialog) => dialog.accept());
     await page.click('[data-testid="ins-save"]');
-    await page.waitForFunction(() => /Farinha especial/.test(document.querySelector('.pa-list')?.textContent || ''));
+    await page.locator('.pa-row-item', { hasText: 'Farinha especial' }).waitFor();
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Insumos');
-    assert.match(await page.textContent('.pa-list'), /Farinha especial/);
+    assert.match(await page.locator('.pa-row-item', { hasText: 'Farinha especial' }).textContent(), /Farinha especial/);
     await page.close();
   });
 
@@ -688,9 +719,9 @@ describe('paiol UI smoke', () => {
     await addVenda(page, { date: '2026-05-15', qty: 1 });
     await page.fill('[data-testid="venda-start"]', '2026-05-15');
     await page.fill('[data-testid="venda-end"]', '2026-05-15');
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
     // The chosen day appears on the row inside the filtered period report.
-    assert.match(await page.textContent('.pa-list'), /15\/05\/2026/);
+    assert.match(await page.locator('ul.pa-list.pa-rows .pa-row-item').first().textContent(), /15\/05\/2026/);
     await page.close();
   });
 
@@ -702,9 +733,9 @@ describe('paiol UI smoke', () => {
     await addVenda(page, { date: '2026-05-20', qty: 2 });
     await page.fill('[data-testid="venda-start"]', '2026-04-01');
     await page.fill('[data-testid="venda-end"]', '2026-05-31');
-    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 2);
+    await page.waitForFunction(() => document.querySelectorAll('ul.pa-list.pa-rows .pa-row-item').length === 2);
     await page.fill('[data-testid="venda-start"]', '2026-05-01');
-    await page.waitForFunction(() => document.querySelectorAll('.pa-list-item[data-search]').length === 1);
+    await page.waitForFunction(() => document.querySelectorAll('ul.pa-list.pa-rows .pa-row-item').length === 1);
     assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
     await page.close();
   });
@@ -716,6 +747,7 @@ describe('paiol UI smoke', () => {
     await page.click('.pa-row-item'); // open the seeded "Pão" in its edit sheet
     await page.waitForSelector('[data-testid="rec-notes"]');
     await page.fill('[data-testid="rec-notes"]', 'Misturar bem e assar 30min');
+    page.once('dialog', (dialog) => dialog.accept());
     await page.click('[data-testid="rec-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     // Re-open to confirm the note persisted.
@@ -732,7 +764,7 @@ describe('paiol UI smoke', () => {
     // Log a sale today (default date → current month, which Relatórios defaults to).
     await goto(page, 'Vendas');
     await addVenda(page, { qty: 2 });
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
 
     await goto(page, 'Relatórios');
     await page.waitForSelector('.pa-kv');
@@ -836,8 +868,8 @@ describe('paiol UI smoke', () => {
       rows.map((r) => [...r.querySelectorAll('td')].map((td) => td.textContent.trim())));
     const money = (s) => Number(s.replace(/[^\d,]/g, '').replace(',', '.'));
     const perc = (s) => Number(s.replace('%', ''));
-    const custo = grid.find((r) => /Custo por unidade/.test(r[0]));
-    const margem = grid.find((r) => /Margem/.test(r[0]));
+    const custo = grid.find((r) => /Custo por produto/.test(r[0]));
+    const margem = grid.find((r) => /Margem líquida/.test(r[0]));
     assert.ok(money(custo[2]) < money(custo[1]), `simulated cost/un should drop (${custo[1]} → ${custo[2]})`);
     assert.ok(perc(margem[2]) > perc(margem[1]), `margin should rise (${margem[1]} → ${margem[2]})`);
     // Lucro por hora is shown and improves (more units per hour when labour is held).

@@ -683,6 +683,7 @@ function insumoSheet(ctx, ing) {
   const supplier = el('input', { class: 'pa-input', 'data-testid': 'ins-supplier', type: 'text', placeholder: 'fornecedor da última compra', value: ing ? (ing.lastSupplier || '') : '' });
   const stockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.stockQty != null ? String(ing.stockQty).replace('.', ',') : '' });
   const minStockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-min-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.minStockQty != null ? String(ing.minStockQty).replace('.', ',') : '' });
+  const physicalQty = ing && el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-physical-stock', type: 'text', inputmode: 'decimal', placeholder: 'Digite a contagem de hoje' });
   const tags = tagsInput(ing && ing.tags, 'ins-tags');
 
   function save() {
@@ -692,28 +693,48 @@ function insumoSheet(ctx, ing) {
     const sup = supplier.value.trim();
     const tg = tags.value();
     const id = ing ? ing.id : uuid();
+    const counted = physicalQty?.value.trim() ? parseNum(physicalQty.value) : null;
+    if (physicalQty?.value.trim() && (counted == null || !Number.isFinite(counted) || counted < 0)) { physicalQty.focus(); return; }
     if (ing && !window.confirm(`Salvar alterações no insumo ${ing.name}?`)) return;
     ctx.actions.mutate((s) => {
       s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined,
         stockQty: Math.max(0, parseNum(stockQty.value) || 0), minStockQty: Math.max(0, parseNum(minStockQty.value) || 0), shoppingHidden: false });
+      if (counted != null) {
+        const before = ingredientInventory(s, id)?.current || 0;
+        const delta = counted - before;
+        if (Math.abs(delta) > 0.000001) s.addInventoryAdjustment({ id: uuid(), at: nowIso(), ingredientId: id, before, after: counted, delta, reason: 'Contagem física' });
+      }
       const cur = ing ? s.currentPrice(id) : null;
       if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
     });
   }
 
   const history = ing ? ctx.store.priceHistory(ing.id) : [];
+  const stockHistory = ing ? (ctx.store.state.inventoryAdjustments || []).filter((entry) => entry.ingredientId === ing.id && !ctx.store.isReversed('inventoryAdjustment', entry.id)).slice().sort((a, b) => String(b.at).localeCompare(String(a.at))) : [];
+  const currentStock = ing ? ingredientInventory(ctx.store, ing.id) : null;
   const rows = [
     field('Nome', name),
     field('Unidade de compra', unit),
     field('Preço (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
-    el('div', { class: 'pa-filtergrid' }, [field('Quantidade inicial/base em estoque', stockQty), field('Estoque mínimo permitido', minStockQty)]),
-    el('p', { class: 'pa-hint', text: 'O saldo atual soma as compras e desconta apenas a produção registrada e as perdas de insumos. Vendas não alteram o estoque.' }),
+    el('div', { class: 'pa-filtergrid' }, [field('Estoque inicial/base (não é o saldo de hoje)', stockQty), field('Estoque mínimo permitido', minStockQty)]),
+    ing && el('div', { class: 'pa-detail-card' }, [
+      el('strong', { text: `Saldo calculado agora: ${fmtNum(currentStock?.current || 0)} ${ing.stockUnit}` }),
+      field('Contagem física de hoje (opcional)', physicalQty),
+      el('p', { class: 'pa-hint', text: 'Digite aqui a quantidade que existe de verdade. Ao salvar, a diferença vira um ajuste registrado no histórico; você não precisa alterar o estoque inicial para acertar o saldo atual.' }),
+    ]),
+    el('p', { class: 'pa-hint', text: 'O saldo atual soma estoque inicial, compras e ajustes de contagem, depois desconta a produção registrada e as perdas. Vendas não alteram o estoque.' }),
     field('Fornecedor (opcional)', supplier),
     field('Etiquetas (opcional)', tags.el),
     history.length > 1 && el('details', { class: 'pa-history' }, [
       el('summary', { text: `histórico de preços (${history.length})` }),
       el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
         el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} — ${brl(h.price)}` })]))),
+    ]),
+    stockHistory.length > 0 && el('details', { class: 'pa-history' }, [
+      el('summary', { text: `Histórico de contagens (${stockHistory.length})` }),
+      el('ul', { class: 'pa-list pa-tight' }, stockHistory.map((entry) => el('li', { class: 'pa-list-item' }, [
+        el('span', { class: 'pa-muted', text: `${fmtDate(entry.at)} · ${fmtNum(entry.before)} → ${fmtNum(entry.after)} ${ing.stockUnit}` }),
+      ]))),
     ]),
   ].filter(Boolean);
 
@@ -3854,7 +3875,7 @@ function dreReportRows(ctx, start, end) {
       line('Lucro líquido / prejuízo do período', dre.netResult, { total: true, bad: dre.netResult < 0, good: dre.netResult >= 0 }),
     ]),
     el('p', { class: 'pa-hint', text: `Dentro dos custos de produção: ${brl(dre.indirectCosts)} classificados como indiretos. Dentro das despesas operacionais: ${brl(dre.fixedExpenses)} classificados como fixos e ${brl(dre.clientLosses)} de perdas confirmadas com clientes. Contas apenas vencidas não são perda.` }),
-    el('p', { class: 'pa-callout', text: `Estoque de insumos e embalagens: ${brl(dre.inventoryValue)} estimados. É patrimônio em estoque, não despesa adicional desta DRE.${dre.unpricedInventory ? ` ${dre.unpricedInventory} item(ns) sem preço não entraram na soma.` : ''}` }),
+    el('p', { class: 'pa-callout', text: `Estoque de insumos e embalagens: ${brl(dre.inventoryValue)} estimados pelo preço mais recente. É patrimônio em estoque, não despesa adicional desta DRE.${dre.unpricedInventory ? ` ${dre.unpricedInventory} item(ns) sem preço não entraram na soma.` : ''}${dre.negativeInventory ? ` ${dre.negativeInventory} item(ns) com saldo negativo precisam de conferência.` : ''}` }),
     el('div', { class: 'pa-statgrid' }, [statCard('Margem bruta', dre.grossMarginPct == null ? 'Sem receita' : `${Math.round(dre.grossMarginPct * 100)}%`, dre.grossProfit >= 0 ? 'navy' : 'bad'), statCard('Margem líquida', dre.netMarginPct == null ? 'Sem receita' : `${Math.round(dre.netMarginPct * 100)}%`, dre.netResult >= 0 ? 'ok' : 'bad'), statCard('Ainda a receber', brl(dre.openReceivables), dre.openReceivables ? 'warn' : 'soft'), statCard('Ainda a pagar', brl(dre.openPayables), dre.openPayables ? 'warn' : 'soft')]),
     el('h3', { class: 'pa-h3', text: 'Diagnóstico automático' }), ...diagnosis,
     el('p', { class: 'pa-hint', text: 'Esta é uma DRE gerencial simplificada para decisão. Para obrigações fiscais e contábeis formais, valide a classificação com seu contador.' }),

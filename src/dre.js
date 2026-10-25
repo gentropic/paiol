@@ -157,8 +157,9 @@ export function managerialDre(store, start, end) {
   }
   const depreciation = depreciationSummary(store, start, end);
   const inventory = inventorySummary(store);
-  let inventoryValue = 0; let unpricedInventory = 0;
+  let inventoryValue = 0; let unpricedInventory = 0; let negativeInventory = 0;
   for (const row of inventory) {
+    if (row.current < -0.000001) negativeInventory++;
     if (!(row.current > 0)) continue;
     const price = store.currentPrice(row.ingredient.id);
     if (price == null) unpricedInventory++;
@@ -191,12 +192,13 @@ export function managerialDre(store, start, end) {
   if (missingMaterials) note('warn', 'Custos de produtos incompletos', `${missingMaterials} item(ns) vendidos não tiveram o custo de insumos calculado. Confira o cadastro e os preços de compra.`);
   if (legacyCostEstimates) note('info', 'Vendas antigas sem custo congelado', `${legacyCostEstimates} venda(s) antigas usam os preços atuais de insumos como estimativa. Mudanças de preço podem alterar a DRE histórica.`);
   if (unpricedInventory) note('warn', 'Estoque sem preço', `${unpricedInventory} insumo(s) com estoque não têm preço e ficaram fora do valor estimado.`);
+  if (negativeInventory) note('warn', 'Estoque negativo', `${negativeInventory} insumo(s) apresentam saldo negativo. Confira as contagens físicas antes de usar o valor de estoque para decidir.`);
 
   const rows = (map) => [...map.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   return {
     start, end, salesRevenue: salesRevenue - settlementDiscounts, salesGross: salesRevenue + salesDiscounts, salesDiscounts: salesDiscounts + settlementDiscounts, salesReturns, salesTaxes,
     otherRevenue, grossRevenue, directCosts, materialCosts, packagingCosts, productionDepreciation: depreciation.production,
-    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, missingMaterials, legacyCostEstimates,
+    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, negativeInventory, missingMaterials, legacyCostEstimates,
     grossProfit, sellingExpenses, indirectCosts, clientLosses,
     operatingExpenses, fixedExpenses, variableExpenses, netResult, grossMarginPct, netMarginPct,
     openReceivables, openPayables, overdueReceivables, excluded, unclassified, diagnostics,

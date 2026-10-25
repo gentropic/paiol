@@ -70,3 +70,14 @@ test('a discount granted when settling an old customer invoice reduces revenue o
   assert.equal(august.grossRevenue, -10);
   assert.equal(august.netResult, -10);
 });
+
+test('DRE warns when ingredient balances are negative and omits them from estimated stock value', () => {
+  const store = new PaiolStore();
+  store.upsertIngredient({ id: 'flour', name: 'Farinha', stockUnit: 'kg', stockQty: 0 });
+  store.addPriceChange({ id: 'price', at: '2026-07-01', ingredientId: 'flour', price: 5 });
+  store.addInventoryAdjustment({ id: 'adjust', at: '2026-07-02', ingredientId: 'flour', delta: -2 });
+  const dre = managerialDre(store, '2026-07-01', '2026-07-31');
+  assert.equal(dre.negativeInventory, 1);
+  assert.equal(dre.inventoryValue, 0);
+  assert.ok(dre.diagnostics.some((item) => item.title === 'Estoque negativo'));
+});
