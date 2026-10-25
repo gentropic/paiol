@@ -4883,6 +4883,9 @@ function simuladorBody(ctx, recipe, config) {
     const simProfitPerProduct = simProductUnits > 0 ? simProfit / simProductUnits : 0;
     const targetPrice = divisor > 0 ? simCostPerProduct / divisor : null;
     const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
+    const explained = (label, explanation) => el('td', {}, [
+      el('span', { text: label }), el('span', { class: 'pa-sim-explain', text: `(${explanation})` }),
+    ]);
     const reachedTarget = margin(simRevenue, simTotalCost) + 0.0001 >= target;
     results.replaceChildren(el('table', { class: 'pa-kv pa-sim' }, [
       el('tr', { class: 'pa-sim-head' }, [el('td', {}), el('td', { class: 'pa-num', text: 'Atual' }), el('td', { class: 'pa-num', text: `Simulado (${fmtNum(f)}×)` })]),
@@ -4893,15 +4896,15 @@ function simuladorBody(ctx, recipe, config) {
       el('tr', {}, [el('td', { text: 'Embalagem e complementos do lote' }), ...col(registeredExtras * baseProductUnits, extras * simProductUnits, brl)]),
       el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Custo total da receita com embalagem' }), ...col(baseTotalCost, simTotalCost, brl)]),
       el('tr', {}, [el('td', { text: 'Custo por produto (unidade vendida)' }), ...col(baseCostPerProduct, simCostPerProduct, brl)]),
-      el('tr', {}, [el('td', { text: 'Mão de obra direta (indicador)' }), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
+      el('tr', {}, [explained('Mão de obra direta', 'minutos ativos × valor da hora; apenas indicador'), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
       el('tr', {}, [el('td', { text: 'Preço de venda por produto' }), ...col(basePrice, p, brl)]),
       el('tr', {}, [el('td', { text: 'Faturamento se vender o lote inteiro' }), ...col(baseRevenue, simRevenue, brl)]),
-      el('tr', {}, [el('td', { text: 'Margem desejada' }), ...col(initialMargin, target, pctStr)]),
-      el('tr', {}, [el('td', { text: 'Margem líquida no preço informado' }), el('td', { class: 'pa-num', text: pctStr(margin(baseRevenue, baseTotalCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simRevenue, simTotalCost)) })]),
+      el('tr', {}, [explained('Margem desejada', 'meta: quanto você quer que sobre de cada venda, em %'), ...col(initialMargin, target, pctStr)]),
+      el('tr', {}, [explained('Margem líquida no preço informado', 'quanto realmente sobra depois dos custos e taxas, em %'), el('td', { class: 'pa-num', text: pctStr(margin(baseRevenue, baseTotalCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simRevenue, simTotalCost)) })]),
       el('tr', {}, [el('td', { text: 'Lucro total da receita' }), ...col(baseProfit, simProfit, brl)]),
       el('tr', {}, [el('td', { text: 'Lucro por produto' }), ...col(baseProfitPerProduct, simProfitPerProduct, brl)]),
       el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), ...col(profitHour(baseProfit, baseProductionMinutes), profitHour(simProfit, t), fmtHora)]),
-      el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Preço para margem desejada' }), el('td', { class: 'pa-num', text: baseTargetPrice == null ? 'Margem inválida' : brl(baseTargetPrice) }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inválida' : brl(targetPrice) })]),
+      el('tr', { class: 'pa-kv-total' }, [explained('Preço para margem desejada', 'valor por produto para alcançar a meta acima'), el('td', { class: 'pa-num', text: baseTargetPrice == null ? 'Margem inválida' : brl(baseTargetPrice) }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inválida' : brl(targetPrice) })]),
     ]), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simulação alcança a margem desejada com o preço informado.' : `A margem ficou abaixo da meta. Considere preço próximo de ${targetPrice == null ? '—' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
   }
   [factor, production, active, oven, packaging.input, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
@@ -4911,10 +4914,10 @@ function simuladorBody(ctx, recipe, config) {
     el('p', { class: 'pa-muted', text: `Atual: rende ${fmtNum(recipe.yieldNominal)} ${recipe.yieldUnit} · ${recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))}min de produção · ${recipe.activeMinutes}min ativos · ${recipe.ovenMinutes}min forno${product ? ` · produto ${product.name}` : ''}` }),
     el('h3', { class: 'pa-h3', text: 'E se eu fizer um lote maior?' }),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Escala' }), factor, el('span', { class: 'pa-lab', text: '× a receita' })]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção (min)' }), production]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'O custo total inclui ingredientes, gás do forno, custos fixos proporcionais ao tempo de produção e embalagem/complementos por produto. Minutos ativos mostram a mão de obra como indicador, sem duplicar salários que já estão nos custos fixos.' }),
-    el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cenário (%)', targetMargin), field('Preço de venda para testar', price)]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção do lote simulado (min)' }), production]),
+    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos do lote simulado' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno do lote simulado' }), oven]),
+    el('p', { class: 'pa-hint', text: 'A escala aumenta ingredientes e rendimento, mas mantém os tempos cadastrados até você alterá-los acima. Se o lote maior exigir mais tempo, informe: tempo total para ratear custos fixos e calcular lucro por hora; minutos ativos de trabalho direto, inclusive embalar, para o indicador de mão de obra; minutos de forno para o gás. A mão de obra não é somada novamente ao custo, pois salários já entram nos custos fixos.' }),
+    el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cenário (meta de lucro sobre a venda, em %)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: 'A coluna Atual usa os valores cadastrados e permanece fixa. A margem desejada altera o preço recomendado; o lucro do cenário depende do preço de venda informado. Lucro ou margem negativos indicam que este preço não cobre o custo e os percentuais de venda.' }),
     el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
     el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão consideradas nos dois cenários: ${pctStr(salesRate)}.` }),

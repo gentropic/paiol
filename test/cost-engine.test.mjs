@@ -113,6 +113,21 @@ test('full breakdown rolls up all four cost dimensions', () => {
   approx(recipeUnitCost(s, 'bolo', config, est), b.ingredients + b.gas + b.fixed);
 });
 
+test('a larger simulated batch changes direct labor only when active minutes change', () => {
+  const recipe = { id: 'r', name: 'Lote', yieldNominal: 10, yieldUnit: 'un', productionMinutes: 60, activeMinutes: 30, ovenMinutes: 20, components: [] };
+  const breakdown = (variant) => costBreakdown(indexStore({
+    ingredients: [], recipes: [{ ...recipe, ...variant }], products: [], priceChanges: [], batches: [], sales: [],
+  }), 'r', config, estimateLens(config));
+  const actual = breakdown({});
+  const largerSameTime = breakdown({ yieldNominal: 15 });
+  const largerLongerTime = breakdown({ yieldNominal: 15, productionMinutes: 90, activeMinutes: 45, ovenMinutes: 30 });
+  approx(actual.labor * 10, 15);
+  approx(largerSameTime.labor * 15, 15);
+  approx(largerLongerTime.labor * 15, 22.5);
+  assert.ok(largerLongerTime.fixed > largerSameTime.fixed);
+  assert.ok(largerLongerTime.gas > largerSameTime.gas);
+});
+
 // ── Markup / price (§4.4) ─────────────────────────────────────────────────────
 
 test('product unit cost applies portion + packaging', () => {
