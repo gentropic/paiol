@@ -38,7 +38,7 @@ export function managerialDre(store, start, end) {
   const linkedSources = new Set();
   let salesRevenue = 0; let otherRevenue = 0; let directCosts = 0; let operatingExpenses = 0;
   let salesDiscounts = 0; let salesReturns = 0; let salesTaxes = 0; let sellingExpenses = 0; let indirectCosts = 0; let clientLosses = 0;
-  let missingMaterials = 0; let undeliveredSales = 0;
+  let missingMaterials = 0; let undeliveredSales = 0; let legacyCostEstimates = 0;
   let fixedExpenses = 0; let variableExpenses = 0; let excluded = 0; let unclassified = 0;
   let openReceivables = 0; let openPayables = 0; let overdueReceivables = 0;
 
@@ -66,7 +66,7 @@ export function managerialDre(store, start, end) {
       if (category?.behavior === 'fixa' || category?.systemKey === 'indiretos-producao') indirectCosts += amount;
     } else {
       addRow(expenses, category, fallback || 'Despesa sem categoria', amount); operatingExpenses += amount;
-      if (category?.behavior === 'fixa' || category?.kind === 'despesaFixa') fixedExpenses += amount;
+      if (category?.behavior === 'fixa' || (!category?.behavior && category?.kind === 'despesaFixa')) fixedExpenses += amount;
       else variableExpenses += amount;
       if (category?.systemKey === 'perdas-clientes') clientLosses += amount;
     }
@@ -131,12 +131,14 @@ export function managerialDre(store, start, end) {
   let materialCosts = 0; let packagingCosts = 0;
   for (const order of store.state.encomendas) if (order.entregue && !order.desistenciaAt && dreInPeriod(order.deliveryDate || order.at, start, end)) {
     const estimate = orderMaterialEstimate(store, order);
+    if (order.materialCostSnapshot == null || order.packagingCostSnapshot == null) legacyCostEstimates++;
     materialCosts += order.materialCostSnapshot != null ? Math.max(0, dreAmount(order.materialCostSnapshot)) : estimate.ingredients;
     packagingCosts += order.packagingCostSnapshot != null ? Math.max(0, dreAmount(order.packagingCostSnapshot)) : estimate.packaging;
     missingMaterials += estimate.missing;
   }
   for (const sale of store.state.sales) if (!store.isReversed('sale', sale.id) && dreInPeriod(sale.at, start, end)) {
     const estimate = orderMaterialEstimate(store, { itens: [{ productId: sale.productId, qty: sale.qty }] });
+    if (sale.materialCostSnapshot == null || sale.packagingCostSnapshot == null) legacyCostEstimates++;
     materialCosts += sale.materialCostSnapshot != null ? Math.max(0, dreAmount(sale.materialCostSnapshot)) : estimate.ingredients;
     packagingCosts += sale.packagingCostSnapshot != null ? Math.max(0, dreAmount(sale.packagingCostSnapshot)) : estimate.packaging;
     missingMaterials += estimate.missing;
@@ -175,16 +177,18 @@ export function managerialDre(store, start, end) {
   if (excluded > 0.005) note('info', 'Aquisições e investimentos fora do lucro', 'Compras de estoque, equipamentos e movimentações patrimoniais não são despesa integral no dia da compra.');
   if (undeliveredSales) note('info', 'Pedidos ainda não entregues', `${undeliveredSales} pedido(s) ainda não entram como venda nesta DRE.`);
   if (missingMaterials) note('warn', 'Custos de produtos incompletos', `${missingMaterials} item(ns) vendidos não tiveram o custo de insumos calculado. Confira o cadastro e os preços de compra.`);
+  if (legacyCostEstimates) note('info', 'Vendas antigas sem custo congelado', `${legacyCostEstimates} venda(s) antigas usam os preços atuais de insumos como estimativa. Mudanças de preço podem alterar a DRE histórica.`);
   if (unpricedInventory) note('warn', 'Estoque sem preço', `${unpricedInventory} insumo(s) com estoque não têm preço e ficaram fora do valor estimado.`);
 
   const rows = (map) => [...map.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   return {
     start, end, salesRevenue, salesGross: salesRevenue + salesDiscounts, salesDiscounts, salesReturns, salesTaxes,
     otherRevenue, grossRevenue, directCosts, materialCosts, packagingCosts, productionDepreciation: depreciation.production,
-    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, missingMaterials,
+    administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, missingMaterials, legacyCostEstimates,
     grossProfit, sellingExpenses, indirectCosts, clientLosses,
     operatingExpenses, fixedExpenses, variableExpenses, netResult, grossMarginPct, netMarginPct,
     openReceivables, openPayables, overdueReceivables, excluded, unclassified, diagnostics,
     revenueRows: rows(revenue), costRows: rows(costs), sellingRows: rows(selling), expenseRows: rows(expenses),
   };
 }
+
