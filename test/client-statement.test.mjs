@@ -37,3 +37,17 @@ test('clientFinancialStatement period filters each movement by its own date with
   assert.equal(statement.movements.length, 3);
   assert.ok(statement.movements.some((row) => row.description.includes('compra de 2026-05-08')));
 });
+
+test('client statement includes quick sales and the full value of a custom basket', () => {
+  const store = fixture();
+  store.upsertProduct({ id: 'basket', name: 'Cesta', saleKind: 'cesta', components: [], salePrice: 15 });
+  store.upsertEncomenda({ id: 'quick', at: '2026-06-10T12:00:00Z', deliveryDate: '2026-06-12T12:00:00Z', quickSale: true,
+    clienteId: 'c1', itens: [{ productId: 'basket', qty: 2, unitPrice: 15, bundleItems: [{ productId: 'p1', qty: 3, unitPrice: 12 }] }], total: 102 });
+  const row = clientFinancialStatement(store, 'c1').movements.find((movement) => movement.orderId === 'quick' && movement.type === 'purchase');
+  assert.equal(row.description, 'Venda rápida');
+  assert.equal(row.at, '2026-06-10T12:00:00Z');
+  assert.equal(row.items[0].qty, 2);
+  assert.equal(row.items[0].unitPrice, 51);
+  assert.equal(row.items[0].total, 102);
+  assert.match(row.items[0].name, /3× Bolo/);
+});

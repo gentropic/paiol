@@ -2,7 +2,7 @@
 // payments and manual receivables without duplicating the finance title generated for an order.
 
 import { clientCreditBalance, titleSettlements, titleState } from './finance.js';
-import { bundleCompositionText } from './bundles.js';
+import { bundleCompositionText, orderItemGross } from './bundles.js';
 
 const statementDate = (iso) => String(iso || '').slice(0, 10);
 const statementInPeriod = (iso, start, end) => (!start || statementDate(iso) >= start) && (!end || statementDate(iso) <= end);
@@ -32,17 +32,18 @@ export function clientFinancialStatement(store, clientId, start = '', end = '') 
     const items = (order.itens || []).map((item) => {
       const product = store.get('products', item.productId);
       const qty = Number(item.qty) || 0;
-      const unitPrice = Number(item.unitPrice) || 0;
+      const total = orderItemGross(item);
+      const unitPrice = qty > 0 ? total / qty : 0;
       const composition = bundleCompositionText(store, item);
-      return { productId: item.productId, name: `${product?.name || '(produto removido)'}${composition ? ` (${composition})` : ''}`, qty, unitPrice, total: qty * unitPrice };
+      return { productId: item.productId, name: `${product?.name || '(produto removido)'}${composition ? ` (${composition})` : ''}`, qty, unitPrice, total };
     });
     const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === order.id);
     const state = title ? titleState(store, title) : null;
     const paid = state ? state.paid : Math.max(0, store.paidFor(order.id));
     const total = Number(order.total) || 0;
     allMovements.push({
-      id: `order:${order.id}`, type: 'purchase', at: order.deliveryDate || order.at,
-      orderId: order.id, clientId: order.clienteId, description: 'Compra / encomenda', amount: total, items,
+      id: `order:${order.id}`, type: 'purchase', at: order.quickSale ? order.at : order.deliveryDate || order.at,
+      orderId: order.id, clientId: order.clienteId, description: order.quickSale ? 'Venda rápida' : 'Compra / encomenda', amount: total, items,
       paid: Math.min(total, paid), discounted: state?.discounted || 0, credited: state?.credited || 0, writtenOff: state?.writtenOff || 0, balance: state ? state.balance : Math.max(0, total - paid), titleId: title?.id,
       deliveryMethod: order.deliveryMethod || 'retirada', freight: Number(order.frete) || 0, discount: Number(order.discount) || 0, notes: order.notes,
     });

@@ -192,9 +192,9 @@ export function syncOrderReceivable(store, order, idFactory = () => crypto.rando
     issuedAt: order.at || order.deliveryDate, competenceDate: order.deliveryDate || order.at,
     dueDate: paymentDueManual ? title.dueDate : automaticDueDate, paymentDueManual,
     amount: Number(order.total) || 0,
-    description: `Encomenda${client?.name ? ` · ${client.name}` : ''}`,
+    description: `${order.quickSale ? 'Venda rápida' : 'Encomenda'}${client?.name || order.customerName ? ` · ${client?.name || order.customerName}` : ''}`,
     categoryId: salesCat?.id, partyType: 'cliente', partyId: order.clienteId,
-    partyName: client?.name || 'Sem cliente', sourceType: 'encomenda', sourceId: order.id,
+    partyName: client?.name || order.customerName || 'Sem cliente', sourceType: 'encomenda', sourceId: order.id,
     ...(order.desistenciaAt ? { cancelledAt: order.desistenciaAt } : {}),
   };
   if (!order.desistenciaAt) delete record.cancelledAt;

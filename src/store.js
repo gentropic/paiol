@@ -12,7 +12,7 @@ import { isBundleProduct, orderProduction } from './bundles.js';
 export const SCHEMA_VERSION = 4;
 
 /** Append-only, immutable event collections (§2.2). */
-const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals'];
+const EVENT_COLLECTIONS = ['priceChanges', 'batches', 'sales', 'variableCosts', 'perdas', 'payments', 'despesas', 'incomes', 'financeSettlements', 'cashAdjustments', 'reversals', 'workTimeEvents'];
 /** Mutable master-data collections (§2.1). */
 const BUSINESS_MASTER_COLLECTIONS = ['ingredients', 'recipes', 'products', 'clients', 'employees', 'encomendas', 'comandas', 'categories', 'suppliers', 'cashAccounts', 'financeTitles', 'purchases', 'notifications', 'shoppingItems'];
 const MASTER_COLLECTIONS = [...BUSINESS_MASTER_COLLECTIONS, 'trashItems'];
@@ -104,7 +104,7 @@ export function emptyState() {
     ingredients: [], recipes: [], products: [], clients: [], employees: [], encomendas: [], comandas: [], categories: [],
     suppliers: [], cashAccounts: [], financeTitles: [], purchases: [], trashItems: [],
     notifications: [], shoppingItems: [],
-    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [],
+    priceChanges: [], batches: [], sales: [], variableCosts: [], perdas: [], payments: [], despesas: [], incomes: [], financeSettlements: [], cashAdjustments: [], reversals: [], workTimeEvents: [],
   };
 }
 
@@ -206,9 +206,9 @@ export class PaiolStore {
   // ── Master data (mutable upsert/remove) ──────────────────────────────────────
 
   /** @param {import('./domain.js').Ingredient} x */
-  upsertIngredient(x) { return this._upsert('ingredients', x); }
+  upsertIngredient(x) { return this._upsertDated('ingredients', x); }
   /** @param {import('./domain.js').Recipe} x */
-  upsertRecipe(x) { return this._upsert('recipes', x); }
+  upsertRecipe(x) { return this._upsertDated('recipes', x); }
   /** @param {import('./domain.js').Product} x */
   upsertProduct(x) {
     const product = normalizeProductSaleKind(x);
@@ -229,7 +229,7 @@ export class PaiolStore {
     return this._upsert('encomendas', { ...x, updatedAt });
   }
   /** @param {import('./domain.js').Comanda} x */
-  upsertComanda(x) { return this._upsert('comandas', x); }
+  upsertComanda(x) { return this._upsertDated('comandas', x); }
   /** @param {import('./domain.js').Category} x */
   upsertCategory(x) { return this._upsert('categories', x); }
   /** @param {object} x */
@@ -237,7 +237,7 @@ export class PaiolStore {
   /** @param {object} x */
   upsertCashAccount(x) { return this._upsert('cashAccounts', x); }
   /** @param {object} x */
-  upsertFinanceTitle(x) { return this._upsert('financeTitles', x); }
+  upsertFinanceTitle(x) { return this._upsertDated('financeTitles', x); }
   /** @param {object} x */
   upsertPurchase(x) { return this._upsert('purchases', x); }
   /** @param {object} x */
@@ -316,6 +316,33 @@ export class PaiolStore {
   addCashAdjustment(ev) { return this._append('cashAdjustments', ev); }
   /** @param {import('./domain.js').Reversal} ev — estorno of a prior event (kind + refId). */
   addReversal(ev) { return this._append('reversals', ev); }
+  /** Start or end of the observed working day; a reference, not direct recipe labor. */
+  addWorkTimeEvent(ev) { return this._append('workTimeEvents', ev); }
+
+  /** Clear the test orders and expenses while retaining an auditable, restorable history. */
+  clearOrdersAndExpenses(at = new Date().toISOString(), idFactory = () => crypto.randomUUID()) {
+    const orders = this.state.encomendas.slice();
+    const orderIds = new Set(orders.map((order) => order.id));
+    const cancelledTitles = this.state.financeTitles.filter((title) => title.direction === 'pagar'
+      || (title.sourceType === 'encomenda' && orderIds.has(title.sourceId))
+      || title.sourceType === 'sale');
+    const titleIds = new Set(cancelledTitles.map((title) => title.id));
+    const reverse = (kind, record) => {
+      if (!this.isReversed(kind, record.id)) this.addReversal({ id: idFactory(), at, kind, refId: record.id, reason: 'Limpeza de pedidos e despesas' });
+    };
+    for (const order of orders) this.removeEncomenda(order.id, at);
+    for (const payment of this.state.payments) if (orderIds.has(payment.encomendaId)) reverse('payment', payment);
+    for (const sale of this.state.sales) reverse('sale', sale);
+    for (const expense of this.state.despesas) reverse('despesa', expense);
+    for (const cost of this.state.variableCosts) reverse('variableCost', cost);
+    for (const settlement of this.state.financeSettlements) if (titleIds.has(settlement.titleId)) reverse('financeSettlement', settlement);
+    for (const adjustment of this.state.cashAdjustments) if (adjustment.kind === 'client-payment') {
+      const allocations = this.state.financeSettlements.filter((s) => s.paymentId === adjustment.id && s.kind === 'client-payment-allocation');
+      if (allocations.length && allocations.every((s) => titleIds.has(s.titleId))) reverse('cashAdjustment', adjustment);
+    }
+    for (const title of cancelledTitles) if (!title.cancelledAt) this.upsertFinanceTitle({ ...title, cancelledAt: at });
+    return { orders: orders.length, legacySales: this.state.sales.length, expenses: this.state.despesas.length + this.state.variableCosts.length, payables: cancelledTitles.filter((title) => title.direction === 'pagar').length };
+  }
 
   /** Total received toward an encomenda (non-reversed payments). Saldo/status derive from this. */
   paidFor(encomendaId) {
@@ -343,18 +370,17 @@ export class PaiolStore {
   markEncomendaDesistencia(encomendaId, at) {
     const enc = this.get('encomendas', encomendaId);
     if (!enc || enc.desistenciaAt) return enc;
-    this.upsertEncomenda({ ...enc, desistenciaAt: at });
-
     const date = String(enc.deliveryDate || '').slice(0, 10);
     const comanda = date ? this.get('comandas', date) : null;
-    if (comanda) {
+    if (comanda?.itens?.some((item) => item.prevista != null && item.manualQty == null)) {
       const cancelled = orderProduction(enc);
-      const itens = (comanda.itens || []).map((it) => {
-        if (it.prevista == null || !cancelled.has(it.productId)) return it;
-        return { ...it, prevista: Math.max(0, Number(it.prevista) - cancelled.get(it.productId)) };
-      });
+      const itens = comanda.itens.map((item) => item.prevista == null || item.manualQty != null
+        ? item : { ...item, prevista: Math.max(0, Number(item.prevista) - (cancelled.get(item.productId) || 0)) });
       this.upsertComanda({ ...comanda, itens });
     }
+    this.upsertEncomenda({ ...enc, desistenciaAt: at });
+
+    // New comanda records store manualQty separately, so their demand falls automatically.
     return this.get('encomendas', encomendaId);
   }
 
@@ -378,9 +404,8 @@ export class PaiolStore {
 
   /**
    * Merge another store/state into this one. Events union by id (immutable, so a shared
-   * id means identical content — duplicates are dropped). Product and order edits use updatedAt
-   * so a stale Dropbox copy cannot undo newly saved prices or items in an open order. Other
-   * master data still use incoming replacement by id (v0.1 single-user, no vector clocks yet).
+   * id means identical content — duplicates are dropped). Dated master edits use updatedAt
+   * so a stale Dropbox copy cannot undo newly saved data on this device.
    * @param {PaiolStore | State} other
    * @returns {{ eventsAdded: number, masterUpserted: number }}
    */
@@ -409,9 +434,8 @@ export class PaiolStore {
     for (const c of BUSINESS_MASTER_COLLECTIONS) {
       for (const rec of o[c] || []) {
         if (this._trashBlocks(c, rec.id)) continue;
-        // A newly saved product or order must not be replaced by an older Dropbox copy.
         // Legacy records without updatedAt remain compatible: a dated edit wins over them.
-        if (c === 'products' || c === 'encomendas') {
+        if (['products', 'encomendas', 'ingredients', 'recipes', 'comandas', 'financeTitles'].includes(c)) {
           const local = this.get(c, rec.id);
           if (local && String(local.updatedAt || '') > String(rec.updatedAt || '')) continue;
           if (local && JSON.stringify(local) === JSON.stringify(rec)) continue;
@@ -483,6 +507,12 @@ export class PaiolStore {
   }
 
   // ── internals ────────────────────────────────────────────────────────────────
+
+  _upsertDated(collection, rec) {
+    const previousAt = Date.parse(this.get(collection, rec.id)?.updatedAt || '');
+    const updatedAt = new Date(Math.max(Date.now(), Number.isFinite(previousAt) ? previousAt + 1 : 0)).toISOString();
+    return this._upsert(collection, { ...rec, updatedAt });
+  }
 
   _upsert(collection, rec) {
     if (!rec || typeof rec.id !== 'string' || !rec.id) {

@@ -18,11 +18,20 @@ test('bundle sale counts the parent once and expands every child in production',
   const dashboard = businessPeriodSummary(store, '2026-07-01', '2026-07-31');
   assert.equal(dashboard.basketQty, 2);
   assert.equal(dashboard.baskets[0].id, 'cesta');
-  assert.equal(dashboard.soldProducts.some((row) => row.id === 'bolo'), false);
+  assert.equal(dashboard.soldProducts.some((row) => row.id === 'bolo'), true);
 });
 
 test('sale discount reduces the order net total', () => {
   assert.equal(orderNet({ itens: [{ qty: 2, unitPrice: 50 }], frete: 10, discount: 15 }), 95);
+});
+
+test('two baskets plus a separate broinha require seven broinhas in the comanda', () => {
+  const requirements = orderProduction({ itens: [
+    { productId: 'cesta', qty: 2, unitPrice: 15, bundleItems: [{ productId: 'broinha', qty: 3, unitPrice: 5 }] },
+    { productId: 'broinha', qty: 1, unitPrice: 5 },
+  ] });
+  assert.equal(requirements.get('cesta'), 2);
+  assert.equal(requirements.get('broinha'), 7);
 });
 
 test('settlement discount closes receivable without creating cash', () => {
@@ -32,6 +41,6 @@ test('settlement discount closes receivable without creating cash', () => {
   const title = store.state.financeTitles.find((row) => row.sourceId === 'e1');
   store.addPayment({ id: 'payment', at: '2026-07-03', encomendaId: 'e1', valor: 90, forma: 'Pix' });
   store.addFinanceSettlement({ id: 'discount', at: '2026-07-03', titleId: title.id, amount: 10, kind: 'discount' });
-  assert.deepEqual(titleState(store, title), { paid: 90, discounted: 10, settled: 100, balance: 0, status: 'quitado', overdueDays: 0 });
+  assert.deepEqual(titleState(store, title), { paid: 90, discounted: 10, credited: 0, writtenOff: 0, settled: 100, balance: 0, status: 'quitado', overdueDays: 0 });
   assert.equal(cashMovements(store).reduce((sum, row) => sum + (row.direction === 'entrada' ? row.amount : 0), 0), 90);
 });

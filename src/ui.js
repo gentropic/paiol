@@ -1,5286 +1,5979 @@
-// paiol ‚Äî UI (PT-BR surface). Vanilla DOM, no framework. English identifiers in code, every
-// label Nayara sees in Portuguese. A tabbed shell over the tested core: Insumos, Receitas,
-// Produtos, the Pre√ßos payoff view (where the cost engine surfaces), and Ajustes.
-//
-// renderApp rebuilds the DOM from (store, view, actions) on every change. Add-forms only mutate
-// on submit, so typing is never interrupted by a re-render.
-
-import {
-  indexStore, estimateLens, costBreakdown, priceFromCost, productUnitCost, productPrice, productBreakdown,
-  effectiveMargin, effectiveSalesRates, PriceError, CycleError, YieldError, MarkupError, RefError,
-} from './cost-engine.js';
-import { ConversionError } from './units.js';
-import { exportYaml } from './exchange.js';
-import { generateFichasPdf, generateReciboPdf, generateCommercialDocumentPdf, generateComandaPdf, generateClientStatementPdf, generateDrePdf, savePdf } from './pdf.js';
-import { workbookBytes, parseInterchange, previewExchange } from './xlsx-exchange.js';
-import { monthSummary, despesasByCategory, productSummary, clientSummary, revenueTrend, salesPeriodSummary, businessPeriodSummary, businessProfitTrend } from './reports.js';
-import { DEFAULT_CHART, listTitles, titleState, titleSettlements, cashMovements, cashFlow, financeDashboard, categoryByKey, canonicalCategoryId, defaultCashAccount } from './finance.js';
-import { clientFinancialStatement } from './client-statement.js';
-import { managerialDre } from './dre.js';
-import { inventorySummary, ingredientInventory } from './inventory.js';
-import { APP_VERSION } from './config.js';
-import { productSaleKind, isBundleProduct, bundleKindLabel, orderItemGross, orderItemSaleLines, orderProduction, orderItemUnitCost, bundleCompositionText, saleNet } from './bundles.js';
-import { findOpenOrderForClientDate, addOrAppendOrder } from './orders.js';
-
-const STOCK_UNITS = ['g', 'kg', 'ml', 'l', 'un'];
-// Built-in unit dimensions. A recipe component is offered only the units in its ingredient's
-// (or sub-recipe's) own dimension, defaulting to that unit ‚Äî so eggs bought in `un` are used in
-// `un` (no weighing), while flour bought in `kg` can still be used in `g` (same dimension).
-const UNIT_GROUPS = [['g', 'kg'], ['ml', 'l'], ['un']];
-function unitsInDimension(u) {
-  const group = UNIT_GROUPS.find((g) => g.includes(u)) || [u];
-  return [u, ...group.filter((x) => x !== u)]; // natural unit first = the default selection
-}
-// Bottom-nav sections (iOS-native tab bar). Each section holds 1+ screens shown as a top
-// segmented control. Grouped by frequency/mental-model so 8 screens fit ~5 thumb-reachable tabs.
-const SECTIONS = [
-  { id: 'inicio', label: 'In√≠cio', icon: '‚åÇ', screens: [['inicio', 'In√≠cio']] },
-  { id: 'pedidos', label: 'Pedidos', icon: '‚ñ§', screens: [['encomendas', 'Encomendas'], ['vendas', 'Vendidos']] },
-  { id: 'producao', label: 'Produ√ß√£o', icon: '‚óá', screens: [['comanda', 'Comanda'], ['perdas', 'Perdas']] },
-  { id: 'cadastro', label: 'Cadastro', icon: 'Ôºã', screens: [['insumos', 'Insumos'], ['receitas', 'Receitas'], ['produtos', 'Produtos'], ['clientes', 'Clientes'], ['funcionarios', 'Funcion√°rios']] },
-  { id: 'financeiro', label: 'Financeiro', icon: '$', screens: [['fin-inicio', 'In√≠cio'], ['fin-dashboard', 'Dashboard'], ['fin-receber', 'A Receber'], ['fin-ficha', 'Ficha do cliente'], ['fin-pagar', 'A Pagar'], ['financeiro', 'Lan√ßamentos'], ['fin-fluxo', 'Fluxo de Caixa'], ['fin-documentos', 'Recibo / Or√ßamento'], ['simulador', 'Simulador']] },
-  { id: 'ajustes', label: 'Ajustes', icon: '‚öô', screens: [['ajustes', 'Ajustes']] },
-];
-const SECTION_OF = {};
-for (const sec of SECTIONS) for (const [sid] of sec.screens) SECTION_OF[sid] = sec;
-for (const sid of ['fin-compras', 'fin-plano', 'fin-relatorios', 'precos', 'relatorios']) SECTION_OF[sid] = SECTIONS.find((s) => s.id === 'financeiro');
-
-// Built-in help (PT-BR, Nayara's voice). One friendly entry per screen + a few plain-language
-// concept answers. The ? button opens it with the current screen's topic expanded.
-const HELP_SCREENS = [
-  { id: 'inicio', icon: 'üè†', label: 'In√≠cio', paras: [
-    'Sua vis√£o geral do m√™s e a agenda de hoje: contas que vencem, lembretes, anivers√°rios e itens da lista de compras. Um lembrete sai da tela quando voc√™ marca ‚ÄúFeito‚Äù.',
-  ] },
-  { id: 'insumos', icon: 'üß∫', label: 'Insumos', paras: [
-    'Tudo que voc√™ compra pra produzir ‚Äî farinha, ovos, chocolate ‚Äî e tamb√©m embalagens e itens prontos de revenda (bombom, la√ßo, cart√£ozinho). Cadastre cada um com a unidade de compra e o pre√ßo.',
-    'Informe tamb√©m a quantidade inicial e o estoque m√≠nimo. Compras aumentam o saldo; a produ√ß√£o anotada na comanda e as perdas de insumo diminuem. Vendas n√£o mexem nesse estoque.',
-  ] },
-  { id: 'receitas', icon: 'üìñ', label: 'Receitas', paras: [
-    'Aqui fica a ficha t√©cnica completa: ingredientes/insumos, rendimento, tempos, embalagem, margem e o produto vendido relacionado.',
-    'O custo soma ingredientes, g√°s, embalagem e custos fixos proporcionais. A m√£o de obra aparece como indicador, pois sal√°rios e pr√≥-labore devem estar nos custos fixos. Em Financeiro, use o Simulador para testar rendimento, custo e lucro sem alterar a receita original.',
-  ] },
-  { id: 'produtos', icon: 'üéÇ', label: 'Produtos', paras: [
-    '√â a lista simples do que aparece nas comandas e vendas: nome, unidade ou peso e valor de venda.',
-    'A composi√ß√£o e os c√°lculos ficam em Receitas. Ao relacionar uma receita a um produto, o custo calculado passa a servir de refer√™ncia para a rentabilidade desse produto.',
-  ] },
-  { id: 'clientes', icon: 'üë•', label: 'Clientes', paras: [
-    'Seus clientes ‚Äî nome, telefone e endere√ßo. Como a maioria √© recorrente, cadastrar uma vez agiliza lan√ßar os pedidos e montar a ficha (hist√≥rico de compras) de cada um.',
-    'Ao abrir um cliente, voc√™ v√™ o hist√≥rico dele: total comprado, total pago, saldo pendente, as compras e os pagamentos. No fim da tela voc√™ gera as fichas em PDF (3 por folha, pra imprimir e arquivar): todas as vendas, s√≥ as em aberto (com saldo) ou s√≥ as pagas ‚Äî sempre com uma pr√©via pra conferir antes.',
-  ] },
-  { id: 'precos', icon: 'üí∞', label: 'Pre√ßos', paras: [
-    'Para cada produto, mostra o custo de ingredientes, g√°s, custos fixos proporcionais e embalagem. A m√£o de obra √© apenas indicador; sal√°rios j√° entram nos custos fixos. O pre√ßo sugerido considera tamb√©m taxas de pagamento, comiss√£o e margem desejada.',
-    'Se aparecer ‚Äúsem pre√ßo‚Äù, √© porque falta cadastrar o pre√ßo de algum insumo usado.',
-  ] },
-  { id: 'encomendas', icon: 'üìã', label: 'Encomendas', paras: [
-    'Os pedidos com data de entrega. Busque o cliente pelo nome, escolha a data e v√° buscando os produtos ‚Äî o total sai calculado. Toda encomenda de um cliente cadastrado entra na ficha dele, paga ou pendente.',
-    'A lista come√ßa mostrando todas as datas. Ordene por urgentes, retirada, motoboy ou nome do cliente; filtre por cliente, produto, entrega e situa√ß√£o. Marque ‚≠ê para destacar urg√™ncias e ‚ÄúEntregar‚Äù quando sair.',
-    'Um novo pedido para o mesmo cliente cadastrado e a mesma data entra na encomenda ainda n√£o entregue. Os produtos, frete, desconto e observa√ß√µes s√£o somados sem perder pagamentos j√° lan√ßados. Se a encomenda anterior j√° foi entregue, come√ßa outro pedido.',
-    'Em ‚ÄúFichas do dia‚Äù, escolha uma data e marque os clientes cujas encomendas quer imprimir. A pr√©via gera o mesmo PDF compacto de 3 fichas por folha, com o valor e o saldo dos pedidos dessa data.',
-  ] },
-  { id: 'comanda', icon: 'üìù', label: 'Comanda do dia', paras: [
-    'A lista do que produzir num dia. A Quantidade Prevista vem sozinha das encomendas com entrega nessa data (e d√° pra ajustar). Em Produzidos/Estoque voc√™ anota quanto PRODUZIU de verdade ‚Äî n√£o o que vendeu; vale pra estoque ou produ√ß√£o extra. Marque ‚úì quando terminar.',
-    'D√° pra adicionar produtos avulsos (estoque, pronta entrega) mesmo sem encomenda, e excluir (‚úï) os que n√£o quiser. O que passar do previsto fica ‚Äúdispon√≠vel para venda‚Äù. No fim aparecem o total dispon√≠vel e o custo de produ√ß√£o; o dinheiro e o lucro ficam em A Receber / Relat√≥rios.',
-  ] },
-  { id: 'fiado', icon: 'üí≥', label: 'A Receber', paras: [
-    'Quem ainda tem valor a pagar das encomendas ‚Äî o total a receber e cada pend√™ncia. Toque numa para registrar um pagamento (total ou parcial); o saldo √© recalculado sozinho.',
-    'Para corrigir um pagamento lan√ßado errado, use o estorno (‚Ü©) na encomenda ‚Äî ele cancela sem apagar o hist√≥rico.',
-  ] },
-  { id: 'vendas', icon: 'üõí', label: 'Vendidos', paras: [
-    'Mostra as encomendas marcadas como entregues e as vendas r√°pidas do per√≠odo. A data do filtro √© a data de entrega registrada na encomenda. Entregue e pago s√£o informa√ß√µes independentes: uma encomenda entregue pode continuar a receber.',
-    'Marque um ou mais produtos para filtrar e digite o nome do cliente para escolh√™-lo. O filtro Todos inclui vendas recebidas e pendentes. Desist√™ncias ficam em uma vis√£o separada.',
-  ] },
-  { id: 'financeiro', icon: '$', label: 'Financeiro', paras: [
-    'Centraliza o dinheiro que entrou e saiu: pagamentos de vendas, outras receitas, despesas fixas, despesas vari√°veis e custos.',
-    'O controle de pagamentos √© somente financeiro e manual ‚Äî sem QR Code, cobran√ßa autom√°tica ou links de pagamento.',
-  ] },
-  { id: 'funcionarios', icon: 'üßë‚Äçüç≥', label: 'Funcion√°rios', paras: [
-    'Cadastre nome, fun√ß√£o, telefone e anivers√°rio das pessoas que trabalham com voc√™. Funcion√°rios ativos que fazem anivers√°rio hoje aparecem na agenda do In√≠cio.',
-  ] },
-  { id: 'fin-documentos', icon: 'üßæ', label: 'Recibo / Or√ßamento', paras: [
-    'Gere um or√ßamento ou recibo n√£o fiscal em PDF A4, com logo e dados da empresa, cliente, itens, valores e condi√ß√£o de pagamento.',
-    'Voc√™ pode escolher um cliente cadastrado ou informar o nome de uma pessoa apenas para aquele documento. Nada √© lan√ßado no caixa automaticamente.',
-  ] },
-  { id: 'perdas', icon: 'üóëÔ∏è', label: 'Perdas', paras: [
-    'O que se perdeu e n√£o virou venda: uma massa que deu errado, um produto que n√£o vendeu, uma embalagem danificada. Para insumo ou produto, o valor j√° vem calculado pela quantidade.',
-    'O valor fica no relat√≥rio gerencial de produ√ß√£o. Ele n√£o cria uma segunda sa√≠da de caixa quando a compra do insumo j√° foi paga.',
-  ] },
-  { id: 'relatorios', icon: 'üìä', label: 'Relat√≥rios', paras: [
-    'Seu balan√ßo por m√™s: faturamento, custos, taxas, lucro e margem, com gr√°fico e o resultado por produto. D√° pra exportar.',
-  ] },
-  { id: 'simulador', icon: '‚öñÔ∏è', label: 'Simulador', paras: [
-    'Fa√ßa contas de ‚Äúe se‚Ä¶‚Äù. Escolha uma receita e veja o que acontece com o custo e a margem se voc√™ fizer um lote maior ‚Äî os ingredientes crescem junto, mas a m√£o de obra costuma subir pouco, ent√£o o custo por unidade cai.',
-    'Compare a margem e o lucro a um pre√ßo fixo. Ajuda a decidir se mant√©m, adapta ou tira um produto do card√°pio.',
-  ] },
-  { id: 'ajustes', icon: '‚öôÔ∏è', label: 'Ajustes', paras: [
-    'Os valores manuais salvos j√° entram na precifica√ß√£o. Compare-os com as estimativas dos √∫ltimos meses completos; elas s√≥ substituem seus valores quando voc√™ escolher adot√°-las.',
-    'Aqui tamb√©m ficam o hist√≥rico das notifica√ß√µes, a lista de compras, a lixeira, o backup e a importa√ß√£o/exporta√ß√£o. Voc√™ pode criar lembretes datados e acrescentar itens livres √† lista.',
-  ] },
-];
-const HELP_CONCEPTS = [
-  { q: 'Por que um produto fica ‚Äúsem pre√ßo‚Äù?', a: 'Quando algum insumo que ele usa ainda n√£o tem pre√ßo cadastrado. Cadastre o pre√ßo em Insumos e o pre√ßo do produto aparece sozinho.' },
-  { q: 'Estimativa x realidade', a: 'O app usa estimativas (das receitas) pra sugerir pre√ßos, e os dados reais (vendas e o que voc√™ produziu na comanda) pra mostrar a verdade nos relat√≥rios.' },
-  { q: 'Margem, taxa, comiss√£o e imposto', a: 'O pre√ßo sugerido cobre insumos, g√°s, embalagem e custos fixos proporcionais. Depois reserva, sobre o pre√ßo de venda, a margem desejada, a taxa de pagamento, a comiss√£o e eventual imposto percentual. O DAS do MEI j√° est√° nos custos fixos.' },
-  { q: 'Meus dados est√£o seguros?', a: 'Ficam salvos no seu aparelho. Conecte o Dropbox em Ajustes pra ter backup e poder usar em mais de um lugar.' },
-];
-
-// ‚îÄ‚îÄ DOM + format helpers ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function el(tag, attrs = {}, children = []) {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else if (k === 'text') node.textContent = v;
-    else if (k === 'value') node.value = v;
-    else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
-    else if (v !== false && v != null) node.setAttribute(k, v);
-  }
-  for (const c of [].concat(children)) {
-    if (c == null || c === false) continue;
-    node.append(c.nodeType ? c : document.createTextNode(String(c)));
-  }
-  return node;
-}
-
-const brl = (n) => 'R$ ' + (Number(n) || 0).toFixed(2).replace('.', ',');
-const pct = (frac) => (Number(frac) || 0) * 100;
-const fmtNum = (n) => String(Math.round((Number(n) || 0) * 100) / 100).replace('.', ','); // up to 2 dp, comma decimal
-const pctStr = (frac) => `${Math.round((Number(frac) || 0) * 100)}%`;
-const nowIso = () => new Date().toISOString();
-const uuid = () => crypto.randomUUID();
-const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString('pt-BR'); } catch { return iso; } };
-const fmtDateTime = (iso) => { try { return new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' }); } catch { return iso; } };
-/** Parse a number that may use a comma decimal or currency symbols; '' / invalid ‚Üí null. */
-function parseNum(s) {
-  if (s == null) return null;
-  const str = String(s).replace(/[^\d.,-]/g, '').replace(',', '.'); // strip "R$", spaces, etc.
-  if (str === '') return null;
-  const n = Number(str);
-  return Number.isFinite(n) ? n : null;
-}
-const fmtMoneyInput = (n) => (Number(n) || 0).toFixed(2).replace('.', ',');
-
-/** A currency input (R$ prefix, formats to 2 decimals on blur). Read its value via `.input.value`. */
-function moneyField(value, testid) {
-  const input = el('input', { class: 'pa-money-input', type: 'text', inputmode: 'decimal', ...(testid ? { 'data-testid': testid } : {}) });
-  input.value = value != null ? fmtMoneyInput(value) : '';
-  input.addEventListener('blur', () => { const n = parseNum(input.value); if (n != null) input.value = fmtMoneyInput(n); });
-  const wrap = el('div', { class: 'pa-money' }, [el('span', { class: 'pa-money-pfx', text: 'R$' }), input]);
-  wrap.input = input;
-  return wrap;
-}
-const norm = (s) => String(s || '').normalize('NFD').replace(/[ÃÄ-ÕØ]/g, '').toLowerCase().trim();
-// Backward compatible: products created before this field existed are available for sale.
-const productIsActive = (product) => !!product && product.active !== false;
-const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-const currentMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-const monthLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${m}/${(y || '').slice(2)}`; };
-const dateOnly = (iso) => String(iso || '').slice(0, 10);
-const inDateRange = (iso, start, end) => (!start || dateOnly(iso) >= start) && (!end || dateOnly(iso) <= end);
-
-function periodFields(start, end, onChange, prefix) {
-  const from = el('input', { class: 'pa-input', 'data-testid': `${prefix}-start`, type: 'date', value: start || '' });
-  const to = el('input', { class: 'pa-input', 'data-testid': `${prefix}-end`, type: 'date', value: end || '' });
-  from.addEventListener('change', () => onChange({ start: from.value || null, end: to.value || null }));
-  to.addEventListener('change', () => onChange({ start: from.value || null, end: to.value || null }));
-  return el('div', { class: 'pa-period' }, [field('Data inicial', from), el('span', { class: 'pa-period-arrow', text: 'at√©' }), field('Data final', to)]);
-}
-
-// Day bucketing for the opera√ß√£o logs (Fornadas/Vendas) ‚Äî local-day key + a friendly header.
-const dayKey = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
-function dayLabel(iso) {
-  const now = new Date();
-  const yest = new Date(now); yest.setDate(now.getDate() - 1);
-  const k = dayKey(iso);
-  if (k === dayKey(now)) return 'Hoje';
-  if (k === dayKey(yest)) return 'Ontem';
-  return fmtDate(iso);
-}
-/** A read-only event log (newest first), with a subtle date header whenever the day changes. */
-function logList(items, rowFn) {
-  const children = [];
-  let last = null;
-  for (const it of items) {
-    const k = dayKey(it.at);
-    if (k !== last) { children.push(el('li', { class: 'pa-daygroup', text: dayLabel(it.at) })); last = k; }
-    children.push(rowFn(it));
-  }
-  return el('ul', { class: 'pa-list' }, children);
-}
-// Local "YYYY-MM" of an event ‚Äî for the opera√ß√£o month scope (matches the <input type=month> value).
-const monthOf = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-/** Live, focus-preserving text filter over a logList ul ‚Äî also hides a day header when its rows all hide. */
-function logSearchInput(placeholder, ul, testid) {
-  const inp = el('input', { class: 'pa-input pa-search', type: 'search', placeholder, ...(testid ? { 'data-testid': testid } : {}) });
-  inp.addEventListener('input', () => {
-    const q = norm(inp.value);
-    for (const child of ul.children) {
-      if (!child.classList.contains('pa-list-item')) continue;
-      const hay = child.getAttribute('data-search') ?? child.textContent;
-      child.style.display = (!q || norm(hay).includes(q)) ? '' : 'none';
-    }
-    // Reconcile day headers: a header shows only if a visible row follows it (before the next header).
-    let header = null; let seen = false;
-    const flush = () => { if (header) header.style.display = seen ? '' : 'none'; };
-    for (const child of ul.children) {
-      if (child.classList.contains('pa-daygroup')) { flush(); header = child; seen = false; }
-      else if (child.classList.contains('pa-list-item') && child.style.display !== 'none') seen = true;
-    }
-    flush();
-  });
-  return inp;
-}
-/** The search + month-scope control row shared by the two opera√ß√£o logs. */
-function logFilters(ctx, ul, { searchPlaceholder, searchTestid, monthTestid }) {
-  const month = ctx.view.logMonth || '';
-  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': monthTestid, type: 'month', value: month });
-  monthInput.addEventListener('change', () => ctx.actions.setLogMonth(monthInput.value || null));
-  return el('div', { class: 'pa-row pa-form pa-logfilters' }, [
-    logSearchInput(searchPlaceholder, ul, searchTestid),
-    monthInput,
-  ]);
-}
-
-const SVGNS = 'http://www.w3.org/2000/svg';
-function svgEl(tag, attrs = {}, children = []) {
-  const node = document.createElementNS(SVGNS, tag);
-  for (const [k, v] of Object.entries(attrs)) if (v != null) node.setAttribute(k, String(v));
-  for (const c of [].concat(children)) if (c != null) node.append(c.nodeType ? c : document.createTextNode(String(c)));
-  return node;
-}
-
-/**
- * A search box that live-filters a container's direct children by their `data-search` attribute
- * (pure DOM toggle ‚Äî no re-render, so typing never loses focus). Set `data-search` on each row.
- */
-function searchInput(placeholder, container, testid) {
-  const inp = el('input', { class: 'pa-input pa-search', type: 'search', placeholder, ...(testid ? { 'data-testid': testid } : {}) });
-  inp.addEventListener('input', () => {
-    const q = norm(inp.value);
-    for (const child of container.children) {
-      const hay = child.getAttribute('data-search') ?? child.textContent;
-      child.style.display = (!q || norm(hay).includes(q)) ? '' : 'none';
-    }
-  });
-  return inp;
-}
-
-// ‚îÄ‚îÄ Shell ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-/**
- * @param {HTMLElement} root
- * @param {{ store: import('./store.js').PaiolStore, view: { tab: string, busy: boolean, status: ?string, linked: boolean }, actions: object }} ctx
- */
-export function renderApp(root, ctx) {
-  const panels = {
-    inicio: inicioPanel,
-    insumos: insumosPanel, receitas: receitasPanel, produtos: produtosPanel, clientes: clientesPanel, funcionarios: funcionariosPanel,
-    precos: precosPanel, vendas: vendasPanel,
-    encomendas: encomendasPanel, comanda: comandaPeriodPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
-    'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-ficha': financeClientStatementPanel, 'fin-pagar': financePayablePanel,
-    'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel,
-    relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
-  };
-  const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
-  const tab = SECTION_OF[ctx.view.tab] === section ? ctx.view.tab : section.screens[0][0];
-
-  const content = [];
-  if (ctx.view.updateReady) {
-    content.push(el('div', { class: 'pa-update', 'data-testid': 'update-banner' }, [
-      el('span', { class: 'pa-grow', text: '‚ú® Nova vers√£o dispon√≠vel' }),
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'update-apply', onclick: () => ctx.actions.applyUpdate() }, 'Atualizar'),
-    ]));
-  }
-  if (section.screens.length > 1 && section.id !== 'financeiro') {
-    content.push(el('div', { class: 'pa-modulebar', 'aria-label': `M√≥dulos de ${section.label}` }, section.screens.map(([sid, label]) =>
-      el('button', { class: 'pa-modulebtn' + (sid === tab ? ' active' : ''), 'data-screen': sid, onclick: () => ctx.actions.setTab(sid) }, label))));
-  }
-  content.push((panels[tab] || inicioPanel)(ctx));
-
-  const shell = [
-    el('header', { class: 'pa-header' }, [
-      el('div', { class: 'pa-brand pa-grow' }, [
-        el('img', { class: 'pa-brand-logo', src: './brand-logo.png', alt: 'Quitutes do Paiol' }),
-        el('div', { class: 'pa-brand-copy' }, [
-          el('span', { class: 'pa-eyebrow', text: 'Gest√£o da confeitaria' }),
-          el('h1', {}, [el('span', { text: 'Quitutes do Paiol' }), el('span', { class: 'pa-beta', title: 'Em evolu√ß√£o', text: 'beta' })]),
-          el('p', { class: 'pa-sub', text: 'Organiza√ß√£o simples. Decis√µes melhores.' }),
-        ]),
-      ]),
-      el('div', { class: 'pa-help-area' }, [
-        el('button', { class: 'pa-help-btn', 'data-testid': 'help-open', title: 'Ajuda', 'aria-label': 'Ajuda', onclick: () => ctx.actions.openModal({ kind: 'help' }) }, '?'),
-        el('span', { class: 'pa-version', title: `Vers√£o ${APP_VERSION}`, 'data-testid': 'app-version', text: `v${APP_VERSION}` }),
-      ]),
-    ]),
-    el('main', { class: 'pa-main' }, content),
-    el('nav', { class: 'pa-bottomnav' }, SECTIONS.map((sec) =>
-      el('button', { class: 'pa-navbtn' + (sec === section ? ' active' : ''), 'data-section': sec.id, onclick: () => ctx.actions.setTab(sec.screens[0][0]) }, [
-        el('span', { class: 'pa-navico', text: sec.icon }),
-        el('span', { class: 'pa-navlbl', text: sec.label }),
-      ]))),
-  ];
-  const existingBackdrop = root.querySelector(':scope > .pa-backdrop');
-  if (ctx.view.modal && existingBackdrop?.paiolModal === ctx.view.modal) {
-    // Data may sync while a form is open. Keep the same dialog node so its fields and focus survive.
-    const oldShell = [...root.children].filter((child) => child !== existingBackdrop);
-    existingBackdrop.before(...shell);
-    for (const child of oldShell) child.remove();
-  } else root.replaceChildren(...shell, ...(ctx.view.modal ? [modalOverlay(ctx)] : []));
-}
-
-/**
- * Sync ONLY the modal overlay ‚Äî open/close a sheet without rebuilding the panel (and its hundreds
- * of rows) underneath. Big perf win on the most frequent interaction (tap a row ‚Üí edit sheet), and
- * it preserves the list's scroll position. Full re-renders (on data mutations) go through renderApp.
- */
-export function renderModal(root, ctx) {
-  const existing = root.querySelector('.pa-backdrop');
-  if (existing) existing.remove();
-  if (ctx.view.modal) root.append(modalOverlay(ctx));
-}
-
-// ‚îÄ‚îÄ Modal / bottom sheet ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-const MODALS = {}; // kind ‚Üí (ctx, modal) ‚Üí sheet body element. Registered alongside each screen.
-
-function modalOverlay(ctx) {
-  const m = ctx.view.modal;
-  const build = MODALS[m.kind];
-  const body = build ? build(ctx, m) : el('div');
-  const backdrop = el('div', { class: 'pa-backdrop' });
-  backdrop.paiolModal = m;
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) ctx.actions.closeModal(); });
-  backdrop.append(el('div', { class: 'pa-sheet', role: 'dialog' }, body));
-  return backdrop;
-}
-
-/** Standard sheet scaffold: title, body rows, a Salvar/Cancelar footer, optional danger action. */
-function sheet({ title, rows, onSave, saveTestid, saveLabel, danger }) {
-  const dangers = !danger ? [] : (Array.isArray(danger) ? danger : [danger]);
-  return [
-    el('div', { class: 'pa-sheet-grab' }),
-    el('h2', { class: 'pa-sheet-title', text: title }),
-    el('div', { class: 'pa-sheet-body' }, rows),
-    el('div', { class: 'pa-sheet-actions' }, [
-      onSave && el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': saveTestid, onclick: onSave }, saveLabel || 'Salvar'),
-    ].filter(Boolean)),
-    ...dangers.map((d) => el('button', { class: `pa-btn pa-ghost pa-sheet-danger ${d.className || 'pa-bad'}`, 'data-testid': d.testid, onclick: d.onClick }, d.label)),
-  ].filter(Boolean);
-}
-
-function field(label, control) {
-  return el('div', { class: 'pa-field' }, [el('label', { text: label }), control]);
-}
-
-function statCard(label, value, tone = 'soft') {
-  return el('div', { class: `pa-stat pa-stat-${tone}` }, [el('span', { text: label }), el('strong', { text: value })]);
-}
-
-/** A comma-separated tags input. `.value()` ‚Üí a clean, de-duplicated string[]. */
-function tagsInput(tags, testid) {
-  const inp = el('input', { class: 'pa-input', 'data-testid': testid, type: 'text', placeholder: 'etiquetas separadas por v√≠rgula (ex.: festa, vegano)', value: (tags || []).join(', ') });
-  return {
-    el: inp,
-    value: () => [...new Set(inp.value.split(',').map((t) => t.trim()).filter(Boolean))],
-  };
-}
-
-/** Small chips rendering a record's tags (or nothing). */
-function tagChips(tags) {
-  if (!tags || !tags.length) return null;
-  return el('span', { class: 'pa-tags' }, tags.map((t) => el('span', { class: 'pa-tag', text: t })));
-}
-
-function clientLabel(client) {
-  return client?.code ? `${client.code} ¬∑ ${client.name}` : (client?.name || 'Cliente');
-}
-
-function clientSearchText(client) {
-  return [client?.name, client?.code, client?.phone, ...(client?.tags || [])].filter(Boolean).join(' ');
-}
-
-MODALS.confirm = (ctx, m) => [
-  el('h2', { class: 'pa-sheet-title', text: m.title || 'Confirmar' }),
-  el('p', { class: 'pa-sheet-msg', text: m.message }),
-  el('div', { class: 'pa-sheet-actions' }, [
-    el('button', { class: 'pa-btn pa-ghost pa-grow', onclick: () => ctx.actions.closeModal() }, 'Cancelar'),
-    el('button', { class: 'pa-btn pa-danger-btn pa-grow', 'data-testid': 'confirm-yes', onclick: () => m.onYes() }, m.yesLabel || 'Excluir'),
-  ]),
-];
-
-/** Open a confirmation sheet before a destructive mutation. */
-function confirmRemove(ctx, label, fn) {
-  ctx.actions.openModal({
-    kind: 'confirm', title: 'Remover?', message: `Remover ${label}? O registro ficar√° na Lixeira por 30 dias e poder√° ser restaurado em Ajustes.`,
-    yesLabel: 'Remover', onYes: () => ctx.actions.mutate(fn),
-  });
-}
-
-function confirmDesistencia(ctx, enc) {
-  ctx.actions.openModal({
-    kind: 'confirm', title: 'Marcar como desist√™ncia?',
-    message: 'A encomenda continuar√° no hist√≥rico. Os produtos sair√£o do previsto da comanda e o que j√° foi produzido ficar√° dispon√≠vel para venda.',
-    yesLabel: 'Confirmar desist√™ncia',
-    onYes: () => ctx.actions.mutate((s) => s.markEncomendaDesistencia(enc.id, nowIso())),
-  });
-}
-
-// Estorno ‚Äî append-only events can't be edited/deleted, so a correction is a REVERSAL event that
-// cancels the original (which stays in the history). Used on the opera√ß√£o logs.
-function confirmEstorno(ctx, kind, id) {
-  ctx.actions.openModal({
-    kind: 'confirm', title: 'Estornar?', message: 'A entrada ser√° cancelada ‚Äî continua no hist√≥rico, mas n√£o conta mais nos totais.',
-    yesLabel: 'Estornar', onYes: () => ctx.actions.mutate((s) => s.addReversal({ id: uuid(), at: nowIso(), kind, refId: id })),
-  });
-}
-/** Per-row estorno control: an "estornado" badge if already reversed, else an undo button. */
-function estornoControl(ctx, kind, id) {
-  if (ctx.store.isReversed(kind, id)) return el('span', { class: 'pa-badge', text: 'estornado' });
-  return el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Estornar', 'data-testid': 'estornar', onclick: (e) => { e.stopPropagation(); confirmEstorno(ctx, kind, id); } }, '‚Ü©');
-}
-
-// Built-in help ‚Äî opens with the current screen's topic expanded; everything else is browsable.
-MODALS.help = (ctx) => {
-  const here = ctx.view.tab;
-  const topic = (s) => el('details', { class: 'pa-help-det', ...(s.id === here ? { open: 'open' } : {}) }, [
-    el('summary', {}, [el('span', { text: `${s.icon} ${s.label}` }), s.id === here && el('span', { class: 'pa-badge', text: 'voc√™ est√° aqui' })].filter(Boolean)),
-    ...s.paras.map((t) => el('p', { class: 'pa-help-p', text: t })),
-  ]);
-  const concept = (c) => el('details', { class: 'pa-help-det' }, [
-    el('summary', { text: c.q }),
-    el('p', { class: 'pa-help-p', text: c.a }),
-  ]);
-  return [
-    el('div', { class: 'pa-sheet-grab' }),
-    el('h2', { class: 'pa-sheet-title', text: 'Ajuda' }),
-    el('p', { class: 'pa-sheet-msg', text: 'O paiol responde tr√™s perguntas: quanto cada coisa custa pra fazer, quanto cobrar, e se voc√™ est√° lucrando.' }),
-    el('h3', { class: 'pa-h3', text: 'As telas' }),
-    ...HELP_SCREENS.map(topic),
-    el('h3', { class: 'pa-h3', text: 'D√∫vidas comuns' }),
-    ...HELP_CONCEPTS.map(concept),
-    el('div', { class: 'pa-sheet-actions' }, [
-      el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'help-close', onclick: () => ctx.actions.closeModal() }, 'Entendi'),
-    ]),
-  ];
-};
-
-// ‚îÄ‚îÄ In√≠cio (dashboard / cockpit) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-const birthdayMatches = (birthday, date = todayInput()) => String(birthday || '').slice(5, 10) === String(date).slice(5, 10);
-function birthdaysToday(store, date = todayInput()) {
-  return [
-    ...store.state.clients.filter((person) => birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Cliente' })),
-    ...store.state.employees.filter((person) => !person.inactive && birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Funcion√°rio' })),
-    ...store.state.suppliers.filter((person) => !person.archived && birthdayMatches(person.birthday, date)).map((person) => ({ ...person, type: 'Fornecedor' })),
-  ].sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
-}
-
-function inicioPanel(ctx) {
-  const { store } = ctx;
-  const month = currentMonth();
-  const sum = monthSummary(store, month);
-  const [year, monthNumber] = month.split('-').map(Number);
-  const payableMonth = listTitles(store, {
-    direction: 'pagar', start: `${month}-01`,
-    end: `${month}-${String(new Date(year, monthNumber, 0).getDate()).padStart(2, '0')}`,
-    status: 'aberto',
-  }).reduce((total, row) => total + row.balance, 0);
-  const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
-  const vazio = !store.state.ingredients.length && !store.state.recipes.length && !store.state.products.length;
-  const today = todayInput();
-  const payableToday = listTitles(store, { direction: 'pagar', start: today, end: today, status: 'aberto' })
-    .filter((row) => !row.title.cancelledAt && row.balance > 0.005);
-  const payableTodayTotal = payableToday.reduce((total, row) => total + row.balance, 0);
-  const openPayablesToday = () => {
-    ctx.actions.setFinanceView({
-      finPayPeriod: 'custom', finPayStart: today, finPayEnd: today, finStatus: 'aberto',
-      finPartyId: '', finTitleCategory: '', finMethod: '',
-    });
-    ctx.actions.setTab('fin-pagar');
-  };
-  const notifications = store.state.notifications.filter((item) => item.date === today && !item.done).sort((a, b) => norm(a.title).localeCompare(norm(b.title)));
-  const birthdays = birthdaysToday(store, today);
-  const lowStock = inventorySummary(store).filter((row) => row.low && !row.ingredient.shoppingHidden);
-  const manualShopping = store.state.shoppingItems.filter((item) => !item.done);
-  const hasDailyNotices = notifications.length || birthdays.length || lowStock.length || manualShopping.length;
-
-  return el('section', {}, [
-    el('section', { class: 'pa-card pa-home-agenda' }, [
-      el('div', { class: 'pa-cardhead' }, [
-        el('div', { class: 'pa-grow' }, [
-          el('span', { class: 'pa-eyebrow', text: 'Agenda financeira' }),
-          el('h2', { text: `Hoje ‚Äî ${fmtDate(`${today}T12:00:00`)}` }),
-        ]),
-      ]),
-      el('button', { class: `pa-agenda-payable${payableTodayTotal > 0.005 ? ' pa-agenda-payable-due' : ''}`, type: 'button', 'data-testid': 'home-payable-today', onclick: openPayablesToday }, [
-        el('div', { class: 'pa-grow' }, [
-          el('strong', { text: payableTodayTotal > 0.005 ? 'Saldo a pagar hoje' : 'Nenhuma conta vence hoje' }),
-          el('span', { class: 'pa-muted', text: payableToday.length ? `${payableToday.length} ${payableToday.length === 1 ? 'conta em aberto' : 'contas em aberto'}` : 'Toque para consultar o Contas a Pagar' }),
-        ]),
-        el('div', { class: 'pa-agenda-value' }, [
-          el('strong', { text: brl(payableTodayTotal) }),
-          el('span', { text: 'Ver contas ‚Ä∫' }),
-        ]),
-      ]),
-    ]),
-    el('section', { class: 'pa-card', 'data-testid': 'home-notifications' }, [
-      el('div', { class: 'pa-cardhead' }, [
-        el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Agenda do dia' }), el('h2', { text: 'Notifica√ß√µes' })]),
-        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('ajustes') }, 'Consultar hist√≥rico'),
-      ]),
-      !hasDailyNotices && el('p', { class: 'pa-empty', text: 'Nenhuma notifica√ß√£o para hoje.' }),
-      ...notifications.map((item) => el('div', { class: 'pa-list-item', 'data-testid': 'home-notification' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: item.title }), item.notes && el('span', { class: 'pa-muted', text: item.notes })].filter(Boolean)),
-        el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'notification-done', onclick: () => ctx.actions.mutate((s) => s.upsertNotification({ ...item, done: true, doneAt: nowIso() })) }, 'Feito'),
-      ])),
-      ...birthdays.map((person) => el('div', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `üéÇ Anivers√°rio: ${person.name}` }), el('span', { class: 'pa-badge', text: person.type })])),
-      lowStock.length > 0 && el('div', { class: 'pa-callout' }, [
-        el('strong', { text: 'Lista de compras ¬∑ estoque m√≠nimo' }),
-        el('ul', { class: 'pa-list pa-tight' }, lowStock.map((row) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: row.ingredient.name }), el('strong', { class: 'pa-bad', text: `${fmtNum(row.current)} ${row.ingredient.stockUnit}` })]))),
-      ]),
-      manualShopping.length > 0 && el('div', { class: 'pa-callout' }, [
-        el('strong', { text: 'Itens inclu√≠dos na lista de compras' }),
-        el('ul', { class: 'pa-list pa-tight' }, manualShopping.map((item) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: item.name }), el('strong', { text: [fmtNum(item.qty), item.unit].filter(Boolean).join(' ') })]))),
-      ]),
-    ].filter(Boolean)),
-    el('section', { class: 'pa-card' }, [
-      el('div', { class: 'pa-row' }, [
-        el('h2', { class: 'pa-grow', text: `Este m√™s ‚Äî ${monthLabel(month)}` }),
-      ]),
-      el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(sum.recebido) })]),
-        el('tr', {}, [el('td', { text: 'A receber' }), el('td', { class: 'pa-num', text: brl(sum.aReceber) })]),
-        el('tr', {}, [el('td', { text: 'Pagos' }), el('td', { class: 'pa-num', text: brl(sum.despesas) })]),
-        el('tr', {}, [el('td', { text: 'A pagar' }), el('td', { class: 'pa-num', text: brl(payableMonth) })]),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo de caixa' }), el('td', { class: 'pa-num' + (sum.saldoCaixa >= 0 ? '' : ' pa-bad'), text: brl(sum.saldoCaixa) })]),
-      ]),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'home-rel', onclick: () => ctx.actions.setTab('relatorios') }, 'Ver relat√≥rio completo ‚Üí'),
-    ]),
-    semPreco > 0 && el('section', { class: 'pa-card' }, [
-      el('p', { class: 'pa-status pa-bad' }, [el('strong', { text: `‚ö† ${semPreco} insumo(s) sem pre√ßo` }), ' ‚Äî produtos que os usam ficam sem pre√ßo.']),
-      el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('insumos') }, 'Ir para Insumos'),
-    ]),
-    el('section', { class: 'pa-card' }, [
-      el('h3', { class: 'pa-h3', text: 'A√ß√µes r√°pidas' }),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-encomenda', onclick: () => ctx.actions.setTab('encomendas') }, 'Nova encomenda'),
-        el('button', { class: 'pa-btn', 'data-testid': 'home-comanda', onclick: () => ctx.actions.setTab('comanda') }, 'Comanda do dia'),
-      ]),
-      vazio && el('p', { class: 'pa-hint', text: 'Comece cadastrando seus insumos e receitas em Cadastro.' }),
-    ]),
-  ]);
-}
-
-// ‚îÄ‚îÄ Insumos ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function insumosPanel(ctx) {
-  const { store } = ctx;
-  const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((ing) => insumoRow(ctx, ing)));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Insumos' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'ins-new', onclick: () => ctx.actions.openModal({ kind: 'insumo-add' }) }, '+ Novo'),
-    ]),
-    semPreco > 0 && el('p', { class: 'pa-status pa-bad' },
-      [el('strong', { text: `${semPreco} insumo(s) sem pre√ßo` }), ' ‚Äî produtos que os usam ficam sem pre√ßo.']),
-    store.state.ingredients.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhum insumo. Toque em ‚Äú+ Novo‚Äù para come√ßar.' })
-      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um item para editar.' }), searchInput('Buscar insumo‚Ä¶', list, 'ins-search'), list]),
-  ]);
-}
-
-// Clean, scannable row ‚Äî the whole row opens the edit sheet.
-function insumoRow(ctx, ing) {
-  const { store } = ctx;
-  const price = store.currentPrice(ing.id);
-  const lastAt = store.lastPriceAt(ing.id);
-  const inventory = ingredientInventory(store, ing.id);
-  return el('li', { class: 'pa-row-item', 'data-search': `${ing.name} ${ing.lastSupplier || ''} ${(ing.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'insumo-edit', id: ing.id }) }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', {}, el('strong', { text: ing.name })),
-      price != null
-        ? el('span', { class: 'pa-muted', text: `${ing.stockUnit} ¬∑ ${brl(price)}/${ing.stockUnit}${lastAt ? ` ¬∑ ${fmtDate(lastAt)}` : ''}${ing.lastSupplier ? ` ¬∑ ${ing.lastSupplier}` : ''}` })
-        : el('span', {}, [el('span', { class: 'pa-muted', text: `${ing.stockUnit} ¬∑ ` }), el('span', { class: 'pa-badge pa-bad', text: 'sem pre√ßo' })]),
-      inventory && el('span', { class: inventory.low ? 'pa-badge pa-bad' : 'pa-muted', text: `Estoque: ${fmtNum(inventory.current)} ${ing.stockUnit}${inventory.minimum > 0 ? ` ¬∑ m√≠nimo ${fmtNum(inventory.minimum)}` : ''}` }),
-      tagChips(ing.tags),
-    ].filter(Boolean)),
-    el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ]);
-}
-
-MODALS['insumo-add'] = (ctx) => insumoSheet(ctx, null);
-MODALS['insumo-edit'] = (ctx, m) => insumoSheet(ctx, ctx.store.get('ingredients', m.id) || null);
-
-function insumoSheet(ctx, ing) {
-  const name = el('input', { class: 'pa-input', 'data-testid': 'ins-name', type: 'text', placeholder: 'Nome (ex.: Farinha de trigo)', value: ing ? ing.name : '' });
-  const unit = el('select', { class: 'pa-input', 'data-testid': 'ins-unit' },
-    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(ing && u === ing.stockUnit ? { selected: 'selected' } : {}) })));
-  const price = moneyField(ing ? ctx.store.currentPrice(ing.id) : null, 'ins-price');
-  const supplier = el('input', { class: 'pa-input', 'data-testid': 'ins-supplier', type: 'text', placeholder: 'fornecedor da √∫ltima compra', value: ing ? (ing.lastSupplier || '') : '' });
-  const stockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.stockQty != null ? String(ing.stockQty).replace('.', ',') : '' });
-  const minStockQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'ins-min-stock', type: 'text', inputmode: 'decimal', placeholder: '0', value: ing && ing.minStockQty != null ? String(ing.minStockQty).replace('.', ',') : '' });
-  const tags = tagsInput(ing && ing.tags, 'ins-tags');
-
-  function save() {
-    const nm = name.value.trim();
-    if (!nm) { name.focus(); return; }
-    const p = parseNum(price.input.value);
-    const sup = supplier.value.trim();
-    const tg = tags.value();
-    const id = ing ? ing.id : uuid();
-    ctx.actions.mutate((s) => {
-      s.upsertIngredient({ ...(ing || {}), id, name: nm, stockUnit: unit.value, lastSupplier: sup || undefined, tags: tg.length ? tg : undefined,
-        stockQty: Math.max(0, parseNum(stockQty.value) || 0), minStockQty: Math.max(0, parseNum(minStockQty.value) || 0), shoppingHidden: false });
-      const cur = ing ? s.currentPrice(id) : null;
-      if (p != null && p !== cur) s.addPriceChange({ id: uuid(), at: nowIso(), ingredientId: id, price: p });
-    });
-  }
-
-  const history = ing ? ctx.store.priceHistory(ing.id) : [];
-  const rows = [
-    field('Nome', name),
-    field('Unidade de compra', unit),
-    field('Pre√ßo (por ' + (ing ? ing.stockUnit : 'unidade') + ')', price),
-    el('div', { class: 'pa-filtergrid' }, [field('Quantidade inicial/base em estoque', stockQty), field('Estoque m√≠nimo permitido', minStockQty)]),
-    el('p', { class: 'pa-hint', text: 'O saldo atual soma as compras e desconta apenas a produ√ß√£o registrada e as perdas de insumos. Vendas n√£o alteram o estoque.' }),
-    field('Fornecedor (opcional)', supplier),
-    field('Etiquetas (opcional)', tags.el),
-    history.length > 1 && el('details', { class: 'pa-history' }, [
-      el('summary', { text: `hist√≥rico de pre√ßos (${history.length})` }),
-      el('ul', { class: 'pa-list pa-tight' }, history.map((h) =>
-        el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-muted', text: `${fmtDate(h.at)} ‚Äî ${brl(h.price)}` })]))),
-    ]),
-  ].filter(Boolean);
-
-  return sheet({
-    title: ing ? 'Editar insumo' : 'Novo insumo',
-    rows,
-    onSave: save,
-    saveTestid: 'ins-save',
-    danger: ing ? { label: 'üóë Excluir insumo', testid: 'ins-delete', onClick: () => confirmRemove(ctx, `o insumo "${ing.name}"`, (s) => s.removeIngredient(ing.id)) } : null,
-  });
-}
-
-// ‚îÄ‚îÄ Receitas ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function receitasPanel(ctx) {
-  const { store } = ctx;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.recipes.map((r) => receitaRow(ctx, r)));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Receitas' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'rec-new', onclick: () => ctx.actions.openModal({ kind: 'receita-add' }) }, '+ Novo'),
-    ]),
-    store.state.recipes.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma receita. Toque em ‚Äú+ Novo‚Äù para come√ßar.' })
-      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em uma receita para editar o rendimento, os tempos e os itens.' }), searchInput('Buscar receita‚Ä¶', list, 'rec-search'), list]),
-  ]);
-}
-
-// Clean, scannable row ‚Äî the whole row opens the edit sheet.
-function receitaRow(ctx, recipe) {
-  const { store } = ctx;
-  const n = recipe.components.length;
-  const semPreco = unpricedInRecipe(store, recipe.id).length > 0;
-  const linked = linkedProductForRecipe(store, recipe.id);
-  return el('li', { class: 'pa-row-item', 'data-search': `${recipe.name} ${(recipe.tags || []).join(' ')}`, onclick: () => ctx.actions.openModal({ kind: 'receita-edit', id: recipe.id }) }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', {}, el('strong', { text: recipe.name })),
-      el('span', { class: 'pa-muted', text: `${recipe.yieldNominal} ${recipe.yieldUnit} ¬∑ ${recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))}min de produ√ß√£o ¬∑ ${n} ${n === 1 ? 'item' : 'itens'}` }),
-      linked && el('span', { class: 'pa-muted', text: `Produto: ${linked.name} ¬∑ venda ${brl(linked.salePrice || 0)}` }),
-      semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem pre√ßo' }),
-      tagChips(recipe.tags),
-    ].filter(Boolean)),
-    el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ]);
-}
-
-MODALS['receita-add'] = (ctx) => receitaSheet(ctx, null);
-MODALS['receita-edit'] = (ctx, m) => receitaSheet(ctx, ctx.store.get('recipes', m.id) || null);
-
-function receitaSheet(ctx, recipe) {
-  const { store } = ctx;
-  const draftId = recipe?.id || uuid();
-  // Local draft of the component list ‚Äî committed atomically on Salvar (so a new recipe and its
-  // items are created in one mutation, and Cancelar discards everything).
-  const comps = recipe ? recipe.components.map((c) => ({ ref: { ...c.ref }, qty: c.qty, unit: c.unit })) : [];
-
-  const name = el('input', { class: 'pa-input', 'data-testid': 'rec-name', type: 'text', placeholder: 'Nome (ex.: Massa base de bolo)', value: recipe ? recipe.name : '' });
-  const yieldQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-yield', type: 'text', inputmode: 'decimal', placeholder: 'Rend.', value: recipe ? String(recipe.yieldNominal).replace('.', ',') : '' });
-  const yieldUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-yunit' },
-    STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.yieldUnit ? { selected: 'selected' } : {}) })));
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-active', type: 'text', inputmode: 'numeric', placeholder: 'min ativos', value: recipe ? String(recipe.activeMinutes) : '' });
-  const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-production', type: 'text', inputmode: 'numeric', placeholder: 'min produ√ß√£o', value: recipe ? String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) : '' });
-  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-oven', type: 'text', inputmode: 'numeric', placeholder: 'min forno', value: recipe ? String(recipe.ovenMinutes) : '' });
-  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'rec-notes', rows: '3', placeholder: 'Observa√ß√£o / modo de preparo (opcional)' });
-  notes.value = recipe ? (recipe.notes || '') : '';
-  const weight = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-weight', type: 'text', inputmode: 'decimal', placeholder: 'peso do lote', value: recipe && recipe.weightTotal != null ? String(recipe.weightTotal).replace('.', ',') : '' });
-  const weightUnit = el('select', { class: 'pa-input', 'data-testid': 'rec-wunit' },
-    ['g', 'kg'].map((u) => el('option', { value: u, text: u, ...(recipe && u === recipe.weightUnit ? { selected: 'selected' } : {}) })));
-  const tags = tagsInput(recipe && recipe.tags, 'rec-tags');
-  const currentLinked = recipe ? linkedProductForRecipe(store, recipe.id) : null;
-  const initialPackaging = currentLinked ? currentLinked.packagingCost : recipe?.packagingCost;
-  const initialPackagingDesc = currentLinked ? currentLinked.packagingDesc : recipe?.packagingDesc;
-  const initialMargin = currentLinked && currentLinked.targetMarginPct != null ? currentLinked.targetMarginPct : recipe?.targetMarginPct;
-  const packaging = moneyField(initialPackaging || 0, 'rec-pkg');
-  const packagingDesc = el('input', { class: 'pa-input', 'data-testid': 'rec-pkgdesc', type: 'text', placeholder: 'Ex.: caixinha, boleira ou saco', value: initialPackagingDesc || '' });
-  const margin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-margin', type: 'text', inputmode: 'decimal', placeholder: `padr√£o ${pct(store.getConfig().targetMarginPct)}`, value: initialMargin != null ? String(pct(initialMargin)).replace('.', ',') : '' });
-  const rateInput = (key, testid, fallback) => {
-    const saved = currentLinked?.[key] ?? recipe?.[key];
-    return el('input', { class: 'pa-input pa-narrow', 'data-testid': testid, type: 'text', inputmode: 'decimal', placeholder: `padr√£o ${pct(fallback)}%`, value: saved != null ? String(pct(saved)).replace('.', ',') : '' });
-  };
-  const paymentFee = rateInput('paymentFeePct', 'rec-payment-fee', store.getConfig().paymentFeePct);
-  const commission = rateInput('commissionPct', 'rec-commission', store.getConfig().commissionPct);
-  const salesTax = rateInput('salesTaxPct', 'rec-sales-tax', store.getConfig().salesTaxPct);
-  salesTax.placeholder = '0 = sem imposto percentual';
-  // Component editor (insumos + other recipes, never itself).
-  const options = [
-    ...store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
-    ...store.state.recipes.filter((r) => !recipe || r.id !== recipe.id).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
-  ];
-  const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
-  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rec-compqty', type: 'text', inputmode: 'decimal', placeholder: 'qtd' });
-  const unit = el('select', { class: 'pa-input', 'data-testid': 'rec-compunit' });
-  function fillUnits() {
-    const o = options[Number(refSel.value)] || options[0];
-    unit.replaceChildren(...unitsInDimension(o ? o.unit : 'un').map((u) => el('option', { value: u, text: u })));
-  }
-  fillUnits();
-  refSel.addEventListener('change', fillUnits);
-
-  const itemsList = el('ul', { class: 'pa-list pa-tight' });
-  const result = el('div', { 'data-testid': 'rec-result' });
-  const feedback = el('p', { class: 'pa-hint', 'data-testid': 'rec-catalog-feedback' });
-  function draftRecipe() {
-    const marginText = margin.value.trim();
-    const percentage = (input) => input.value.trim() === '' ? undefined : (parseNum(input.value) || 0) / 100;
-    return {
-      ...(recipe || { fermentMinutes: 0 }), id: draftId, name: name.value.trim(),
-      yieldNominal: parseNum(yieldQty.value) || 0, yieldUnit: yieldUnit.value,
-      activeMinutes: parseNum(active.value) || 0,
-      productionMinutes: parseNum(production.value) || 0,
-      ovenMinutes: parseNum(oven.value) || 0,
-      components: comps,
-      packagingCost: parseNum(packaging.input.value) || 0,
-      packagingDesc: packagingDesc.value.trim() || undefined,
-      targetMarginPct: marginText === '' ? undefined : (parseNum(marginText) || 0) / 100,
-      paymentFeePct: percentage(paymentFee), commissionPct: percentage(commission), salesTaxPct: percentage(salesTax),
-    };
-  }
-  function renderResult() { result.replaceChildren(recipeProfitabilityCard(store, draftRecipe(), currentLinked)); }
-  function renderItems() {
-    itemsList.replaceChildren(...(comps.length
-      ? comps.map((c, idx) => ({ c, idx })).sort((a, b) => refName(store, a.c.ref).localeCompare(refName(store, b.c.ref), 'pt-BR', { sensitivity: 'base' })).map(({ c, idx }) => el('li', { class: 'pa-list-item' }, [
-          el('span', { class: 'pa-grow', text: `${c.qty} ${c.unit} ‚Äî ${refName(store, c.ref)}` }),
-          el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { comps.splice(idx, 1); renderItems(); } }, '‚úï'),
-        ]))
-      : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda.' })]));
-    renderResult();
-  }
-  renderItems();
-
-  function addComponent() {
-    const q = parseNum(qty.value);
-    const o = options[Number(refSel.value)];
-    if (!o || !(q > 0)) { qty.focus(); return; }
-    comps.push({ ref: { kind: o.kind, id: o.id }, qty: q, unit: unit.value });
-    qty.value = '';
-    renderItems();
-  }
-
-  function save(destination = 'recipe') {
-    const nm = name.value.trim();
-    const y = parseNum(yieldQty.value);
-    if (!nm || !(y > 0)) { name.focus(); return; }
-    const obs = notes.value.trim();
-    const w = parseNum(weight.value);
-    const tg = tags.value();
-    const savedRecipe = {
-      ...draftRecipe(), notes: obs || undefined,
-      weightTotal: w == null ? undefined : w, weightUnit: w == null ? undefined : weightUnit.value,
-      tags: tg.length ? tg : undefined,
-    };
-    const config = store.getConfig();
-    const requestedMargin = savedRecipe.targetMarginPct ?? config.targetMarginPct;
-    const rateFields = [[margin, 'margem'], [paymentFee, 'taxa de pagamento'], [commission, 'comiss√£o'], [salesTax, 'imposto sobre a venda']];
-    const invalid = rateFields.find(([input]) => input.value.trim() !== '' && (parseNum(input.value) == null || parseNum(input.value) < 0 || parseNum(input.value) >= 100));
-    if (invalid) {
-      feedback.textContent = `Informe ${invalid[1]} entre 0% e menos de 100%.`;
-      invalid[0].focus();
-      return;
-    }
-    const rates = effectiveSalesRates(savedRecipe, config);
-    if (requestedMargin + rates.total >= 1) {
-      feedback.textContent = 'Margem, taxa de pagamento, comiss√£o e imposto sobre a venda precisam somar menos de 100%.';
-      margin.focus();
-      return;
-    }
-    let suggestedPrice;
-    if (destination === 'catalog') {
-      const matches = store.state.products.filter((p) => norm(p.name) === norm(nm));
-      if (!currentLinked && matches.length > 1) {
-        feedback.textContent = 'H√° mais de um produto com esse nome no cat√°logo. Ajuste os nomes duplicados antes de incluir a receita.';
-        return;
-      }
-      if (!currentLinked && matches.length === 1 && (matches[0].components || []).some((c) => c.kind === 'recipe' && c.id !== draftId)) {
-        feedback.textContent = 'Esse nome j√° est√° ligado a outra receita. Ajuste o nome do produto antes de incluir.';
-        return;
-      }
-      try { suggestedPrice = recipePricing(store, savedRecipe, currentLinked).suggested; }
-      catch (e) { feedback.textContent = `Confira os custos antes de incluir no cat√°logo: ${friendlyError(e)}`; return; }
-    }
-    ctx.actions.mutate((s) => {
-      s.upsertRecipe(savedRecipe);
-      if (destination === 'catalog') {
-        const matches = s.state.products.filter((p) => norm(p.name) === norm(nm));
-        const linked = currentLinked || (matches.length === 1 ? matches[0] : null);
-        const component = { kind: 'recipe', id: draftId, qty: linked ? saleQtyInRecipeUnit(linked, savedRecipe) : 1 };
-        s.upsertProduct({
-          ...(linked || {}), id: linked?.id || uuid(), name: nm,
-          components: linked ? [...(linked.components || []).filter((c) => !(c.kind === 'recipe' && c.id === draftId)), component] : [component],
-          saleQty: linked?.saleQty || 1, saleUnit: linked?.saleUnit || savedRecipe.yieldUnit,
-          salePrice: linked?.salePrice != null ? linked.salePrice : suggestedPrice,
-          saleKind: linked?.saleKind || 'normal', active: linked?.active !== false,
-          packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc,
-          targetMarginPct: savedRecipe.targetMarginPct,
-          paymentFeePct: savedRecipe.paymentFeePct, commissionPct: savedRecipe.commissionPct, salesTaxPct: savedRecipe.salesTaxPct,
-        });
-      } else if (currentLinked) {
-        s.upsertProduct({ ...currentLinked, packagingCost: savedRecipe.packagingCost, packagingDesc: savedRecipe.packagingDesc, targetMarginPct: savedRecipe.targetMarginPct, paymentFeePct: savedRecipe.paymentFeePct, commissionPct: savedRecipe.commissionPct, salesTaxPct: savedRecipe.salesTaxPct });
-      }
-    });
-    if (destination === 'simulator') { ctx.view.simRecipeId = draftId; ctx.actions.setTab('simulador'); }
-    if (destination === 'catalog') ctx.actions.setTab('produtos');
-  }
-
-  const rows = [
-    field('Nome', name),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Rende' }), yieldQty, yieldUnit]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produ√ß√£o (min)' }), production]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'O tempo total distribui os custos fixos por hora. Minutos ativos medem a m√£o de obra direta para an√°lise, mas n√£o somam novamente ao custo porque sal√°rios e encargos j√° est√£o nos custos fixos. Minutos de forno calculam o g√°s.' }),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Peso do lote (opcional)' }), weight, weightUnit]),
-    el('p', { class: 'pa-hint', text: 'Peso total que a receita rende ‚Äî ajuda a cotar por kg numa venda de lote maior.' }),
-    field('Observa√ß√£o (modo de preparo)', notes),
-    field('Etiquetas (opcional)', tags.el),
-    el('h3', { class: 'pa-h3', text: 'Ingredientes e insumos' }),
-    itemsList,
-    options.length === 0
-      ? el('p', { class: 'pa-hint', text: 'Cadastre insumos primeiro para montar a receita.' })
-      : el('div', { class: 'pa-row pa-form' }, [refSel, qty, unit,
-          el('button', { class: 'pa-btn pa-sm', 'data-testid': 'rec-compadd', onclick: addComponent }, '+ item')]),
-    el('h3', { class: 'pa-h3', text: 'Embalagem e rentabilidade' }),
-    field('Custo da embalagem por produto', packaging),
-    el('p', { class: 'pa-hint', text: 'Se a embalagem j√° foi adicionada como insumo acima, seu custo vem do pre√ßo da compra. Use este campo apenas para embalagens ou complementos que ainda n√£o estejam na lista, para n√£o contar duas vezes.' }),
-    field('Descri√ß√£o da embalagem', packagingDesc),
-    el('div', { class: 'pa-field' }, [el('label', { text: 'Margem desejada para esta receita (%)' }), el('div', { class: 'pa-row' }, [margin, el('span', { class: 'pa-lab', text: 'vazio = margem padr√£o dos Ajustes' })])]),
-    el('h3', { class: 'pa-h3', text: 'Percentuais sobre a venda' }),
-    el('p', { class: 'pa-hint', text: 'Campos vazios usam os valores de Ajustes. Preencha 0 quando esta receita n√£o tiver a cobran√ßa. Estes percentuais s√£o descontados do pre√ßo de venda, junto com a margem desejada.' }),
-    field('Taxa de pagamento, cart√£o ou plataforma (%)', paymentFee),
-    field('Comiss√£o de venda (%)', commission),
-    field('Imposto proporcional sobre a venda (%)', salesTax),
-    el('p', { class: 'pa-hint', text: 'Informe imposto percentual apenas quando incidir sobre o faturamento desta venda. O DAS do MEI j√° est√° inclu√≠do nos custos fixos de Ajustes e n√£o deve ser lan√ßado novamente aqui.' }),
-    result,
-    el('button', { class: 'pa-btn', 'data-testid': 'rec-open-simulator', onclick: () => save('simulator') }, '‚öñ Salvar e abrir simulador'),
-    el('button', { class: 'pa-btn pa-primary', 'data-testid': 'rec-add-catalog', onclick: () => save('catalog') }, currentLinked ? 'Atualizar produto no cat√°logo' : 'Salvar e incluir produto no cat√°logo'),
-    feedback,
-  ];
-
-  [name, yieldQty, yieldUnit, active, production, oven, packaging.input, packagingDesc, margin, paymentFee, commission, salesTax].forEach((control) => {
-    control.addEventListener('input', renderResult);
-    control.addEventListener('change', renderResult);
-  });
-  renderResult();
-
-  return sheet({
-    title: recipe ? 'Editar receita' : 'Nova receita',
-    rows,
-    onSave: () => save(),
-    saveTestid: 'rec-save',
-    danger: recipe ? { label: 'üóë Excluir receita', testid: 'rec-delete', onClick: () => confirmRemove(ctx, `a receita "${recipe.name}"`, (s) => s.removeRecipe(recipe.id)) } : null,
-  });
-}
-
-function refName(store, ref) {
-  const coll = ref.kind === 'ingredient' ? 'ingredients' : 'recipes';
-  return store.get(coll, ref.id)?.name || '(removido)';
-}
-
-/** Names of ingredients in a recipe's component DAG that have no current price (cycle-guarded). */
-function unpricedInRecipe(store, recipeId, seen = new Set()) {
-  const r = store.get('recipes', recipeId);
-  if (!r || seen.has(recipeId)) return [];
-  seen.add(recipeId);
-  const out = new Set();
-  for (const c of r.components) {
-    if (c.ref.kind === 'ingredient') {
-      const ing = store.get('ingredients', c.ref.id);
-      if (ing && store.currentPrice(ing.id) == null) out.add(ing.name);
-    } else {
-      for (const n of unpricedInRecipe(store, c.ref.id, seen)) out.add(n);
-    }
-  }
-  return [...out];
-}
-
-// ‚îÄ‚îÄ Produtos ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function produtosPanel(ctx) {
-  const { store } = ctx;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.products.map((p) => produtoRow(ctx, p)));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Produtos' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'prod-new', onclick: () => ctx.actions.openModal({ kind: 'produto-add' }) }, '+ Novo'),
-    ]),
-    el('p', { class: 'pa-hint', text: 'Mantenha aqui todo o seu cat√°logo. Cadastre cestas e kits como embalagens; escolha os produtos internos em cada pedido. Somente produtos ativos aparecem em novas vendas, encomendas e comandas.' }),
-    store.state.products.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhum produto ainda.' })
-      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Toque em um produto para editar nome, unidade/peso e valor de venda.' }), searchInput('Buscar produto‚Ä¶', list, 'prod-search'), list]),
-  ]);
-}
-
-// Clean, scannable row ‚Äî the whole row opens the edit sheet.
-function produtoRow(ctx, product) {
-  const { store } = ctx;
-  const semPreco = unpricedInProduct(store, product.id).length > 0;
-  const active = productIsActive(product);
-  const savedSalePrice = product.salePrice != null && product.salePrice !== '' && Number.isFinite(Number(product.salePrice)) && Number(product.salePrice) >= 0;
-  const toggle = (ev) => {
-    ev.stopPropagation();
-    ctx.actions.mutate((s) => s.upsertProduct({ ...product, active: !active }));
-  };
-  return el('li', { class: 'pa-row-item' + (active ? '' : ' pa-reversed'), 'data-search': `${product.name} ${(product.tags || []).join(' ')} ${active ? 'ativo' : 'inativo'}`, onclick: () => ctx.actions.openModal({ kind: 'produto-edit', id: product.id }) }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', { class: 'pa-enc-title' }, [el('strong', { text: product.name }), isBundleProduct(product) && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) }), el('span', { class: active ? 'pa-badge pa-ok' : 'pa-badge', text: active ? 'ativo' : 'inativo' })].filter(Boolean)),
-      el('span', { class: 'pa-muted', text: `${fmtNum(product.saleQty || 1)} ${product.saleUnit || 'un'} ¬∑ ${savedSalePrice ? 'venda' : 'sugerido'} ${brl(sellingPrice(store, product.id))}` }),
-      semPreco && el('span', { class: 'pa-badge pa-bad', text: 'sem pre√ßo' }),
-      tagChips(product.tags),
-    ].filter(Boolean)),
-    el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'prod-toggle-active', title: active ? 'Retirar das novas vendas' : 'Disponibilizar para venda', onclick: toggle }, active ? 'Desativar' : 'Ativar'),
-    el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ]);
-}
-
-MODALS['produto-add'] = (ctx) => produtoSheet(ctx, null);
-MODALS['produto-edit'] = (ctx, m) => produtoSheet(ctx, ctx.store.get('products', m.id) || null);
-
-function produtoSheet(ctx, product) {
-  const { store } = ctx;
-  const name = el('input', { class: 'pa-input', 'data-testid': 'prod-name', type: 'text', placeholder: 'Nome (ex.: Bolo 500g, Cesta de Natal)', value: product ? product.name : '' });
-  const saleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-sale-qty', type: 'text', inputmode: 'decimal', placeholder: '1 ou 500', value: product ? String(product.saleQty || 1).replace('.', ',') : '1' });
-  const saleUnit = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-unit' }, STOCK_UNITS.map((u) => el('option', { value: u, text: u, ...((product?.saleUnit || 'un') === u ? { selected: 'selected' } : {}) })));
-  const salePrice = moneyField(product ? sellingPrice(store, product.id) : null, 'prod-sale-price');
-  const saleKind = el('select', { class: 'pa-input', 'data-testid': 'prod-sale-kind' }, [
-    ['normal', 'Produto comum'], ['cesta', 'Cesta'], ['kit', 'Kit'], ['combo', 'Combo'],
-  ].map(([value, label]) => el('option', { value, text: label, ...(productSaleKind(product) === value ? { selected: 'selected' } : {}) })));
-  const activeChk = el('input', { type: 'checkbox', 'data-testid': 'prod-active' });
-  activeChk.checked = product ? productIsActive(product) : true;
-  const linkedRecipe = product ? store.state.recipes.find((r) => (product.components || []).some((c) => c.kind === 'recipe' && c.id === r.id)) : null;
-  const packagingItems = product ? (product.components || []).filter((c) => c.kind === 'ingredient').map((c) => ({ id: c.id, qty: Number(c.qty) || 0 })) : [];
-  const packagingBox = el('div', { class: 'pa-detail-card' });
-  const packagingList = el('ul', { class: 'pa-list pa-tight' });
-  const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
-  const packagingQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-bundle-insumo-qty', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
-  const renderPackaging = () => packagingList.replaceChildren(...(packagingItems.length ? packagingItems.map((item, index) => {
-    const ingredient = store.get('ingredients', item.id);
-    return el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)} ${ingredient?.stockUnit || 'un'} ¬∑ ${ingredient?.name || '(insumo removido)'}` }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { packagingItems.splice(index, 1); renderPackaging(); } }, '‚úï')]);
-  }) : [el('li', { class: 'pa-empty pa-sm', text: 'Nenhuma embalagem ou detalhe vinculado.' })]));
-  const addPackaging = () => { const q = parseNum(packagingQty.value); if (!packagingIngredient.value || !(q > 0)) { packagingQty.focus(); return; } const current = packagingItems.find((item) => item.id === packagingIngredient.value); if (current) current.qty += q; else packagingItems.push({ id: packagingIngredient.value, qty: q }); packagingQty.value = ''; renderPackaging(); };
-  packagingBox.append(el('p', { class: 'pa-hint', text: 'Opcional: informe cesta, caixa, la√ßo, cart√£o ou outro insumo f√≠sico consumido em cada conjunto. O estoque baixa quando a montagem for registrada na comanda.' }), packagingList, store.state.ingredients.length ? el('div', { class: 'pa-row pa-form' }, [packagingIngredient, packagingQty, el('button', { class: 'pa-btn pa-sm', 'data-testid': 'prod-bundle-insumo-add', onclick: addPackaging }, '+ detalhe')]) : el('p', { class: 'pa-hint', text: 'Cadastre as embalagens em Insumos para vincul√°-las aqui.' }));
-  renderPackaging();
-  const reconcileKind = () => { packagingBox.style.display = saleKind.value !== 'normal' ? '' : 'none'; };
-  saleKind.addEventListener('change', reconcileKind); reconcileKind();
-
-  function save() {
-    const nm = name.value.trim();
-    const q = parseNum(saleQty.value);
-    const price = parseNum(salePrice.input.value);
-    if (!nm || !(q > 0) || price == null || price < 0) { (nm ? saleQty : name).focus(); return; }
-    const components = saleKind.value === 'normal'
-      ? (product ? (isBundleProduct(product) ? (product.components || []).filter((component) => component.kind === 'recipe') : (product.components || [])) : [])
-      : packagingItems.map((item) => ({ kind: 'ingredient', id: item.id, qty: item.qty }));
-    ctx.actions.mutate((s) => s.upsertProduct({
-      ...(product || {}), id: product ? product.id : uuid(), name: nm,
-      components, packagingCost: product?.packagingCost || 0,
-      saleQty: q, saleUnit: saleUnit.value, salePrice: price, saleKind: saleKind.value, active: activeChk.checked,
-    }));
-  }
-
-  const rows = [
-    field('Nome', name),
-    field('Tipo para venda e Dashboard', saleKind),
-    el('p', { class: 'pa-hint', text: 'Use Cesta, Kit ou Combo para identificar a embalagem vendida. Os produtos internos s√£o escolhidos para cada cliente no pedido.' }),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Unidade ou peso vendido' }), saleQty, saleUnit]),
-    field('Valor de venda', salePrice),
-    product && (product.salePrice == null || product.salePrice === '') && el('p', { class: 'pa-hint', text: 'Este valor foi sugerido automaticamente. Ajuste se necess√°rio e salve o produto para defini-lo como pre√ßo de venda praticado.' }),
-    packagingBox,
-    el('label', { class: 'pa-check' }, [activeChk, el('span', { text: 'Ativo para venda' })]),
-    el('p', { class: 'pa-hint', text: 'Se desativado, permanece cadastrado e ligado √† receita, mas n√£o aparece em novas vendas, encomendas, comandas avulsas ou estimativas.' }),
-    linkedRecipe
-      ? el('p', { class: 'pa-callout', text: `Ficha t√©cnica relacionada: ${linkedRecipe.name}. Altere ingredientes, embalagem e margem no cadastro de Receitas.` })
-      : el('p', { class: 'pa-hint', text: 'Para produtos comuns, a ficha t√©cnica fica em Receitas. Para cestas e kits, cadastre aqui a embalagem e seus materiais; o custo dos produtos internos ser√° somado conforme cada pedido.' }),
-  ];
-
-  return sheet({
-    title: product ? 'Editar produto' : 'Novo produto',
-    rows,
-    onSave: save,
-    saveTestid: 'prod-save',
-    danger: product ? { label: 'üóë Excluir produto', testid: 'prod-delete', onClick: () => confirmRemove(ctx, `o produto "${product.name}"`, (s) => s.removeProduct(product.id)) } : null,
-  });
-}
-
-function productCompLabel(store, c) {
-  if (c.kind === 'recipe') { const r = store.get('recipes', c.id); return `${c.qty} ${r?.yieldUnit || ''} de ${r?.name || '(removido)'}`; }
-  if (c.kind === 'product') { const p = store.get('products', c.id); return `${c.qty} √ó ${p?.name || '(removido)'}`; }
-  const i = store.get('ingredients', c.id); return `${c.qty} ${i?.stockUnit || ''} de ${i?.name || '(removido)'}`;
-}
-
-/** Ingredient names with no price reachable through a product's component DAG (cycle-guarded). */
-function unpricedInProduct(store, productId, seenP = new Set()) {
-  const p = store.get('products', productId);
-  if (!p || seenP.has(productId)) return [];
-  seenP.add(productId);
-  const out = new Set();
-  for (const c of p.components || []) {
-    if (c.kind === 'recipe') for (const n of unpricedInRecipe(store, c.id)) out.add(n);
-    else if (c.kind === 'product') for (const n of unpricedInProduct(store, c.id, seenP)) out.add(n);
-    else if (c.kind === 'ingredient') { const ing = store.get('ingredients', c.id); if (ing && store.currentPrice(ing.id) == null) out.add(ing.name); }
-  }
-  return [...out];
-}
-
-// ‚îÄ‚îÄ Clientes (Rev 04 ‚Äî master data; encomendas/fichas attach to a client) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function clientesPanel(ctx) {
-  const { store } = ctx;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.clients
-    .slice().sort((a, b) => norm(clientLabel(a)).localeCompare(norm(clientLabel(b))))
-    .map((c) => clienteRow(ctx, c)));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Clientes' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cli-new', onclick: () => ctx.actions.openModal({ kind: 'cliente-add' }) }, '+ Novo'),
-    ]),
-    store.state.clients.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhum cliente. Toque em ‚Äú+ Novo‚Äù para come√ßar.' })
-      : el('div', {}, [el('p', { class: 'pa-hint pa-tap', text: 'Busque pelo nome, c√≥digo ou etiqueta. Toque em um cliente para editar.' }), searchInput('Buscar por nome, c√≥digo ou etiqueta‚Ä¶', list, 'cli-search'), list]),
-    store.state.encomendas.length > 0 && el('div', { class: 'pa-fichas' }, [
-      el('h3', { class: 'pa-h3', text: 'Fichas para imprimir (3 por folha)' }),
-      el('p', { class: 'pa-hint', text: 'Gera o PDF com as vendas de cada cliente ‚Äî escolha quais incluir, imprima e arquive.' }),
-      el('div', { class: 'pa-row pa-form' }, [
-        fichasButton(ctx, 'üñ® Todas', () => buildFichas(store, encomendasByMode(store, 'todas')), 'fichas-todas.pdf', 'fichas-todas'),
-        fichasButton(ctx, 'üñ® Em aberto', () => buildFichas(store, encomendasByMode(store, 'aberto')), 'fichas-em-aberto.pdf', 'fichas-aberto'),
-        fichasButton(ctx, 'üñ® Pagas', () => buildFichas(store, encomendasByMode(store, 'pagas')), 'fichas-pagas.pdf', 'fichas-pagas'),
-      ]),
-    ]),
-  ].filter(Boolean));
-}
-
-function clienteRow(ctx, c) {
-  const meta = [c.code && `C√≥digo ${c.code}`, c.phone, c.address].filter(Boolean).join(' ¬∑ ');
-  return el('li', { class: 'pa-row-item', 'data-search': clientSearchText(c), onclick: () => ctx.actions.openModal({ kind: 'cliente-edit', id: c.id }) }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', { class: 'pa-enc-title' }, [el('strong', { text: c.name }), c.inactive && el('span', { class: 'pa-badge', text: 'inativo' })].filter(Boolean)),
-      meta && el('span', { class: 'pa-muted', text: meta }),
-      tagChips(c.tags),
-    ].filter(Boolean)),
-    el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ]);
-}
-
-MODALS['cliente-add'] = (ctx) => clienteSheet(ctx, null);
-MODALS['cliente-edit'] = (ctx, m) => clienteSheet(ctx, ctx.store.get('clients', m.id) || null);
-
-// Client financial + commercial history (Rev 07 #6): compras/encomendas, pagamentos, saldo pendente.
-function clienteHistorico(store, cli) {
-  const orders = store.state.encomendas.filter((e) => e.clienteId === cli.id).sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1));
-  if (!orders.length) return el('p', { class: 'pa-hint', 'data-testid': 'cli-hist', text: 'Ainda sem compras registradas.' });
-  const activeOrders = orders.filter((e) => !e.desistenciaAt);
-  const totalComprado = activeOrders.reduce((s, e) => s + (e.total || 0), 0);
-  const totalPago = activeOrders.reduce((s, e) => s + paymentStatus(store, e).paid, 0);
-  const totalDescontado = activeOrders.reduce((s, e) => s + (paymentStatus(store, e).discounted || 0), 0);
-  const saldo = activeOrders.reduce((s, e) => s + paymentStatus(store, e).saldo, 0);
-  const pays = [];
-  for (const e of orders) for (const pg of store.state.payments) if (pg.encomendaId === e.id && !store.isReversed('payment', pg.id)) pays.push(pg);
-  pays.sort((a, b) => (a.at < b.at ? 1 : -1));
-  const kv = (label, value, bad) => el('tr', bad ? { class: 'pa-kv-total' } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (bad ? ' pa-bad' : ''), text: value })]);
-  return el('div', { 'data-testid': 'cli-hist' }, [
-    el('table', { class: 'pa-kv' }, [
-      kv('Total comprado', brl(totalComprado)),
-      kv('Total pago', brl(totalPago)),
-      totalDescontado > 0.005 && kv('Descontos na quita√ß√£o', brl(totalDescontado)),
-      kv('Saldo pendente', brl(saldo), saldo > 0.005),
-    ].filter(Boolean)),
-    el('h3', { class: 'pa-h3', text: `Compras (${orders.length})` }),
-    el('ul', { class: 'pa-list pa-tight' }, orders.map((e) => {
-      const st = paymentStatus(store, e);
-      return el('li', { class: 'pa-list-item' }, [
-        el('div', { class: 'pa-grow' }, [
-          el('div', {}, el('strong', { text: encomendaItemsResumo(store, e) })),
-          el('span', { class: 'pa-muted', text: `${fmtDate(e.deliveryDate)}${e.entregue ? ' ¬∑ entregue' : ''}${e.desistenciaAt ? ' ¬∑ desist√™ncia' : ''}` }),
-        ]),
-        el('span', { class: 'pa-num', text: brl(e.total) }),
-        el('span', { class: e.desistenciaAt ? 'pa-badge pa-bad' : `pa-badge ${st.cls}`, text: e.desistenciaAt ? 'desist√™ncia' : st.label }),
-      ]);
-    })),
-    pays.length > 0 && el('h3', { class: 'pa-h3', text: `Pagamentos (${pays.length})` }),
-    pays.length > 0 && el('ul', { class: 'pa-list pa-tight' }, pays.map((pg) => el('li', { class: 'pa-list-item' }, [
-      el('span', { class: 'pa-grow pa-muted', text: `${fmtDate(pg.at)}${pg.forma ? ` ¬∑ ${pg.forma}` : ''}` }),
-      el('span', { class: 'pa-num', text: brl(pg.valor) }),
-    ]))),
-  ].filter(Boolean));
-}
-
-function clienteSheet(ctx, cli) {
-  const code = el('input', { class: 'pa-input', 'data-testid': 'cli-code', type: 'text', placeholder: 'Ex.: 001 ou C-25', value: cli ? (cli.code || '') : '' });
-  const name = el('input', { class: 'pa-input', 'data-testid': 'cli-name', type: 'text', placeholder: 'Nome do cliente', value: cli ? cli.name : '' });
-  const phone = el('input', { class: 'pa-input', 'data-testid': 'cli-phone', type: 'tel', inputmode: 'tel', placeholder: 'Telefone', value: cli ? (cli.phone || '') : '' });
-  const address = el('input', { class: 'pa-input', 'data-testid': 'cli-address', type: 'text', placeholder: 'Endere√ßo', value: cli ? (cli.address || '') : '' });
-  const birthday = el('input', { class: 'pa-input', 'data-testid': 'cli-birthday', type: 'date', value: cli ? (cli.birthday || '') : '' });
-  const tags = tagsInput(cli?.tags, 'cli-tags');
-  tags.el.placeholder = 'Ex.: N√£o vender, N√£o come doce';
-
-  function save() {
-    const nm = name.value.trim();
-    if (!nm) { name.focus(); return; }
-    const cd = code.value.trim();
-    const duplicate = cd && ctx.store.state.clients.find((client) => client.id !== cli?.id && norm(client.code) === norm(cd));
-    if (duplicate) {
-      code.setCustomValidity(`Este c√≥digo j√° pertence a ${duplicate.name}.`);
-      code.reportValidity();
-      return;
-    }
-    code.setCustomValidity('');
-    const ph = phone.value.trim();
-    const ad = address.value.trim();
-    const tg = tags.value();
-    ctx.actions.mutate((s) => s.upsertClient({ ...(cli || {}), id: cli ? cli.id : uuid(), name: nm, code: cd || undefined, phone: ph || undefined, address: ad || undefined, birthday: birthday.value || undefined, tags: tg.length ? tg : undefined }));
-  }
-
-  code.addEventListener('input', () => code.setCustomValidity(''));
-  const rows = [field('C√≥digo manual (opcional)', code), field('Nome', name), field('Data de anivers√°rio (opcional)', birthday), field('Telefone (opcional)', phone), field('Endere√ßo (opcional)', address), field('Etiquetas (separadas por v√≠rgula)', tags.el), el('p', { class: 'pa-hint', text: 'Use etiquetas para lembretes importantes, como ‚ÄúN√£o vender‚Äù ou ‚ÄúN√£o come doce‚Äù.' })];
-  if (cli) {
-    rows.push(el('h3', { class: 'pa-h3', text: 'Hist√≥rico' }), clienteHistorico(ctx.store, cli));
-    rows.push(el('div', { class: 'pa-row pa-cardfoot' }, [
-      fichasButton(ctx, 'üñ® Gerar ficha (PDF)', () => buildFichas(ctx.store, ctx.store.state.encomendas.filter((e) => e.clienteId === cli.id)), `ficha-${cli.name}.pdf`),
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cli-financial-statement', onclick: () => ctx.actions.openModal({ kind: 'client-statement', clientId: cli.id }) }, 'Ficha financeira detalhada'),
-    ]));
-  }
-  return sheet({
-    title: cli ? 'Editar cliente' : 'Novo cliente',
-    rows,
-    onSave: save,
-    saveTestid: 'cli-save',
-    danger: cli ? [
-      { label: cli.inactive ? 'Reativar cliente' : 'Inativar cliente', className: 'pa-soft-danger', testid: 'cli-inactive', onClick: () => ctx.actions.mutate((s) => s.upsertClient({ ...cli, inactive: !cli.inactive })) },
-      { label: 'üóë Excluir cliente', testid: 'cli-delete', onClick: () => confirmRemove(ctx, `o cliente "${cli.name}"`, (s) => s.removeClient(cli.id)) },
-    ] : null,
-  });
-}
-
-// ‚îÄ‚îÄ Pre√ßos (the payoff) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function funcionariosPanel(ctx) {
-  const rows = ctx.store.state.employees.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name))).map((employee) => el('li', {
-    class: `pa-row-item${employee.inactive ? ' pa-reversed' : ''}`, onclick: () => ctx.actions.openModal({ kind: 'employee-edit', id: employee.id }),
-  }, [
-    el('div', { class: 'pa-grow' }, [el('strong', { text: employee.name }), el('span', { class: 'pa-muted', text: [employee.role, employee.phone, employee.birthday && `anivers√°rio ${fmtDate(`${employee.birthday}T12:00:00`)}`].filter(Boolean).join(' ¬∑ ') })]),
-    employee.inactive && el('span', { class: 'pa-badge', text: 'inativo' }), el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ].filter(Boolean)));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Funcion√°rios' }), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'employee-new', onclick: () => ctx.actions.openModal({ kind: 'employee-add' }) }, '+ Novo')]),
-    rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows) : el('p', { class: 'pa-empty', text: 'Nenhum funcion√°rio cadastrado.' }),
-  ]);
-}
-
-MODALS['employee-add'] = (ctx) => employeeSheet(ctx, null);
-MODALS['employee-edit'] = (ctx, modal) => employeeSheet(ctx, ctx.store.get('employees', modal.id) || null);
-function employeeSheet(ctx, employee) {
-  const name = el('input', { class: 'pa-input', 'data-testid': 'employee-name', type: 'text', value: employee?.name || '', placeholder: 'Nome' });
-  const role = el('input', { class: 'pa-input', 'data-testid': 'employee-role', type: 'text', value: employee?.role || '', placeholder: 'Fun√ß√£o / cargo' });
-  const phone = el('input', { class: 'pa-input', type: 'tel', value: employee?.phone || '', placeholder: 'Telefone' });
-  const birthday = el('input', { class: 'pa-input', 'data-testid': 'employee-birthday', type: 'date', value: employee?.birthday || '' });
-  const save = () => {
-    if (!name.value.trim()) { name.focus(); return; }
-    ctx.actions.mutate((store) => store.upsertEmployee({ ...(employee || {}), id: employee?.id || uuid(), name: name.value.trim(), role: role.value.trim() || undefined, phone: phone.value.trim() || undefined, birthday: birthday.value || undefined }));
-  };
-  return sheet({ title: employee ? 'Editar funcion√°rio' : 'Novo funcion√°rio', rows: [field('Nome', name), field('Fun√ß√£o / cargo', role), field('Data de anivers√°rio', birthday), field('Telefone', phone)], onSave: save, saveTestid: 'employee-save', danger: employee ? [
-    { label: employee.inactive ? 'Reativar funcion√°rio' : 'Inativar funcion√°rio', className: 'pa-soft-danger', onClick: () => ctx.actions.mutate((store) => store.upsertEmployee({ ...employee, inactive: !employee.inactive })) },
-    { label: 'üóë Excluir funcion√°rio', onClick: () => confirmRemove(ctx, `o funcion√°rio "${employee.name}"`, (store) => store.removeEmployee(employee.id)) },
-  ] : null });
-}
-
-function precosPanel(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const activeProducts = store.state.products.filter(productIsActive);
-
-  const cards = activeProducts.map((p) => {
-    const savedSalePrice = p.salePrice != null && p.salePrice !== '' && Number.isFinite(Number(p.salePrice)) && Number(p.salePrice) >= 0
-      ? Number(p.salePrice) : null;
-    // Most common "incomplete" cause: a used ingredient has no price. Name them explicitly.
-    const missing = unpricedInProduct(store, p.id);
-    if (missing.length) {
-      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
-        el('div', { class: 'pa-row' }, [
-          el('strong', { class: 'pa-grow', text: p.name }),
-          el('span', { class: 'pa-badge pa-bad', text: 'sem pre√ßo' }),
-        ]),
-        el('p', { class: 'pa-hint', text: `Valor de venda no cadastro: ${savedSalePrice == null ? 'n√£o informado' : brl(savedSalePrice)}.` }),
-        el('p', { class: 'pa-status', text: `Defina o pre√ßo de: ${missing.join(', ')}.` }),
-      ]);
-    }
-    try {
-      const b = productBreakdown(es, p.id, config, lens);
-      const parts = [
-        ['Ingredientes', b.ingredients],
-        ['M√£o de obra direta (indicador; n√£o soma)', b.labor],
-        ['G√°s (forno)', b.gas],
-        ['Custos fixos', b.fixed],
-        ['Embalagem', b.packaging + p.packagingCost],
-      ];
-      const unitCost = productUnitCost(es, p.id, config, lens);
-      const margin = effectiveMargin(es, p.id, config);
-      const ownMargin = p.targetMarginPct != null;
-      const rates = effectiveSalesRates(p, config);
-      const price = priceFromCost(unitCost, { ...config, ...rates, targetMarginPct: margin });
-      // Produtos displays the suggested price as a default when a sale price was not saved.
-      // Use that same displayed value here, while identifying it as provisional.
-      const practicedPrice = savedSalePrice == null ? sellingPrice(store, p.id) : savedSalePrice;
-      const provisional = savedSalePrice == null;
-      const salesRate = rates.total;
-      const lucroUnit = practicedPrice - unitCost - practicedPrice * salesRate;
-      const practicedMargin = practicedPrice > 0 ? lucroUnit / practicedPrice : null;
-      const activeHoursPerUnit = config.valorHora > 0 ? b.labor / config.valorHora : 0;
-      const lucroHora = activeHoursPerUnit > 0 ? lucroUnit / activeHoursPerUnit : null;
-      const custoHora = activeHoursPerUnit > 0 ? unitCost / activeHoursPerUnit : null;
-      const kv = (label, v, cls) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (cls === 'pa-kv-total' ? '' : ''), text: brl(v) })]);
-      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
-        el('div', { class: 'pa-row' }, [
-          el('strong', { class: 'pa-grow', text: p.name }),
-          el('span', { class: 'pa-price', text: `${provisional ? 'Valor exibido' : 'Praticado'} ${brl(practicedPrice)}` }),
-        ]),
-        el('table', { class: 'pa-kv' }, [
-          ...parts.map(([label, v]) => kv(label, v)),
-          kv('Custo unit√°rio', unitCost, 'pa-kv-total'),
-          el('tr', {}, [el('td', { text: `Pre√ßo sugerido (margem ${pct(margin)}%${ownMargin ? ' pr√≥pria' : ''}, taxa ${pct(rates.paymentFeePct)}%, comiss√£o ${pct(rates.commissionPct)}%, imposto ${pct(rates.salesTaxPct)}%)` }), el('td', { class: 'pa-num pa-strong', text: brl(price) })]),
-          el('tr', {}, [el('td', { text: provisional ? 'Valor de venda exibido em Produtos' : 'Pre√ßo de venda praticado (Produtos)' }), el('td', { class: 'pa-num pa-strong', text: brl(practicedPrice) })]),
-          el('tr', {}, [el('td', { text: 'Diferen√ßa entre valor de venda e sugerido' }), el('td', { class: `pa-num${practicedPrice < price - 0.005 ? ' pa-bad' : ' pa-positive'}`, text: Math.abs(practicedPrice - price) < 0.005 ? brl(0) : `${practicedPrice < price ? '‚àí ' : '+ '}${brl(Math.abs(practicedPrice - price))}` })]),
-          el('tr', {}, [el('td', { text: `Lucro por unidade (${provisional ? 'valor exibido' : 'pre√ßo praticado'})` }), el('td', { class: `pa-num${lucroUnit < 0 ? ' pa-bad' : ''}`, text: brl(lucroUnit) })]),
-          el('tr', {}, [el('td', { text: provisional ? 'Margem estimada no valor exibido' : 'Margem praticada' }), el('td', { class: `pa-num${practicedMargin != null && practicedMargin < 0 ? ' pa-bad' : ''}`, text: practicedMargin == null ? '‚Äî' : `${(practicedMargin * 100).toFixed(1).replace('.', ',')}%` })]),
-          el('tr', {}, [el('td', { text: `Lucro por hora de trabalho (${provisional ? 'valor exibido' : 'pre√ßo praticado'})` }), el('td', { class: `pa-num${lucroHora != null && lucroHora < 0 ? ' pa-bad' : ''}`, text: lucroHora == null ? '‚Äî' : brl(lucroHora) })]),
-          custoHora != null && el('tr', {}, [el('td', { text: 'Custo por hora de trabalho' }), el('td', { class: 'pa-num', text: brl(custoHora) })]),
-        ].filter(Boolean)),
-        provisional && el('p', { class: 'pa-hint', text: 'Este valor aparece automaticamente no cadastro porque ainda n√£o h√° pre√ßo de venda salvo. Salve o valor em Produtos para defini-lo como pre√ßo praticado.' }),
-      ]);
-    } catch (e) {
-      return el('div', { class: 'pa-sub-card', 'data-search': p.name }, [
-        el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-badge', text: 'incompleto' })]),
-        el('p', { class: 'pa-hint', text: `Valor de venda no cadastro: ${savedSalePrice == null ? 'n√£o informado' : brl(savedSalePrice)}.` }),
-        el('p', { class: 'pa-status', text: friendlyError(e) }),
-      ]);
-    }
-  });
-
-  const cardsEl = el('div', {}, cards);
-  return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Pre√ßos' }),
-    el('p', { class: 'pa-hint', text: 'O valor de venda √© o mesmo exibido em Produtos. Quando ainda n√£o foi salvo, o cadastro mostra automaticamente o pre√ßo sugerido; os resultados ficam identificados como estimativas. Taxa de pagamento e comiss√£o entram no c√°lculo.' }),
-    activeProducts.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Ative um produto para ver custos e pre√ßos sugeridos.' })
-      : el('div', {}, [searchInput('Buscar produto‚Ä¶', cardsEl, 'preco-search'), cardsEl]),
-  ]);
-}
-
-function friendlyError(e) {
-  if (e instanceof PriceError) return 'Defina o pre√ßo de todos os insumos usados nesta receita.';
-  if (e instanceof CycleError) return 'H√° um ciclo nas receitas (uma receita cont√©m a si mesma).';
-  if (e instanceof YieldError) return 'Rendimento inv√°lido ‚Äî verifique a receita.';
-  if (e instanceof MarkupError) return 'Margem + taxa + comiss√£o + imposto somam 100% ou mais ‚Äî ajuste os percentuais da receita ou em Ajustes.';
-  if (e instanceof RefError) return 'A receita deste produto n√£o foi encontrada.';
-  if (e instanceof ConversionError) return `Unidade incompat√≠vel (${e.from}‚Üí${e.to}). Use a mesma unidade do insumo.`;
-  return String(e && e.message ? e.message : e);
-}
-
-// ‚îÄ‚îÄ Comanda do dia (production list; Rev 07 rework) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// Each product is a card: "Quantidade Prevista" (seeded from the day's orders, but EDITABLE and
-// STORED ‚Äî so avulso/manual prevista persists), "Produzidos/Estoque" (produced, independent of
-// previsto ‚Äî for stock, extras, or unplanned runs), a feito ‚úì, and a delete ‚úï on avulso items.
-// Stored per date in a Comanda record: { productId, prevista?, realizado, feito }. Edits persist
-// WITHOUT a re-render (ctx.actions.persist) so inputs keep focus; indicators recompute in place.
-function comandaDatesWithProducts(store, start, end) {
-  const days = new Set();
-  for (const order of store.state.encomendas) {
-    const date = dateOnly(order.deliveryDate);
-    if (!order.desistenciaAt && date >= start && date <= end && orderProduction(order).size > 0) days.add(date);
-  }
-  for (const comanda of store.state.comandas) {
-    const date = dateOnly(comanda.date || comanda.id);
-    if (date >= start && date <= end && (comanda.itens || []).length > 0) days.add(date);
-  }
-  return [...days].sort();
-}
-
-function orderedProductionForDate(store, date) {
-  const ordered = new Map();
-  for (const order of store.state.encomendas) {
-    if (order.desistenciaAt || dateOnly(order.deliveryDate) !== date) continue;
-    orderProduction(order, ordered);
-  }
-  return ordered;
-}
-
-function comandaDaySection(ctx, date, unitCost) {
-  const { store } = ctx;
-  const isToday = date === todayInput();
-  const ordered = orderedProductionForDate(store, date);
-  const stored = store.get('comandas', date);
-  const items = new Map();
-  for (const item of stored?.itens || []) items.set(item.productId, { prevista: item.prevista == null ? undefined : Number(item.prevista), realizado: Number(item.realizado) || 0, feito: !!item.feito });
-  let productIds = [...new Set([...ordered.keys(), ...items.keys()])].sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
-  const ensure = (productId) => {
-    if (!items.has(productId)) items.set(productId, { prevista: undefined, realizado: 0, feito: false });
-    return items.get(productId);
-  };
-  const previstaOf = (productId) => items.get(productId)?.prevista ?? ordered.get(productId) ?? 0;
-  const persist = () => {
-    const itens = [...items.entries()].filter(([productId, item]) => (item.prevista != null && (item.prevista > 0 || ordered.has(productId))) || item.realizado > 0 || item.feito).map(([productId, item]) => ({ productId, ...(item.prevista != null ? { prevista: item.prevista } : {}), realizado: item.realizado || 0, feito: !!item.feito }));
-    ctx.actions.persist((s) => { if (itens.length) s.upsertComanda({ id: date, date, itens }); else if (s.get('comandas', date)) s.removeComanda(date); });
-  };
-  const indicators = el('div', { class: 'pa-comanda-ind' });
-  const recompute = () => {
-    let planned = 0; let produced = 0; let available = 0; let cost = 0;
-    for (const productId of productIds) {
-      const expected = Number(previstaOf(productId)) || 0;
-      const done = Number(items.get(productId)?.realizado) || 0;
-      planned += expected; produced += done; available += Math.max(0, done - (ordered.get(productId) || 0)); cost += done * unitCost(productId);
-    }
-    indicators.replaceChildren(el('table', { class: 'pa-kv' }, [
-      el('tr', {}, [el('td', { text: 'Previsto ¬∑ Produzido' }), el('td', { class: 'pa-num', text: `${fmtNum(planned)} ¬∑ ${fmtNum(produced)}` })]),
-      el('tr', {}, [el('td', { text: 'Dispon√≠vel para venda' }), el('td', { class: 'pa-num', 'data-testid': isToday ? 'cmd-disponivel' : `cmd-disponivel-${date}`, text: `${fmtNum(available)} un` })]),
-      el('tr', {}, [el('td', { text: 'Custo da produ√ß√£o registrada' }), el('td', { class: 'pa-num', 'data-testid': isToday ? 'cmd-custo' : `cmd-custo-${date}`, text: brl(cost) })]),
-    ]));
-  };
-  const list = el('div', { class: 'pa-cmd-list' });
-  const itemCard = (productId) => {
-    const product = store.get('products', productId);
-    const item = ensure(productId);
-    const avulso = !ordered.has(productId);
-    const planned = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-prevista', type: 'text', inputmode: 'decimal', value: item.prevista != null ? fmtNum(item.prevista) : (ordered.get(productId) ? fmtNum(ordered.get(productId)) : ''), 'aria-label': 'quantidade prevista' });
-    const produced = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: item.realizado ? fmtNum(item.realizado) : '', 'aria-label': 'produzidos/estoque' });
-    const done = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); done.checked = item.feito;
-    const balance = el('span', { class: 'pa-muted pa-exced' });
-    const updateBalance = () => {
-      const remaining = Math.max(0, (Number(previstaOf(productId)) || 0) - (Number(item.realizado) || 0));
-      const available = Math.max(0, (Number(item.realizado) || 0) - (ordered.get(productId) || 0));
-      balance.textContent = [remaining > 0 ? `saldo a produzir: ${fmtNum(remaining)}` : '', available > 0 ? `dispon√≠vel para venda: ${fmtNum(available)}` : ''].filter(Boolean).join(' ¬∑ ');
-    };
-    const card = el('div', { class: `pa-cmd-item${item.feito ? ' pa-done' : ''}` });
-    planned.addEventListener('input', () => { item.prevista = parseNum(planned.value); updateBalance(); recompute(); persist(); });
-    produced.addEventListener('input', () => { item.realizado = parseNum(produced.value) || 0; updateBalance(); recompute(); persist(); });
-    done.addEventListener('change', () => { item.feito = done.checked; card.classList.toggle('pa-done', done.checked); persist(); });
-    const remove = avulso ? el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cmd-del', title: 'Excluir da comanda', onclick: () => { items.delete(productId); productIds = productIds.filter((id) => id !== productId); card.remove(); recompute(); persist(); } }, '√ó') : null;
-    card.append(
-      el('div', { class: 'pa-cmd-head' }, [el('strong', { class: 'pa-grow', text: product?.name || '(produto removido)' }), avulso && el('span', { class: 'pa-badge', text: 'avulso' }), remove].filter(Boolean)),
-      el('div', { class: 'pa-cmd-fields' }, [el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Quantidade prevista' }), planned]), el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Produzidos/estoque' }), produced]), el('label', { class: 'pa-cmd-feito' }, [done, el('span', { text: 'Feito' })])]), balance,
-    );
-    updateBalance();
-    return card;
-  };
-  const renderList = () => list.replaceChildren(...(productIds.length ? productIds.map(itemCard) : [el('p', { class: 'pa-empty', text: 'Nenhum item de produ√ß√£o nesta data.' })]));
-  const search = el('input', { class: 'pa-input pa-search', 'data-testid': isToday ? 'cmd-prodsearch' : `cmd-prodsearch-${date}`, type: 'search', placeholder: 'Adicionar produto avulso neste dia‚Ä¶' });
-  const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
-  search.addEventListener('input', () => {
-    const query = norm(search.value);
-    const matches = query ? store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(query) && !items.has(p.id) && !ordered.has(p.id)).slice(0, 6) : [];
-    suggestions.style.display = matches.length ? '' : 'none';
-    suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': isToday ? 'cmd-prodresult' : `cmd-prodresult-${date}`, onclick: () => {
-      if (isBundleProduct(product)) { ctx.actions.openModal({ kind: 'comanda-bundle-add', date, productId: product.id }); return; }
-      items.set(product.id, { prevista: 1, realizado: 0, feito: false }); productIds.push(product.id); productIds.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
-      search.value = ''; suggestions.style.display = 'none'; renderList(); recompute(); persist();
-    } }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
-  });
-  const spec = buildComandaSpec(store, date);
-  const orders = spec.groups.length ? el('details', { class: 'pa-history' }, [
-    el('summary', { text: `Ver pedidos agrupados por cliente (${spec.groups.length})` }),
-    ...spec.groups.map((group) => el('div', { class: 'pa-preview-group' }, [el('strong', { text: group.clientName }), el('span', { class: 'pa-muted', text: group.items.map((item) => `${fmtNum(item.qty)}√ó ${item.name}`).join(' ¬∑ ') }), group.notes && el('span', { class: 'pa-muted', text: `Obs.: ${group.notes}` })].filter(Boolean))),
-  ]) : null;
-  renderList(); recompute();
-  return el('section', { class: 'pa-detail-card', 'data-testid': 'cmd-period-day' }, [
-    el('div', { class: 'pa-cardhead' }, [el('h3', { class: 'pa-h3 pa-grow', text: fmtDate(`${date}T12:00:00`) }), el('span', { class: 'pa-badge', text: `${productIds.length} item(ns)` })]),
-    list, search, suggestions, indicators, orders,
-  ].filter(Boolean));
-}
-
-MODALS['comanda-bundle-add'] = (ctx, modal) => comandaBundleSheet(ctx, modal);
-MODALS['comanda-avulso-add'] = (ctx, modal) => comandaAvulsoSheet(ctx, modal);
-function comandaAvulsoSheet(ctx, modal) {
-  const { store } = ctx;
-  const products = store.state.products.filter(productIsActive).sort((a, b) => norm(a.name).localeCompare(norm(b.name), 'pt-BR'));
-  const date = el('input', { class: 'pa-input', type: 'date', min: modal.start, max: modal.end, value: modal.date, 'data-testid': 'cmd-avulso-date' });
-  const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do produto‚Ä¶', 'data-testid': 'cmd-avulso-search' });
-  const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:240px;overflow-y:auto' });
-  const chosen = el('div', { class: 'pa-cli-picker' });
-  const qty = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', value: '1', 'data-testid': 'cmd-avulso-qty' });
-  let productId = '';
-  const choose = (product) => {
-    productId = product.id;
-    chosen.replaceChildren(el('div', { class: 'pa-cli-chip' }, [
-      el('span', { class: 'pa-grow', text: product.name }),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar produto', onclick: () => { productId = ''; chosen.replaceChildren(); search.style.display = ''; search.value = ''; search.focus(); } }, '‚úï'),
-    ]));
-    search.value = '';
-    search.style.display = 'none';
-    suggestions.style.display = 'none';
-  };
-  search.addEventListener('input', () => {
-    const query = norm(search.value);
-    const matches = query ? products.filter((product) => norm(product.name).includes(query)).slice(0, 8) : [];
-    suggestions.replaceChildren(...matches.map((product) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-avulso-result', onclick: () => choose(product) }, [el('strong', { class: 'pa-grow', text: product.name }), el('span', { class: 'pa-add', text: '+' })])));
-    suggestions.style.display = matches.length ? '' : 'none';
-  });
-  function save() {
-    const product = store.get('products', productId);
-    const amount = parseNum(qty.value);
-    if (!date.value || date.value < modal.start || date.value > modal.end) { date.focus(); return; }
-    if (!product) { search.focus(); return; }
-    if (!(amount > 0)) { qty.focus(); return; }
-    if (isBundleProduct(product)) {
-      ctx.actions.openModal({ kind: 'comanda-bundle-add', date: date.value, productId, qty: amount });
-      return;
-    }
-    ctx.actions.mutate((s) => {
-      const current = s.get('comandas', date.value);
-      const byId = new Map((current?.itens || []).map((item) => [item.productId, { ...item }]));
-      const row = byId.get(productId) || { productId, realizado: 0, feito: false };
-      row.prevista = (row.prevista == null ? (orderedProductionForDate(s, date.value).get(productId) || 0) : Number(row.prevista) || 0) + amount;
-      row.feito = false;
-      byId.set(productId, row);
-      s.upsertComanda({ id: date.value, date: date.value, itens: [...byId.values()] });
-    });
-  }
-  return sheet({ title: 'Incluir item avulso na comanda', rows: [
-    el('p', { class: 'pa-hint', text: 'Escolha uma data do per√≠odo e o produto a produzir para estoque ou pronta entrega. O item aparecer√° na comanda desse dia.' }),
-    field('Data de produ√ß√£o', date),
-    field('Produto', el('div', {}, [search, suggestions, chosen])),
-    field('Quantidade avulsa prevista', qty),
-    !products.length && el('p', { class: 'pa-empty', text: 'Cadastre um produto para incluir produ√ß√£o avulsa.' }),
-  ].filter(Boolean), onSave: save, saveTestid: 'cmd-avulso-save', saveLabel: 'Incluir na comanda' });
-}
-function comandaBundleSheet(ctx, modal) {
-  const { store } = ctx; const product = store.get('products', modal.productId);
-  if (!product || !isBundleProduct(product)) return sheet({ title: 'Conjunto n√£o encontrado', rows: [] });
-  const bundleQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-bundle-qty', type: 'text', inputmode: 'decimal', value: fmtNum(modal.qty || 1) });
-  const children = [];
-  const itemsBox = el('div', { class: 'pa-detail-card' });
-  const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== product.id);
-  const render = () => {
-    const list = children.map((child, index) => {
-      const p = store.get('products', child.productId); const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty) });
-      qty.addEventListener('input', () => { child.qty = parseNum(qty.value) || 0; });
-      return el('li', { class: 'pa-list-item' }, [qty, el('span', { class: 'pa-grow', text: p?.name || '(produto removido)' }), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { children.splice(index, 1); render(); } }, '‚úï')]);
-    });
-    const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'cmd-bundle-product', type: 'search', placeholder: 'Digite o produto para incluir‚Ä¶' });
-    const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:220px;overflow-y:auto' });
-    search.addEventListener('input', () => {
-      const query = norm(search.value);
-      const matches = query ? candidates.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
-      suggestions.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-bundle-result', onclick: () => {
-        const current = children.find((child) => child.productId === p.id);
-        if (current) current.qty += 1; else children.push({ productId: p.id, qty: 1 });
-        render();
-      } }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-add', text: '+' })])));
-      suggestions.style.display = matches.length ? '' : 'none';
-    });
-    itemsBox.replaceChildren(el('ul', { class: 'pa-list pa-tight' }, list.length ? list : [el('li', { class: 'pa-empty pa-sm', text: 'Adicione os produtos do conjunto.' })]), candidates.length ? el('div', {}, [search, suggestions]) : el('p', { class: 'pa-hint', text: 'N√£o h√° produtos comuns ativos para montar este conjunto.' }));
-  };
-  render();
-  function save() {
-    const qty = parseNum(bundleQty.value); if (!(qty > 0) || !children.some((child) => child.qty > 0)) { bundleQty.focus(); return; }
-    const required = orderProduction({ itens: [{ productId: product.id, qty, bundleItems: children }] });
-    const ordered = orderedProductionForDate(store, modal.date); const current = store.get('comandas', modal.date); const byId = new Map((current?.itens || []).map((item) => [item.productId, { ...item }]));
-    for (const [productId, extra] of required) {
-      const row = byId.get(productId) || { productId, realizado: 0, feito: false };
-      row.prevista = (row.prevista == null ? (ordered.get(productId) || 0) : Number(row.prevista) || 0) + extra;
-      row.feito = false;
-      byId.set(productId, row);
-    }
-    ctx.actions.mutate((s) => s.upsertComanda({ id: modal.date, date: modal.date, itens: [...byId.values()] }));
-  }
-  return sheet({ title: `Adicionar ${bundleKindLabel(product)} √† comanda`, rows: [el('div', { class: 'pa-callout' }, [el('strong', { text: product.name }), el('span', { text: ` ¬∑ ${fmtDate(`${modal.date}T12:00:00`)}` })]), field(`Quantidade de ${bundleKindLabel(product).toLowerCase()}s`, bundleQty), el('h3', { class: 'pa-h3', text: 'Produtos dentro de cada conjunto' }), el('p', { class: 'pa-hint', text: 'Escolha os produtos desta montagem. A composi√ß√£o pode mudar a cada cesta ou kit.' }), itemsBox, el('p', { class: 'pa-hint', text: 'Aqui voc√™ planeja apenas a produ√ß√£o. Para registrar cliente, pre√ßo, desconto e valor a receber, crie uma Encomenda.' })], onSave: save, saveTestid: 'cmd-bundle-save' });
-}
-
-function comandaPeriodPanel(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const engineStore = store.toEngineStore();
-  const lens = estimateLens(config);
-  const unitCost = (productId) => { try { return productUnitCost(engineStore, productId, config, lens); } catch { return 0; } };
-  const start = ctx.view.comandaStart || presetRange('semana')[0];
-  const end = ctx.view.comandaEnd || presetRange('semana')[1];
-  const startInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-start', type: 'date', value: start });
-  const endInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-end', type: 'date', value: end });
-  const updateRange = () => {
-    const nextStart = startInput.value || start;
-    const nextEnd = endInput.value && endInput.value >= nextStart ? endInput.value : nextStart;
-    ctx.actions.setComandaRange({ comandaStart: nextStart, comandaEnd: nextEnd });
-  };
-  startInput.addEventListener('change', updateRange); endInput.addEventListener('change', updateRange);
-  const days = comandaDatesWithProducts(store, start, end);
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Planejamento e registro' }), el('h2', { text: 'Comanda de produ√ß√£o' })]),
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cmd-avulso-add', disabled: !store.state.products.some(productIsActive), onclick: () => ctx.actions.openModal({ kind: 'comanda-avulso-add', start, end, date: todayInput() >= start && todayInput() <= end ? todayInput() : start }) }, '+ Item avulso'),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cmd-preview', disabled: days.length === 0, onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', start, end }) }, 'Visualizar / PDF'),
-    ]),
-    el('div', { class: 'pa-period' }, [field('Data inicial', startInput), el('span', { class: 'pa-period-arrow', text: 'at√©' }), field('Data final', endInput)]),
-    el('p', { class: 'pa-hint', text: 'Aparecem apenas as datas com produtos encomendados ou produ√ß√£o avulsa registrada. Ajuste quantidades e registre a produ√ß√£o diretamente em cada dia.' }),
-    ...days.map((day) => comandaDaySection(ctx, day, unitCost)),
-    days.length === 0 && el('p', { class: 'pa-empty', text: 'Per√≠odo sem encomendas ou produ√ß√£o avulsa registradas. Use ‚Äú+ Item avulso‚Äù para planejar uma produ√ß√£o.' }),
-  ].filter(Boolean));
-}
-
-function comandaPanel(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
-
-  const date = ctx.view.comandaDate || todayInput();
-  const dateInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'cmd-date', type: 'date', value: date });
-  dateInput.addEventListener('change', () => ctx.actions.setComandaDate(dateInput.value || todayInput()));
-
-  const rangeStart = ctx.view.comandaStart || presetRange('semana')[0];
-  const rangeEnd = ctx.view.comandaEnd || presetRange('semana')[1];
-  const startInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-start', type: 'date', value: rangeStart });
-  const endInput = el('input', { class: 'pa-input', 'data-testid': 'cmd-week-end', type: 'date', value: rangeEnd });
-  startInput.addEventListener('change', () => {
-    const start = startInput.value || rangeStart;
-    const end = endInput.value && endInput.value >= start ? endInput.value : start;
-    ctx.actions.setComandaRange({ comandaStart: start, comandaEnd: end, comandaDate: start });
-  });
-  endInput.addEventListener('change', () => {
-    const end = endInput.value || rangeEnd;
-    const start = startInput.value && startInput.value <= end ? startInput.value : end;
-    ctx.actions.setComandaRange({ comandaStart: start, comandaEnd: end, comandaDate: start });
-  });
-
-  const rangeDays = [];
-  const cursor = new Date(`${rangeStart}T12:00:00`);
-  const last = new Date(`${rangeEnd}T12:00:00`);
-  while (cursor <= last && rangeDays.length < 31) {
-    rangeDays.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}-${String(cursor.getDate()).padStart(2, '0')}`);
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  const weekCards = rangeDays.map((day) => {
-    const planned = new Map();
-    for (const order of store.state.encomendas) {
-      if (order.desistenciaAt || dateOnly(order.deliveryDate) !== day) continue;
-      for (const item of order.itens || []) planned.set(item.productId, (planned.get(item.productId) || 0) + (Number(item.qty) || 0));
-    }
-    const command = store.get('comandas', day);
-    const produced = new Map((command?.itens || []).map((item) => [item.productId, Number(item.realizado) || 0]));
-    const ids = [...new Set([...planned.keys(), ...produced.keys()])];
-    const lines = ids.sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || ''))).map((id) => {
-      const product = store.get('products', id);
-      const expected = planned.get(id) || 0; const done = produced.get(id) || 0;
-      return el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-grow', text: product?.name || '(produto removido)' }), el('strong', { text: `${fmtNum(expected)} previsto ¬∑ ${fmtNum(done)} produzido` })]);
-    });
-    return el('section', { class: `pa-detail-card${day === date ? ' pa-insight-teal' : ''}`, 'data-testid': 'cmd-week-day' }, [
-      el('div', { class: 'pa-row' }, [
-        el('strong', { class: 'pa-grow', text: fmtDate(`${day}T12:00:00`) }),
-        el('button', { class: `pa-btn pa-sm${day === date ? ' pa-primary' : ''}`, onclick: () => ctx.actions.setComandaDate(day) }, day === date ? 'Dia selecionado' : 'Abrir dia'),
-      ]),
-      lines.length ? el('ul', { class: 'pa-list pa-tight' }, lines) : el('span', { class: 'pa-muted', text: 'Sem produ√ß√£o prevista.' }),
-    ]);
-  });
-  const weekOverview = el('section', { class: 'pa-detail-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Calend√°rio de produ√ß√£o' }), el('h3', { class: 'pa-h3', text: 'Per√≠odo selecionado' })])]),
-    el('div', { class: 'pa-period' }, [field('Data inicial', startInput), el('span', { class: 'pa-period-arrow', text: 'at√©' }), field('Data final', endInput)]),
-    el('p', { class: 'pa-hint', text: 'Escolha o primeiro e o √∫ltimo dia como em uma reserva de viagem. O sistema re√∫ne as encomendas de cada data sem alterar os pedidos.' }),
-    ...weekCards,
-    rangeDays.length >= 31 && el('p', { class: 'pa-callout', text: 'Para manter a leitura simples, a visualiza√ß√£o mostra no m√°ximo 31 dias por vez.' }),
-  ].filter(Boolean));
-
-  // Previsto seeded from the day's orders (per product).
-  const ordered = new Map();
-  for (const e of store.state.encomendas) {
-    if (e.desistenciaAt || (e.deliveryDate || '').slice(0, 10) !== date) continue;
-    for (const it of (e.itens || [])) ordered.set(it.productId, (ordered.get(it.productId) || 0) + (Number(it.qty) || 0));
-  }
-  // Working copy of the stored comanda: productId ‚Üí { prevista|undefined, realizado, feito }.
-  const stored = store.get('comandas', date);
-  const items = new Map();
-  for (const it of (stored?.itens || [])) items.set(it.productId, { prevista: it.prevista == null ? undefined : Number(it.prevista), realizado: Number(it.realizado) || 0, feito: !!it.feito });
-
-  // Order products ‚à™ stored (avulso) products, by name. Mutable so add/remove avulso re-render rows.
-  let pids = [...new Set([...ordered.keys(), ...items.keys()])]
-    .sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
-
-  const ensure = (pid) => { let v = items.get(pid); if (!v) { v = { prevista: undefined, realizado: 0, feito: false }; items.set(pid, v); } return v; };
-  const previstaOf = (pid) => { const v = items.get(pid); return v && v.prevista != null ? v.prevista : (ordered.get(pid) || 0); };
-  const isAvulso = (pid) => !ordered.has(pid);
-
-  function persistComanda() {
-    const itens = [];
-    for (const [pid, v] of items) {
-      if ((v.prevista != null && v.prevista > 0) || (v.realizado || 0) > 0 || v.feito) {
-        itens.push({ productId: pid, ...(v.prevista != null ? { prevista: v.prevista } : {}), realizado: v.realizado || 0, feito: !!v.feito });
-      }
-    }
-    ctx.actions.persist((s) => { if (itens.length) s.upsertComanda({ id: date, date, itens }); else if (s.get('comandas', date)) s.removeComanda(date); });
-  }
-
-  const indEl = el('div', { class: 'pa-comanda-ind', 'data-testid': 'cmd-indicadores' });
-  function recompute() {
-    let custo = 0, totalPrev = 0, totalProd = 0, disponivel = 0;
-    for (const pid of pids) {
-      const prod = items.get(pid)?.realizado || 0;
-      const prevista = previstaOf(pid);
-      custo += prod * unitCost(pid);
-      totalPrev += prevista; totalProd += prod;
-      disponivel += Math.max(0, prod - prevista); // produced beyond the prevista ‚Üí free to sell
-    }
-    indEl.replaceChildren(
-      el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Previsto ¬∑ Produzido' }), el('td', { class: 'pa-num', text: `${fmtNum(totalPrev)} ¬∑ ${fmtNum(totalProd)}` })]),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Dispon√≠vel para venda' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-disponivel', text: `${fmtNum(disponivel)} un` })]),
-        el('tr', {}, [el('td', { text: 'Custo de produ√ß√£o' }), el('td', { class: 'pa-num', 'data-testid': 'cmd-custo', text: brl(custo) })]),
-      ]),
-      el('p', { class: 'pa-hint', text: 'Produzido/estoque = o que voc√™ FEZ (n√£o o que vendeu) ‚Äî vale pra estoque ou produ√ß√£o extra. O que passar do previsto fica dispon√≠vel pra vender avulso. O dinheiro recebido e o lucro ficam em A Receber / Relat√≥rios.' }),
-    );
-  }
-
-  const list = el('div', { class: 'pa-cmd-list' });
-  function itemCard(pid) {
-    const p = store.get('products', pid);
-    const v = items.get(pid) || { prevista: undefined, realizado: 0, feito: false };
-    const avulso = isAvulso(pid);
-    const prevInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-prevista', type: 'text', inputmode: 'decimal', value: v.prevista != null ? fmtNum(v.prevista) : (ordered.get(pid) ? fmtNum(ordered.get(pid)) : ''), 'aria-label': 'quantidade prevista' });
-    const prodInput = el('input', { class: 'pa-input pa-qty', 'data-testid': 'cmd-realizado', type: 'text', inputmode: 'decimal', value: v.realizado ? fmtNum(v.realizado) : '', 'aria-label': 'produzidos/estoque' });
-    const chk = el('input', { type: 'checkbox', 'data-testid': 'cmd-feito', 'aria-label': 'feito' }); chk.checked = v.feito;
-    const saldo = el('span', { class: 'pa-muted pa-exced' });
-    const updSaldo = () => { const prod = items.get(pid)?.realizado || 0; const d = prod - previstaOf(pid); saldo.textContent = d > 0 ? `dispon√≠vel para venda: ${fmtNum(d)}` : (prod > 0 && d < 0 ? `saldo a produzir: ${fmtNum(-d)}` : ''); };
-    prevInput.addEventListener('input', () => { const n = parseNum(prevInput.value); ensure(pid).prevista = n == null ? undefined : n; updSaldo(); recompute(); persistComanda(); });
-    prodInput.addEventListener('input', () => { ensure(pid).realizado = parseNum(prodInput.value) || 0; updSaldo(); recompute(); persistComanda(); });
-    const card = el('div', { class: 'pa-cmd-item' + (v.feito ? ' pa-done' : '') });
-    chk.addEventListener('change', () => { ensure(pid).feito = chk.checked; card.classList.toggle('pa-done', chk.checked); persistComanda(); });
-    updSaldo();
-    const del = avulso ? el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cmd-del', title: 'Excluir da comanda', onclick: () => { items.delete(pid); pids = pids.filter((x) => x !== pid); card.remove(); recompute(); persistComanda(); } }, '‚úï') : null;
-    card.append(
-      el('div', { class: 'pa-cmd-head' }, [
-        el('strong', { class: 'pa-grow', text: p ? p.name : '(produto removido)' }),
-        avulso && el('span', { class: 'pa-badge', text: 'avulso' }),
-        del,
-      ].filter(Boolean)),
-      el('div', { class: 'pa-cmd-fields' }, [
-        el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Quantidade Prevista' }), prevInput]),
-        el('label', { class: 'pa-cmd-field' }, [el('span', { text: 'Produzidos/Estoque' }), prodInput]),
-        el('label', { class: 'pa-cmd-feito' }, [chk, el('span', { text: 'Feito' })]),
-      ]),
-      saldo,
-    );
-    return card;
-  }
-  function renderList() {
-    list.replaceChildren(...(pids.length ? pids.map(itemCard)
-      : [el('p', { class: 'pa-empty', text: 'Nada para este dia. Fa√ßa uma encomenda com entrega nesta data, ou adicione um produto avulso abaixo.' })]));
-  }
-  renderList();
-  recompute();
-
-  // Add an avulso product (stock / pronta-entrega ‚Äî not from an order). Appended in place (no full
-  // re-render), so an unfilled row survives; it persists as soon as she types a prevista/produzido.
-  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'cmd-prodsearch', type: 'search', placeholder: 'Adicionar produto avulso (estoque, pronta entrega)‚Ä¶' });
-  const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
-  function renderResults() {
-    const q = norm(search.value);
-    if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
-    const matches = store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(q) && !items.has(p.id) && !ordered.has(p.id)).slice(0, 6);
-    results.style.display = matches.length ? '' : 'none';
-    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'cmd-prodresult', onclick: () => {
-      items.set(p.id, { prevista: undefined, realizado: 0, feito: false });
-      pids = [...new Set([...pids, p.id])].sort((a, b) => norm(store.get('products', a)?.name || '').localeCompare(norm(store.get('products', b)?.name || '')));
-      search.value = ''; renderResults(); renderList();
-    } }, [el('div', { class: 'pa-grow' }, el('strong', { text: p.name })), el('span', { class: 'pa-add', text: '+' })])));
-  }
-  search.addEventListener('input', renderResults);
-
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Produ√ß√£o semanal' }),
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cmd-preview', onclick: () => ctx.actions.openModal({ kind: 'comanda-preview', date }) }, 'Visualizar / PDF'),
-      dateInput,
-    ]),
-    el('p', { class: 'pa-hint', text: 'Veja a produ√ß√£o de v√°rios dias de uma vez. Abra um dia para conferir as encomendas, ajustar quantidades e registrar o que foi produzido.' }),
-    weekOverview,
-    el('h3', { class: 'pa-h3', text: `Comanda do dia ¬∑ ${fmtDate(`${date}T12:00:00`)}` }),
-    el('p', { class: 'pa-hint', text: 'A Quantidade Prevista vem das encomendas deste dia. Voc√™ pode ajustar e anotar o que PRODUZIU em Produzidos/Estoque, inclusive produtos avulsos.' }),
-    list,
-    search, results,
-    indEl,
-  ]);
-}
-
-// ‚îÄ‚îÄ Vendas (Sale ‚Äî revenue, with snapshotted cost for true margin) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function buildComandaSpec(store, date) {
-  const groups = new Map();
-  const ordered = orderedProductionForDate(store, date);
-  for (const enc of store.state.encomendas) {
-    if (enc.desistenciaAt || dateOnly(enc.deliveryDate) !== date) continue;
-    const key = enc.clienteId || '__sem__';
-    const client = enc.clienteId ? store.get('clients', enc.clienteId) : null;
-    const group = groups.get(key) || { clientName: client?.name || 'Sem cliente / pronta entrega', contact: [client?.phone, client?.address].filter(Boolean).join(' ¬∑ '), items: new Map(), notes: [] };
-    for (const it of enc.itens || []) {
-      const composition = bundleCompositionText(store, it);
-      const itemKey = `${it.productId}|${composition}`;
-      const current = group.items.get(itemKey) || { productId: it.productId, qty: 0, composition };
-      current.qty += Number(it.qty) || 0;
-      group.items.set(itemKey, current);
-    }
-    if (enc.notes) group.notes.push(enc.notes);
-    groups.set(key, group);
-  }
-  const stored = store.get('comandas', date);
-  const produced = new Map((stored?.itens || []).map((it) => [it.productId, Number(it.realizado) || 0]));
-  const explicit = new Map((stored?.itens || []).filter((it) => it.prevista != null).map((it) => [it.productId, Number(it.prevista) || 0]));
-  const productionIds = [...new Set([...ordered.keys(), ...produced.keys(), ...explicit.keys()])];
-  return {
-    date: fmtDate(`${date}T12:00:00`),
-    groups: [...groups.values()].map((g) => ({
-      clientName: g.clientName, contact: g.contact,
-      items: [...g.items.values()].map((item) => ({ name: `${store.get('products', item.productId)?.name || '(produto removido)'}${item.composition ? ` (${item.composition})` : ''}`, qty: item.qty })),
-      notes: g.notes.join(' ¬∑ '),
-    })).sort((a, b) => norm(a.clientName).localeCompare(norm(b.clientName))),
-    production: productionIds.map((id) => ({
-      productId: id,
-      name: store.get('products', id)?.name || '(produto removido)',
-      prevista: explicit.has(id) ? explicit.get(id) : (ordered.get(id) || 0),
-      produzido: produced.get(id) || 0,
-    })).sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
-  };
-}
-
-function buildComandaPeriodSpec(store, start, end) {
-  const days = comandaDatesWithProducts(store, start, end).map((date) => ({ isoDate: date, ...buildComandaSpec(store, date) }));
-  const consolidated = new Map();
-  for (const day of days) for (const item of day.production) {
-    const key = item.productId || norm(item.name);
-    const current = consolidated.get(key) || { productId: item.productId, name: item.name, prevista: 0, produzido: 0 };
-    current.prevista += Number(item.prevista) || 0;
-    current.produzido += Number(item.produzido) || 0;
-    consolidated.set(key, current);
-  }
-  return {
-    start, end,
-    period: start === end ? fmtDate(`${start}T12:00:00`) : `${fmtDate(`${start}T12:00:00`)} a ${fmtDate(`${end}T12:00:00`)}`,
-    generatedAt: new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date()),
-    production: [...consolidated.values()].sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
-  };
-}
-
-function sellingPrice(store, productId) {
-  const product = store.get('products', productId);
-  if (product && Number(product.salePrice) >= 0 && product.salePrice !== '') return Number(product.salePrice) || 0;
-  try { return productPrice(store.toEngineStore(), productId, store.getConfig(), estimateLens(store.getConfig())).price; }
-  catch { return 0; }
-}
-
-function linkedProductForRecipe(store, recipeId) {
-  return store.state.products.find((p) => (p.components || []).some((c) => c.kind === 'recipe' && c.id === recipeId)) || null;
-}
-
-function saleQtyInRecipeUnit(product, recipe) {
-  const qty = Number(product?.saleQty) || 1;
-  const from = product?.saleUnit || 'un';
-  const to = recipe?.yieldUnit || 'un';
-  if (from === to) return qty;
-  if (from === 'kg' && to === 'g') return qty * 1000;
-  if (from === 'g' && to === 'kg') return qty / 1000;
-  if (from === 'l' && to === 'ml') return qty * 1000;
-  if (from === 'ml' && to === 'l') return qty / 1000;
-  return 1;
-}
-
-function recipePricing(store, recipe, linkedProduct = null) {
-  const config = store.getConfig();
-  const es = indexStore({ ...store.state, recipes: [...store.state.recipes.filter((r) => r.id !== recipe.id), recipe] });
-  const lens = estimateLens(config);
-  const breakdown = costBreakdown(es, recipe.id, config, lens);
-  const yieldQty = Number(recipe.yieldNominal) || 0;
-  const linkedQty = Number(linkedProduct?.components?.find((c) => c.kind === 'recipe' && c.id === recipe.id)?.qty) || 1;
-  const unitCost = (breakdown.ingredients + breakdown.gas + breakdown.fixed) * linkedQty + (Number(recipe.packagingCost) || 0);
-  const targetMargin = recipe.targetMarginPct ?? config.targetMarginPct;
-  const rates = effectiveSalesRates(recipe, config);
-  const suggested = Math.ceil(priceFromCost(unitCost, { ...config, ...rates, targetMarginPct: targetMargin }) * 100 - 1e-9) / 100;
-  const productUnits = yieldQty / linkedQty;
-  const salesRate = rates.total;
-  const profitPerUnit = suggested * (1 - salesRate) - unitCost;
-  const productionHours = (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0)) / 60;
-  return { breakdown, yieldQty, linkedQty, productUnits, unitCost, targetMargin, rates, suggested,
-    salesRate, profitPerUnit, totalCost: unitCost * productUnits, totalSale: suggested * productUnits,
-    totalProfit: profitPerUnit * productUnits, profitHour: productionHours > 0 ? profitPerUnit * productUnits / productionHours : null };
-}
-
-function recipeProfitabilityCard(store, recipe, linkedProduct = null) {
-  if (!(Number(recipe?.yieldNominal) > 0)) return el('p', { class: 'pa-hint', text: 'Informe o rendimento para ver o resultado da receita.' });
-  try {
-    const p = recipePricing(store, recipe, linkedProduct);
-    const line = (label, value, tone = '') => el('tr', {}, [el('td', { text: label }), el('td', { class: `pa-num ${tone}`, text: value })]);
-    const practiced = Number(linkedProduct?.salePrice);
-    const practicedProfit = practiced * (1 - p.salesRate) - p.unitCost;
-    return el('section', { class: 'pa-detail-card' }, [
-      el('strong', { text: 'Resultado da receita completa' }),
-      el('table', { class: 'pa-kv' }, [
-        line('Rendimento', `${fmtNum(p.yieldQty)} ${recipe.yieldUnit}`),
-        line('Ingredientes', brl(p.breakdown.ingredients * p.yieldQty)),
-        line('G√°s', brl(p.breakdown.gas * p.yieldQty)),
-        line('Custos fixos proporcionais', brl(p.breakdown.fixed * p.yieldQty)),
-        line('Embalagens', brl((Number(recipe.packagingCost) || 0) * p.productUnits)),
-        line('Custo total da receita', brl(p.totalCost)),
-        line('Custo por produto', brl(p.unitCost)),
-        line('Margem desejada', pctStr(p.targetMargin)),
-        line('Taxa de pagamento', pctStr(p.rates.paymentFeePct)),
-        line('Comiss√£o', pctStr(p.rates.commissionPct)),
-        line('Imposto sobre a venda', pctStr(p.rates.salesTaxPct)),
-        line('Pre√ßo sugerido por produto', brl(p.suggested), 'pa-strong'),
-        line('Venda total da receita nesse pre√ßo', brl(p.totalSale)),
-        line('Lucro por produto', brl(p.profitPerUnit), p.profitPerUnit >= 0 ? 'pa-positive' : 'pa-bad'),
-        line('Lucro total da receita', brl(p.totalProfit), p.totalProfit >= 0 ? 'pa-positive' : 'pa-bad'),
-        line('Lucro por hora de produ√ß√£o', p.profitHour == null ? '‚Äî' : brl(p.profitHour)),
-        ...(practiced > 0 ? [
-          line('Pre√ßo praticado no cat√°logo', brl(practiced)),
-          line('Margem no pre√ßo praticado', pctStr(practicedProfit / practiced), practicedProfit >= 0 ? 'pa-positive' : 'pa-bad'),
-        ] : []),
-      ]),
-      el('span', { class: 'pa-muted', text: `Valores recalculados conforme a margem e os percentuais digitados. Taxa, comiss√£o e imposto (${pctStr(p.salesRate)}) j√° descontados do lucro. M√£o de obra direta √© apenas indicador, pois sal√°rios est√£o nos custos fixos.` }),
-    ]);
-  } catch (e) { return el('p', { class: 'pa-hint', text: `Confira os custos para ver o resultado: ${friendlyError(e)}` }); }
-}
-
-MODALS['comanda-preview'] = (ctx, m) => {
-  const start = m.start || m.date || todayInput();
-  const end = m.end || start;
-  const spec = buildComandaPeriodSpec(ctx.store, start, end);
-  const preview = el('div', { class: 'pa-print-preview', 'data-testid': 'cmd-print-preview' }, [
-    el('h3', { class: 'pa-h3', text: `Comanda de produ√ß√£o ¬∑ ${spec.period}` }),
-    el('p', { class: 'pa-muted', text: `Comanda gerada em ${spec.generatedAt}` }),
-    el('strong', { text: 'Lista √∫nica de produ√ß√£o' }),
-    ...(spec.production.length ? spec.production.map((p) => el('div', { class: 'pa-preview-line', 'data-testid': 'cmd-preview-item' }, [
-      el('span', { class: 'pa-grow', text: p.name }),
-      el('strong', { text: `${fmtNum(p.prevista)} previsto ¬∑ ${fmtNum(p.produzido)} produzido` }),
-    ])) : [el('span', { class: 'pa-muted', text: 'Sem itens de produ√ß√£o no per√≠odo.' })]),
-  ]);
-  const btn = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'cmd-pdf' }, 'Gerar PDF A4');
-  btn.addEventListener('click', async () => {
-    const old = btn.textContent; btn.textContent = 'Gerando‚Ä¶'; btn.disabled = true;
-    try { await savePdf(await generateComandaPdf(spec), `comanda-${start}-a-${end}.pdf`); }
-    catch (e) { window.alert('N√£o foi poss√≠vel gerar o PDF: ' + ((e && e.message) || e)); }
-    finally { btn.textContent = old; btn.disabled = false; }
-  });
-  return sheet({ title: 'Comanda para impress√£o', rows: [el('p', { class: 'pa-hint', text: 'O PDF apresenta uma √∫nica lista para todo o per√≠odo e soma automaticamente os produtos repetidos.' }), preview, el('div', { class: 'pa-sheet-actions' }, [btn])] });
-};
-
-function vendasPanel(ctx) {
-  const { store } = ctx;
-  const products = store.state.products;
-  const activeProducts = products.filter((p) => productIsActive(p) && !isBundleProduct(p));
-  const { vendaStart: start, vendaEnd: end, vendaStatus: status, vendaProductIds: requestedProductIds, vendaClientId: requestedClientId } = ctx.view;
-  const productIds = [...new Set(Array.isArray(requestedProductIds) ? requestedProductIds : [])].filter((id) => products.some((p) => p.id === id));
-  const hasProductFilter = productIds.length > 0;
-  const productKind = ['normal', 'cesta', 'kit', 'combo'].includes(ctx.view.vendaProductKind) ? ctx.view.vendaProductKind : '';
-  const hasItemFilter = hasProductFilter || Boolean(productKind);
-  const matchesProduct = (id) => (!hasProductFilter || productIds.includes(id)) && (!productKind || productSaleKind(store.get('products', id)) === productKind);
-  const clientId = requestedClientId === '__sem__' || store.state.clients.some((c) => c.id === requestedClientId) ? requestedClientId : '';
-  const report = salesPeriodSummary(store, start, end, status);
-  const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), 'data-testid': `venda-f-${key}`, onclick: () => ctx.actions.setVendaPeriod({ vendaStatus: key }) }, label);
-  const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setVendaPeriod({ vendaStart: s, vendaEnd: e }), 'venda');
-  const productFilter = el('details', { 'data-testid': 'venda-product-filter' });
-  const stagedProductIds = new Set(productIds);
-  const productChoices = products.filter((p) => !productKind || productSaleKind(p) === productKind).sort((a, b) => norm(a.name).localeCompare(norm(b.name)));
-  const kindFilter = el('select', { class: 'pa-input', 'data-testid': 'venda-kind-filter' }, [
-    ['', 'Todos os tipos'], ['cesta', 'Cestas'], ['kit', 'Kits'], ['combo', 'Combos'], ['normal', 'Produtos comuns'],
-  ].map(([value, label]) => el('option', { value, text: label, ...(productKind === value ? { selected: 'selected' } : {}) })));
-  kindFilter.addEventListener('change', () => ctx.actions.setVendaPeriod({ vendaProductKind: kindFilter.value, vendaProductIds: [] }));
-  const productSummary = el('summary', { class: 'pa-input', style: 'cursor:pointer', text: hasProductFilter ? `${productIds.length} produto(s) selecionado(s)` : 'Todos os produtos' });
-  const productSearch = el('input', { class: 'pa-input', type: 'search', placeholder: 'Digite para localizar um produto‚Ä¶', 'aria-label': 'Buscar produto no filtro' });
-  const productOptions = el('div', { style: 'max-height:240px;overflow-y:auto;margin:8px 0' });
-  const allCheck = el('input', { type: 'checkbox', checked: !hasProductFilter, 'data-testid': 'venda-product-all' });
-  const choices = productChoices.map((p) => {
-    const check = el('input', { type: 'checkbox', checked: stagedProductIds.has(p.id), value: p.id, 'data-testid': 'venda-product-check' });
-    const label = el('label', { class: 'pa-check' }, [check, el('span', { text: p.name })]);
-    check.addEventListener('change', () => {
-      if (check.checked) stagedProductIds.add(p.id); else stagedProductIds.delete(p.id);
-      allCheck.checked = stagedProductIds.size === 0;
-    });
-    return { p, check, label };
-  });
-  allCheck.addEventListener('change', () => {
-    stagedProductIds.clear();
-    allCheck.checked = true;
-    for (const { check } of choices) check.checked = false;
-  });
-  productOptions.append(el('label', { class: 'pa-check' }, [allCheck, el('strong', { text: 'Todos os produtos' })]), ...choices.map(({ label }) => label));
-  productSearch.addEventListener('input', () => {
-    const query = norm(productSearch.value);
-    for (const { p, label } of choices) label.style.display = norm(p.name).includes(query) ? '' : 'none';
-  });
-  productFilter.append(productSummary, productSearch, productOptions,
-    el('button', { class: 'pa-btn pa-primary pa-sm', type: 'button', 'data-testid': 'venda-product-apply', onclick: () => ctx.actions.setVendaPeriod({ vendaProductIds: [...stagedProductIds] }) }, 'Aplicar filtro'));
-
-  const clientFilter = el('div', { class: 'pa-cli-picker', 'data-testid': 'venda-client-filter' });
-  const selectClient = (id) => ctx.actions.setVendaPeriod({ vendaClientId: id });
-  if (clientId) {
-    const clientName = clientId === '__sem__' ? 'Sem cliente / venda r√°pida' : clientLabel(store.get('clients', clientId));
-    clientFilter.append(el('div', { class: 'pa-cli-chip' }, [
-      el('span', { class: 'pa-grow', text: clientName }),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes', 'aria-label': 'Mostrar todos os clientes', onclick: () => selectClient('') }, '‚úï'),
-    ]));
-  } else {
-    const clientSearch = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os clientes ‚Äî digite um nome‚Ä¶', 'data-testid': 'venda-client-search' });
-    const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
-    const option = (label, id) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', onclick: () => selectClient(id), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectClient(id); } } }, label);
-    const update = () => {
-      const query = norm(clientSearch.value);
-      const showAll = !query || query === 'todos' || query === 'todas' || query.startsWith('todos os clientes');
-      const matches = showAll ? [] : store.state.clients.filter((c) => norm(clientLabel(c)).includes(query)).slice(0, 8);
-      suggestions.replaceChildren(...(showAll ? [option('Todos os clientes', '')] : []), ...((!query || norm('Sem cliente / venda r√°pida').includes(query)) ? [option('Sem cliente / venda r√°pida', '__sem__')] : []), ...matches.map((c) => option(clientLabel(c), c.id)));
-      suggestions.style.display = suggestions.childElementCount ? '' : 'none';
-    };
-    clientSearch.addEventListener('focus', update);
-    clientSearch.addEventListener('input', update);
-    clientSearch.addEventListener('keydown', (event) => { if (event.key === 'Escape') suggestions.style.display = 'none'; });
-    clientFilter.append(clientSearch, suggestions);
-  }
-
-  const selectedOrderLines = (item) => {
-    const lines = orderItemSaleLines(item);
-    if (!hasItemFilter) return lines;
-    // Selecting a cesta/kit means the whole filled set; selecting an internal product
-    // finds that product even when it appears inside a set.
-    if (isBundleProduct(store.get('products', item.productId)) && matchesProduct(item.productId)) return [{ productId: item.productId, qty: Number(item.qty) || 0, total: orderItemGross(item) }];
-    return lines.filter((line) => matchesProduct(line.productId));
-  };
-  const hasSelectedProduct = (row) => !hasItemFilter || (row.kind === 'sale'
-    ? matchesProduct(row.sale.productId)
-    : (row.order.itens || []).some((it) => selectedOrderLines(it).length > 0));
-  const visibleRows = report.rows.filter((row) => (row.kind === 'sale' || row.order.entregue) && (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
-  const visibleCancellations = report.cancellations.filter((row) => (!clientId || row.clientId === clientId) && hasSelectedProduct(row));
-  const rowMetrics = (row) => {
-    if (!hasItemFilter) return { total: row.total, received: row.received || 0, pending: row.pending || 0 };
-    const total = row.kind === 'sale' ? row.total : (row.order.itens || []).reduce((sum, it) => sum + selectedOrderLines(it).reduce((lineSum, line) => lineSum + line.total, 0), 0);
-    const ratio = row.total > 0 ? total / row.total : 0;
-    const received = Math.min(total, (row.received || 0) * ratio);
-    return { total, received, pending: Math.max(0, total - received) };
-  };
-  const filteredTotals = visibleRows.reduce((acc, row) => { const m = rowMetrics(row); acc.total += m.total; acc.received += m.received; acc.pending += m.pending; return acc; }, { total: 0, received: 0, pending: 0 });
-  const productSummaryMap = new Map();
-  const addFilteredProduct = (id, qty, total) => { const p = productSummaryMap.get(id) || { id, qty: 0, total: 0 }; p.qty += qty; p.total += total; productSummaryMap.set(id, p); };
-  for (const row of visibleRows) {
-    if (row.kind === 'sale') addFilteredProduct(row.sale.productId, Number(row.sale.qty) || 0, row.total);
-    else for (const it of row.order.itens || []) for (const line of selectedOrderLines(it)) addFilteredProduct(line.productId, line.qty, line.total);
-  }
-  const filteredProducts = [...productSummaryMap.values()].map((p) => ({ ...p, name: store.get('products', p.id)?.name || '(produto removido)' })).sort((a, b) => b.total - a.total);
-
-  const detailRows = visibleRows.map((row) => {
-    if (row.kind === 'sale') return saleRow(ctx, row.sale);
-    const enc = row.order;
-    const cli = enc.clienteId ? store.get('clients', enc.clienteId) : null;
-    return el('li', { class: 'pa-row-item', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: enc.id }) }, [
-      el('div', { class: 'pa-grow' }, [
-        el('div', { class: 'pa-enc-title' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: enc.entregue ? 'pa-badge pa-ok' : 'pa-badge', text: enc.entregue ? 'entregue' : 'n√£o entregue' }), el('span', { class: row.paid ? 'pa-badge pa-ok' : 'pa-badge pa-warn', text: row.paid ? 'recebido' : 'a receber' })]),
-        el('span', { class: 'pa-muted', text: `${fmtDate(enc.deliveryDate)} ¬∑ ${encomendaItemsResumo(store, enc)}` }),
-      ]),
-      el('strong', { class: 'pa-num', text: brl(rowMetrics(row).total) }),
-      el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-    ]);
-  });
-
-  const cancellationRows = visibleCancellations.map((row) => {
-    if (row.kind === 'sale') {
-      const p = store.get('products', row.sale.productId);
-      return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: 'Sem cliente' }), el('span', { class: 'pa-muted', text: `${p?.name || '(produto removido)'} ¬∑ ${fmtDate(row.at)}` })]), el('strong', { class: 'pa-num pa-bad', text: brl(row.total) })]);
-    }
-    const cli = row.order.clienteId ? store.get('clients', row.order.clienteId) : null;
-    return el('li', { class: 'pa-row-item pa-cancelled', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.order.id }) }, [
-      el('div', { class: 'pa-grow' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: 'pa-muted', text: `${encomendaItemsResumo(store, row.order)} ¬∑ ${fmtDate(row.at)}` })]),
-      el('strong', { class: 'pa-num pa-bad', text: brl(rowMetrics({ ...row, received: 0, pending: row.total }).total) }), el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-    ]);
-  });
-
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Relat√≥rio gerencial' }), el('h2', { text: 'Vendidos' })]),
-      activeProducts.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'venda-new', onclick: () => ctx.actions.openModal({ kind: 'venda-add' }) }, '+ Venda r√°pida'),
-    ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Encomendas entregues e vendas r√°pidas, pela data de entrega registrada. Filtre Cestas ou Kits para ver os conjuntos com seus produtos internos; tamb√©m √© poss√≠vel pesquisar um produto vendido dentro deles. Itens avulsos aparecem separados no pedido.' }),
-    period,
-    el('div', { class: 'pa-filtergrid' }, [field('Tipo de produto', kindFilter), field('Filtrar por produto', productFilter), field('Filtrar por cliente', clientFilter)]),
-    el('div', { class: 'pa-chiprow' }, [chip('todos', 'Todos'), chip('recebidos', 'Recebidos'), chip('naorecebidos', 'N√£o recebidos'), chip('desistencias', 'Desist√™ncias')]),
-    status === 'desistencias'
-      ? el('div', {}, [
-          el('div', { class: 'pa-statgrid' }, [statCard('Total de desist√™ncias', brl(visibleCancellations.reduce((sum, row) => sum + rowMetrics({ ...row, received: 0, pending: row.total }).total, 0)), 'bad')]),
-          cancellationRows.length ? el('ul', { class: 'pa-list pa-rows' }, cancellationRows) : el('p', { class: 'pa-empty', text: 'Nenhuma desist√™ncia neste per√≠odo.' }),
-        ])
-      : el('div', {}, [
-          el('div', { class: 'pa-statgrid' }, [statCard('Total vendido', brl(filteredTotals.total), 'navy'), statCard('Recebido', brl(filteredTotals.received), 'ok'), statCard('Pendente', brl(filteredTotals.pending), filteredTotals.pending > 0.005 ? 'warn' : 'soft'), productKind && statCard(`${({ cesta: 'Cestas', kit: 'Kits', combo: 'Combos', normal: 'Produtos comuns' })[productKind]} vendidos`, fmtNum(filteredProducts.reduce((sum, product) => sum + product.qty, 0)), 'teal')].filter(Boolean)),
-          filteredProducts.length > 0 && el('h3', { class: 'pa-h3', text: 'Produtos vendidos' }),
-          filteredProducts.length > 0 && el('div', { class: 'pa-report-list' }, filteredProducts.map((p) => el('div', { class: 'pa-preview-line' }, [el('span', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-muted', text: `${fmtNum(p.qty)} un` }), el('strong', { class: 'pa-num', text: brl(p.total) })]))),
-          el('h3', { class: 'pa-h3', text: 'Vendidos no per√≠odo' }),
-          detailRows.length ? el('ul', { class: 'pa-list pa-rows' }, detailRows) : el('p', { class: 'pa-empty', text: 'Nenhuma venda com este filtro.' }),
-        ]),
-  ].filter(Boolean));
-}
-
-// Read-only log entry (append-only ‚Äî no edit; an estorno would be a new event).
-// In the period report each row carries its own date and gross value.
-function saleRow(ctx, s) {
-  const { store } = ctx;
-  const reversed = store.isReversed('sale', s.id);
-  const p = store.get('products', s.productId);
-  const rev = saleNet(s);
-  return el('li', { class: 'pa-list-item' + (reversed ? ' pa-reversed' : ''), 'data-search': `${p ? p.name : ''} ${s.channel || ''}` }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', {}, el('strong', { text: p ? p.name : '(produto removido)' })),
-      el('span', { class: 'pa-muted', text: `${fmtDate(s.at)} ¬∑ ${s.qty} √ó ${brl(s.unitPrice)}${s.channel ? ` ¬∑ ${s.channel}` : ''}` }),
-    ]),
-    el('span', { class: 'pa-num', text: brl(rev) }),
-    estornoControl(ctx, 'sale', s.id),
-  ]);
-}
-
-MODALS['venda-add'] = (ctx) => vendaSheet(ctx);
-
-function vendaSheet(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const products = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p));
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const suggested = (pid) => sellingPrice(store, pid);
-
-  const prodSel = el('select', { class: 'pa-input', 'data-testid': 'venda-product' },
-    products.map((p) => el('option', { value: p.id, text: p.name })));
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-date', type: 'date', value: todayInput() });
-  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'venda-qty', type: 'text', inputmode: 'decimal', value: '1' });
-  const price = moneyField(products[0] ? suggested(products[0].id) : null, 'venda-price');
-  const discount = moneyField(null, 'venda-discount');
-  const channel = el('input', { class: 'pa-input', 'data-testid': 'venda-canal', type: 'text', placeholder: 'canal (opcional)' });
-
-  prodSel.addEventListener('change', () => {
-    const s = suggested(prodSel.value);
-    price.input.value = s != null ? fmtMoneyInput(s) : '';
-  });
-
-  function save() {
-    const p = store.get('products', prodSel.value);
-    const q = parseNum(qty.value);
-    const up = parseNum(price.input.value);
-    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
-    if (!p || !(q > 0) || up == null || discountValue > q * up + 0.005) { discount.input.focus(); return; }
-    let cost = 0;
-    try { cost = productUnitCost(es, p.id, config, lens); } catch { /* leave 0 if not yet priceable */ }
-    const rates = effectiveSalesRates(p, config);
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addSale({
-      id: uuid(), at, productId: p.id, qty: q, unitPrice: up, discount: discountValue || undefined,
-      paymentFeePct: rates.paymentFeePct, commissionPct: rates.commissionPct,
-      salesTaxPct: rates.salesTaxPct, costSnapshot: cost,
-      ...(channel.value.trim() ? { channel: channel.value.trim() } : {}),
-    }));
-  }
-
-  const rows = [
-    field('Produto', prodSel),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Data' }), date, el('span', { class: 'pa-lab', text: 'Qtd' }), qty]),
-    field('Pre√ßo de venda', price),
-    field('Desconto total (opcional)', discount),
-    field('Canal (opcional)', channel),
-    el('p', { class: 'pa-hint', text: 'O pre√ßo sugerido j√° vem preenchido ‚Äî edite se vendeu por outro valor. Para cestas e kits, crie uma encomenda e escolha os produtos internos. O custo √© congelado na venda para a margem ficar verdadeira.' }),
-  ];
-  return sheet({ title: 'Registrar venda', rows, onSave: save, saveTestid: 'venda-add' });
-}
-
-// ‚îÄ‚îÄ Encomendas (Rev 04 ‚Äî the order = the sale; mutable, editable) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-/** A search-to-select client picker (Rev 07) ‚Äî scales past a dropdown when there are many clients.
- *  `.value()` ‚Üí the selected client id (or '' for sem cliente). */
-function clientePicker(store, initialId, onChange = () => {}) {
-  let selected = initialId || '';
-  const container = el('div', { class: 'pa-cli-picker' });
-  function render() {
-    const cli = selected ? store.get('clients', selected) : null;
-    if (cli) {
-      container.replaceChildren(el('div', { class: 'pa-cli-chip', 'data-testid': 'enc-cliente-chip' }, [
-        el('span', { class: 'pa-grow', text: clientLabel(cli) }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente', onclick: () => { selected = ''; render(); onChange(); } }, '‚úï'),
-      ]));
-      return;
-    }
-    const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'enc-cliente-search', type: 'search', placeholder: 'Buscar cliente por nome ou c√≥digo‚Ä¶' });
-    const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
-    search.addEventListener('input', () => {
-      const q = norm(search.value);
-      if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
-      const matches = store.state.clients.filter((c) => !c.inactive && norm(clientSearchText(c)).includes(q)).slice(0, 6);
-      results.style.display = matches.length ? '' : 'none';
-      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-cliente-result', onclick: () => { selected = c.id; render(); onChange(); } }, [el('div', { class: 'pa-grow' }, [el('strong', { text: clientLabel(c) }), tagChips(c.tags)].filter(Boolean)), el('span', { class: 'pa-add', text: '+' })])));
-    });
-    container.replaceChildren(search, results);
-  }
-  render();
-  return { el: container, value: () => selected };
-}
-
-function encomendasPanel(ctx) {
-  const { store } = ctx;
-  const products = store.state.products;
-  const activeProducts = products.filter(productIsActive);
-  const {
-    encSort: sort, encStatus: status, encStart: start, encEnd: end,
-    encClientId: requestedClientId, encProductId: requestedProductId, encDeliveryMethod: requestedDeliveryMethod,
-  } = ctx.view;
-  const clientId = store.state.clients.some((c) => c.id === requestedClientId) ? requestedClientId : '';
-  const productId = products.some((p) => p.id === requestedProductId) ? requestedProductId : '';
-  const deliveryMethod = ['retirada', 'motoboy'].includes(requestedDeliveryMethod) ? requestedDeliveryMethod : '';
-  const cliName = (e) => norm(store.get('clients', e.clienteId)?.name || 'zzz');
-
-  let list = store.state.encomendas.filter((e) => inDateRange(e.deliveryDate, start, end));
-  if (clientId) list = list.filter((e) => e.clienteId === clientId);
-  if (productId) list = list.filter((e) => (e.itens || []).some((it) => it.productId === productId || (it.bundleItems || []).some((child) => child.productId === productId)));
-  if (deliveryMethod) list = list.filter((e) => (e.deliveryMethod || 'retirada') === deliveryMethod);
-  if (status === 'desistencias') list = list.filter((e) => e.desistenciaAt);
-  else if (status === 'naoentregue') list = list.filter((e) => !e.desistenciaAt && !e.entregue);
-  else if (status === 'entregues') list = list.filter((e) => !e.desistenciaAt && e.entregue);
-  else if (status === 'areceber') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo > 0.005);
-  else if (status === 'pagas') list = list.filter((e) => !e.desistenciaAt && paymentStatus(store, e).saldo <= 0.005);
-  else if (status === 'urgentes') list = list.filter((e) => !e.desistenciaAt && e.urgente);
-  list.sort((a, b) => {
-    const aUrgent = Boolean(a.urgente && !a.desistenciaAt);
-    const bUrgent = Boolean(b.urgente && !b.desistenciaAt);
-    if (sort === 'urgentes' && aUrgent !== bUrgent) return aUrgent ? -1 : 1;
-    if (sort === 'retirada' || sort === 'motoboy') {
-      const aFirst = (a.deliveryMethod || 'retirada') === sort;
-      const bFirst = (b.deliveryMethod || 'retirada') === sort;
-      if (aFirst !== bFirst) return aFirst ? -1 : 1;
-    }
-    if (sort === 'cliente') {
-      const byName = cliName(a).localeCompare(cliName(b), 'pt-BR');
-      if (byName) return byName;
-    }
-    return String(a.deliveryDate || '').localeCompare(String(b.deliveryDate || '')) || cliName(a).localeCompare(cliName(b), 'pt-BR');
-  });
-  const ul = el('ul', { class: 'pa-list pa-rows' }, list.map((e) => encomendaRow(ctx, e)));
-
-  const chip = (k, label) => el('button', { class: 'pa-chip' + (status === k ? ' pa-chip-on' : ''), 'data-testid': `enc-f-${k}`, onclick: () => ctx.actions.setEncStatus(k) }, label);
-  const sortSel = el('select', { class: 'pa-input pa-narrow', 'data-testid': 'enc-sort' }, [['urgentes', 'Urgentes primeiro'], ['retirada', 'Retirada primeiro'], ['motoboy', 'Motoboy primeiro'], ['cliente', 'Clientes A‚ÄìZ']].map(([v, t]) => el('option', { value: v, text: t, ...(sort === v ? { selected: 'selected' } : {}) })));
-  sortSel.addEventListener('change', () => ctx.actions.setEncSort(sortSel.value));
-  const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setEncPeriod({ encStart: s, encEnd: e }), 'enc');
-  const clientFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-client-filter' }, [
-    el('option', { value: '', text: 'Todos os clientes', ...(!clientId ? { selected: 'selected' } : {}) }),
-    ...store.state.clients.slice().sort((a, b) => norm(clientLabel(a)).localeCompare(norm(clientLabel(b)))).map((c) => el('option', { value: c.id, text: clientLabel(c), ...(clientId === c.id ? { selected: 'selected' } : {}) })),
-  ]);
-  const productFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-product-filter' }, [
-    el('option', { value: '', text: 'Todos os produtos', ...(!productId ? { selected: 'selected' } : {}) }),
-    ...products.slice().sort((a, b) => norm(a.name).localeCompare(norm(b.name))).map((p) => el('option', { value: p.id, text: p.name, ...(productId === p.id ? { selected: 'selected' } : {}) })),
-  ]);
-  const deliveryFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-delivery-filter' }, [
-    el('option', { value: '', text: 'Retirada ou motoboy', ...(!deliveryMethod ? { selected: 'selected' } : {}) }),
-    el('option', { value: 'retirada', text: 'Retirada', ...(deliveryMethod === 'retirada' ? { selected: 'selected' } : {}) }),
-    el('option', { value: 'motoboy', text: 'Motoboy', ...(deliveryMethod === 'motoboy' ? { selected: 'selected' } : {}) }),
-  ]);
-  clientFilter.addEventListener('change', () => ctx.actions.setEncPeriod({ encClientId: clientFilter.value }));
-  productFilter.addEventListener('change', () => ctx.actions.setEncPeriod({ encProductId: productFilter.value }));
-  deliveryFilter.addEventListener('change', () => ctx.actions.setEncPeriod({ encDeliveryMethod: deliveryFilter.value }));
-
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Encomendas' }),
-      store.state.encomendas.length > 0 && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-fichas-dia', onclick: () => ctx.actions.openModal({ kind: 'encomendas-fichas-dia', date: start && start === end ? start : todayInput() }) }, 'üñ® Fichas do dia'),
-      activeProducts.length > 0 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'enc-new', onclick: () => ctx.actions.openModal({ kind: 'encomenda-add' }) }, '+ Nova encomenda'),
-    ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Todas as encomendas ficam aqui, inclusive entregues, pagas e desist√™ncias. Use os filtros apenas quando quiser reduzir a lista.' }),
-    activeProducts.length === 0 && el('p', { class: 'pa-hint', text: products.length ? 'Ative um produto para criar uma nova encomenda.' : 'Crie um produto primeiro.' }),
-    store.state.encomendas.length === 0
-      ? activeProducts.length > 0 && el('p', { class: 'pa-empty', text: 'Nenhuma encomenda. Toque em ‚Äú+ Nova‚Äù.' })
-      : el('div', {}, [
-          period,
-          (start || end) && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'enc-all-dates', onclick: () => ctx.actions.setEncPeriod({ encStart: '', encEnd: '' }) }, 'Mostrar todas as datas'),
-          el('div', { class: 'pa-filtergrid' }, [field('Cliente', clientFilter), field('Produto', productFilter), field('Entrega', deliveryFilter)]),
-          el('div', { class: 'pa-row pa-sortrow' }, [el('span', { class: 'pa-lab', text: `${list.length} encomenda(s) ¬∑ ordenar por` }), sortSel]),
-          el('div', { class: 'pa-chiprow' }, [chip('todas', 'Todas'), chip('naoentregue', 'N√£o entregues'), chip('entregues', 'Entregues'), chip('areceber', 'A pagar'), chip('pagas', 'Pagas'), chip('urgentes', 'Urgentes'), chip('desistencias', 'Desist√™ncias')]),
-          searchInput('Buscar cliente ou produto‚Ä¶', ul, 'enc-search'),
-          list.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhuma encomenda com esse filtro.' }),
-        ].filter(Boolean)),
-  ].filter(Boolean));
-}
-
-MODALS['encomendas-fichas-dia'] = (ctx, modal) => encomendasFichasDiaSheet(ctx, modal);
-
-function encomendasFichasDiaSheet(ctx, modal) {
-  const { store } = ctx;
-  const date = el('input', { class: 'pa-input', type: 'date', value: modal.date || todayInput(), 'data-testid': 'enc-fichas-date' });
-  const status = el('select', { class: 'pa-input', 'data-testid': 'enc-fichas-status' }, [
-    el('option', { value: 'todos', text: 'Todos os pedidos' }),
-    el('option', { value: 'areceber', text: 'A receber' }),
-  ]);
-  const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Buscar cliente pelo nome‚Ä¶', 'data-testid': 'enc-fichas-search' });
-  const all = el('input', { type: 'checkbox', 'data-testid': 'enc-fichas-all' });
-  const list = el('div', { style: 'max-height:320px;overflow-y:auto', 'data-testid': 'enc-fichas-clients' });
-  const count = el('span', { class: 'pa-muted' });
-  const print = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'enc-fichas-print' }, 'Conferir fichas para imprimir');
-  const selected = new Set();
-  let dayOrders = [];
-  let choices = [];
-
-  const updateSelection = () => {
-    all.checked = choices.length > 0 && selected.size === choices.length;
-    print.disabled = selected.size === 0;
-    count.textContent = `${selected.size} de ${choices.length} cliente(s) marcado(s)`;
-  };
-  const updateSearch = () => {
-    const query = norm(search.value);
-    for (const { client, label } of choices) label.style.display = norm(clientSearchText(client)).includes(query) ? '' : 'none';
-  };
-  const renderClients = () => {
-    selected.clear();
-    all.checked = false;
-    dayOrders = store.state.encomendas.filter((order) => !order.desistenciaAt && dateOnly(order.deliveryDate) === date.value && order.clienteId && store.get('clients', order.clienteId) && (status.value !== 'areceber' || paymentStatus(store, order).saldo > 0.005));
-    const grouped = new Map();
-    for (const order of dayOrders) {
-      const orders = grouped.get(order.clienteId) || [];
-      orders.push(order);
-      grouped.set(order.clienteId, orders);
-    }
-    choices = [...grouped.entries()].map(([id, orders]) => {
-      const client = store.get('clients', id);
-      const check = el('input', { type: 'checkbox', value: id, 'data-testid': 'enc-fichas-client-check' });
-      const total = orders.reduce((sum, order) => sum + (Number(order.total) || 0), 0);
-      const balance = orders.reduce((sum, order) => sum + paymentStatus(store, order).saldo, 0);
-      const label = el('label', { class: 'pa-check' }, [check, el('span', {}, [
-        el('strong', { text: clientLabel(client) }),
-        el('span', { class: 'pa-muted', text: ` ¬∑ ${orders.length} pedido(s) ¬∑ ${brl(total)} ¬∑ saldo ${brl(balance)}` }),
-      ])]);
-      check.addEventListener('change', () => { if (check.checked) selected.add(id); else selected.delete(id); updateSelection(); });
-      return { client, check, label };
-    }).sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
-    list.replaceChildren(...(choices.length ? choices.map(({ label }) => label) : [el('p', { class: 'pa-empty', text: status.value === 'areceber' ? 'Nenhuma encomenda a receber nesta data.' : 'Nenhuma encomenda de cliente cadastrado nesta data.' })]));
-    updateSearch();
-    updateSelection();
-  };
-  date.addEventListener('change', () => { search.value = ''; renderClients(); });
-  status.addEventListener('change', renderClients);
-  search.addEventListener('input', updateSearch);
-  all.addEventListener('change', () => {
-    selected.clear();
-    if (all.checked) for (const { check } of choices) selected.add(check.value);
-    for (const { check } of choices) check.checked = selected.has(check.value);
-    updateSelection();
-  });
-  print.addEventListener('click', () => {
-    if (!selected.size) return;
-    const fichas = buildFichas(store, dayOrders.filter((order) => selected.has(order.clienteId)))
-      .sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
-    ctx.actions.openModal({ kind: 'ficha-preview', fichas, filename: `fichas-encomendas-${date.value}.pdf` });
-  });
-  renderClients();
-  return sheet({ title: 'Fichas das encomendas do dia', rows: [
-    el('p', { class: 'pa-hint', text: 'Escolha a data, filtre os pedidos e marque os clientes cadastrados. ‚ÄúA receber‚Äù inclui apenas pedidos com saldo pendente; desist√™ncias e pedidos sem cliente cadastrado ficam fora.' }),
-    field('Data de entrega', date),
-    field('Situa√ß√£o', status),
-    search,
-    el('label', { class: 'pa-check' }, [all, el('strong', { text: 'Marcar todos os clientes desta data' })]),
-    list,
-    count,
-    el('div', { class: 'pa-sheet-actions' }, [print]),
-  ] });
-}
-
-function encomendaItemsResumo(store, e) {
-  const hasBundle = (e.itens || []).some((it) => isBundleProduct(store.get('products', it.productId)));
-  return (e.itens || []).map((it) => {
-    const p = store.get('products', it.productId);
-    const composition = bundleCompositionText(store, it);
-    return `${hasBundle && !isBundleProduct(p) ? 'Avulso: ' : ''}${fmtNum(it.qty)}√ó ${p ? p.name : '?'}${composition ? ` [dentro: ${composition}]` : ''}`;
-  }).join(' ¬∑ ');
-}
-
-/** Derived payment status of an order from its payments (never a stored flag). */
-function paymentStatus(store, e) {
-  const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
-  const finance = title ? titleState(store, title) : null;
-  const paid = finance ? finance.paid : store.paidFor(e.id);
-  const discounted = finance ? finance.discounted : 0;
-  const credited = finance ? finance.credited : 0;
-  const saldo = finance ? finance.balance : Math.max(0, (e.total || 0) - paid);
-  if (saldo <= 0.005) return { label: 'pago', cls: 'pa-ok', paid, discounted, credited, saldo: 0 };
-  if (paid + discounted + credited > 0.005) return { label: 'parcial', cls: 'pa-warn', paid, discounted, credited, saldo };
-  return { label: 'n√£o pago', cls: 'pa-warn', paid, discounted, credited, saldo };
-}
-
-function encomendaRow(ctx, e) {
-  const { store } = ctx;
-  const cli = e.clienteId ? store.get('clients', e.clienteId) : null;
-  const resumo = encomendaItemsResumo(store, e);
-  const st = paymentStatus(store, e);
-  const paymentLabel = st.saldo <= 0.005 ? 'pago' : (st.paid + st.credited > 0.005 ? 'parcial ¬∑ a pagar' : 'a pagar');
-  const deliveryLabel = (e.deliveryMethod || 'retirada') === 'motoboy' ? 'Motoboy' : 'Retirada';
-  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  const urg = !e.desistenciaAt && el('button', { class: 'pa-btn pa-ghost pa-sm pa-urg-btn', title: e.urgente ? 'Tirar urg√™ncia' : 'Marcar urgente', onclick: stop(() => ctx.actions.mutate((s) => s.upsertEncomenda({ ...e, urgente: !e.urgente }))) }, e.urgente ? '‚≠ê' : '‚òÜ');
-  const ent = !e.desistenciaAt && el('button', { class: 'pa-ent' + (e.entregue ? ' pa-ent-on' : ''), 'data-testid': 'enc-entregue', title: e.entregue ? 'Entregue' : 'Marcar como entregue', onclick: stop(() => ctx.actions.mutate((s) => s.upsertEncomenda({ ...e, entregue: !e.entregue }))) }, e.entregue ? '‚úì Entregue' : 'Entregar');
-  return el('li', { class: 'pa-row-item' + (e.urgente ? ' pa-urgente' : '') + (e.entregue ? ' pa-row-done' : '') + (e.desistenciaAt ? ' pa-cancelled' : ''), 'data-search': `${cli ? cli.name : ''} ${resumo} ${deliveryLabel}`, onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: e.id }) }, [
-    el('div', { class: 'pa-grow' }, [
-      el('div', { class: 'pa-enc-title' }, [e.desistenciaAt && el('span', { class: 'pa-badge pa-bad', text: 'DESIST√äNCIA' }), e.urgente && !e.desistenciaAt && el('span', { class: 'pa-badge pa-urg', text: 'URGENTE' }), el('strong', { text: cli ? cli.name : 'Sem cliente' }), !e.desistenciaAt && el('span', { class: `pa-badge ${st.cls}`, text: paymentLabel }), el('span', { class: 'pa-badge', text: deliveryLabel })].filter(Boolean)),
-      el('span', { class: 'pa-muted', text: `Pedido ${fmtDate(e.at)} ¬∑ entrega agendada ${fmtDate(e.deliveryDate)}` }),
-      el('span', { class: 'pa-muted', text: resumo }),
-      el('div', { class: 'pa-enc-actions' }, [el('span', { class: 'pa-num pa-grow', text: brl(e.total) }), urg, ent].filter(Boolean)),
-    ]),
-  ]);
-}
-
-MODALS['encomenda-add'] = (ctx) => encomendaSheet(ctx, null);
-MODALS['encomenda-edit'] = (ctx, m) => encomendaSheet(ctx, ctx.store.get('encomendas', m.id) || null);
-
-function encomendaSheet(ctx, enc) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const suggested = (pid) => sellingPrice(store, pid);
-  const unitCost = (pid) => { try { return productUnitCost(es, pid, config, lens); } catch { return 0; } };
-
-  const items = enc ? enc.itens.map((it) => ({ productId: it.productId, qty: it.qty, unitPrice: it.unitPrice, ...(it.bundleItems ? { bundleItems: it.bundleItems.map((child) => ({ ...child })) } : {}) })) : [];
-
-  const cliPicker = clientePicker(store, enc ? enc.clienteId : '', refreshMatchingOrder);
-  const urgenteChk = el('input', { type: 'checkbox', 'data-testid': 'enc-urgente' }); urgenteChk.checked = !!(enc && enc.urgente);
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'enc-date', type: 'date', value: enc ? enc.deliveryDate.slice(0, 10) : todayInput() });
-  const entrega = el('select', { class: 'pa-input', 'data-testid': 'enc-entrega' }, [['retirada', 'Retirada'], ['motoboy', 'Motoboy']].map(([v, t]) => el('option', { value: v, text: t, ...(enc && enc.deliveryMethod === v ? { selected: 'selected' } : {}) })));
-  const frete = moneyField(enc ? enc.frete : null, 'enc-frete');
-  const discount = moneyField(enc ? enc.discount : null, 'enc-discount');
-  const notes = el('textarea', { class: 'pa-input pa-textarea', 'data-testid': 'enc-notes', rows: '2', placeholder: 'Observa√ß√µes (opcional)' });
-  notes.value = enc ? (enc.notes || '') : '';
-  const mergeNotice = el('p', { class: 'pa-callout', 'data-testid': 'enc-merge-notice', style: 'display:none' });
-  function refreshMatchingOrder() {
-    if (enc) return;
-    const current = findOpenOrderForClientDate(store, cliPicker.value(), date.value);
-    mergeNotice.style.display = current ? '' : 'none';
-    if (current) {
-      entrega.value = current.deliveryMethod || 'retirada';
-      entrega.disabled = true;
-      mergeNotice.textContent = `J√° existe uma encomenda aberta para este cliente em ${fmtDate(current.deliveryDate)}. Os novos produtos ser√£o acrescentados a ela; pagamentos j√° registrados ser√£o preservados.`;
-    } else entrega.disabled = false;
-  }
-  date.addEventListener('change', refreshMatchingOrder);
-  refreshMatchingOrder();
-
-  const totalEl = el('strong', { 'data-testid': 'enc-total' });
-  const grossTotal = () => items.reduce((s, it) => s + orderItemGross(it), 0) + (parseNum(frete.input.value) || 0);
-  const grandTotal = () => Math.max(0, grossTotal() - Math.min(grossTotal(), parseNum(discount.input.value) || 0));
-  const renderTotal = () => { totalEl.textContent = brl(grandTotal()); discount.input.setCustomValidity(''); };
-
-  const itemsList = el('ul', { class: 'pa-list pa-tight' });
-  function bundleEditor(it, product, renderLine, totalLabel, lineTot) {
-    it.bundleItems ||= [];
-    const box = el('div', { class: 'pa-bundle-editor', 'data-testid': 'enc-bundle-editor' });
-    const render = () => {
-      const rows = (it.bundleItems || []).map((child, childIndex) => {
-        const childProduct = store.get('products', child.productId);
-        const childQty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(child.qty), 'aria-label': 'quantidade dentro do conjunto' });
-        const childPrice = el('input', { class: 'pa-input pa-unit', type: 'text', inputmode: 'decimal', value: fmtMoneyInput(child.unitPrice || 0), 'aria-label': `Pre√ßo de ${childProduct?.name || 'produto'} dentro do conjunto` });
-        childQty.addEventListener('input', () => { child.qty = parseNum(childQty.value) || 0; renderLine(); renderTotal(); });
-        childPrice.addEventListener('input', () => { child.unitPrice = parseNum(childPrice.value) || 0; renderLine(); renderTotal(); });
-        return el('li', { class: 'pa-list-item' }, [childQty, el('span', { class: 'pa-grow', text: childProduct?.name || '(produto removido)' }), el('span', { class: 'pa-lab', text: 'R$' }), childPrice, el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { it.bundleItems.splice(childIndex, 1); render(); renderLine(); renderTotal(); } }, '‚úï')]);
-      });
-      const candidates = store.state.products.filter((p) => productIsActive(p) && !isBundleProduct(p) && p.id !== it.productId);
-      const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'enc-bundle-product', type: 'search', placeholder: 'Digite o produto para incluir‚Ä¶' });
-      const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:220px;overflow-y:auto' });
-      const showSuggestions = () => {
-        const query = norm(search.value);
-        const matches = query ? candidates.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
-        suggestions.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-bundle-result', onclick: () => {
-          const current = it.bundleItems.find((child) => child.productId === p.id);
-          if (current) current.qty += 1; else it.bundleItems.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id) });
-          render(); renderLine(); renderTotal();
-        } }, [el('strong', { class: 'pa-grow', text: p.name }), el('span', { class: 'pa-add', text: '+' })])));
-        suggestions.style.display = matches.length ? '' : 'none';
-      };
-      search.addEventListener('input', showSuggestions);
-      box.replaceChildren(el('div', { class: 'pa-enc-title' }, [el('strong', { text: `Produtos dentro de cada ${bundleKindLabel(product).toLowerCase()}` }), el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(product) })]), el('p', { class: 'pa-hint', text: 'Escolha o conte√∫do deste pedido. As quantidades ser√£o multiplicadas pelo n√∫mero de conjuntos e aparecer√£o na comanda. Outros produtos adicionados ao pedido ficam avulsos.' }), el('ul', { class: 'pa-list pa-tight' }, rows.length ? rows : [el('li', { class: 'pa-empty pa-sm', text: 'Escolha os produtos que comp√µem este conjunto.' })]), candidates.length ? el('div', {}, [search, suggestions]) : el('p', { class: 'pa-hint', text: 'Cadastre ao menos um produto comum ativo para montar o conjunto.' }), el('div', { class: 'pa-bundle-total' }, [totalLabel, lineTot]));
-    };
-    render();
-    return box;
-  }
-  function renderItems() {
-    itemsList.replaceChildren(...(items.length ? items.map((it, idx) => {
-      const p = store.get('products', it.productId);
-      const bundle = p && isBundleProduct(p);
-      const qty = el('input', { class: 'pa-input pa-qty', type: 'text', inputmode: 'decimal', value: fmtNum(it.qty), 'aria-label': 'quantidade' });
-      const price = el('input', { class: 'pa-input pa-unit', type: 'text', inputmode: 'decimal', value: fmtMoneyInput(it.unitPrice), 'aria-label': 'pre√ßo' });
-      const lineTot = el(bundle ? 'strong' : 'span', { class: bundle ? 'pa-num' : 'pa-muted pa-linetot', ...(bundle ? { 'data-testid': 'enc-bundle-total' } : {}) });
-      const totalLabel = bundle ? el('strong', { class: 'pa-grow' }) : null;
-      const renderLine = () => {
-        lineTot.textContent = brl(orderItemGross(it));
-        if (totalLabel) totalLabel.textContent = `Total ${bundleKindLabel(p) === 'Cesta' ? 'da' : 'do'} ${bundleKindLabel(p).toLowerCase()}${Number(it.qty) > 1 ? ` (${fmtNum(it.qty)} unidades)` : ''}`;
-      };
-      qty.addEventListener('input', () => { it.qty = parseNum(qty.value) || 0; renderLine(); renderTotal(); });
-      price.addEventListener('input', () => { it.unitPrice = parseNum(price.value) || 0; renderLine(); renderTotal(); });
-      renderLine();
-      return el('li', { class: 'pa-list-item pa-encitem' }, [
-        qty,
-        el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('span', { text: p ? p.name : '(produto removido)' }), bundle && el('span', { class: 'pa-badge pa-urg', text: bundleKindLabel(p) })].filter(Boolean)), bundle ? bundleEditor(it, p, renderLine, totalLabel, lineTot) : lineTot]),
-        el('span', { class: 'pa-lab', text: bundle ? 'Embalagem R$' : 'R$' }), price,
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Remover item', onclick: () => { items.splice(idx, 1); renderItems(); renderTotal(); } }, '‚úï'),
-      ]);
-    }) : [el('li', { class: 'pa-empty pa-sm', text: 'Sem itens ainda ‚Äî busque um produto abaixo.' })]));
-  }
-  renderItems();
-
-  // Product search-to-add (scales to her ~76 products better than a dropdown).
-  const search = el('input', { class: 'pa-input pa-search', 'data-testid': 'enc-prodsearch', type: 'search', placeholder: 'Buscar produto para adicionar‚Ä¶' });
-  const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
-  function renderResults() {
-    const q = norm(search.value);
-    if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
-    const matches = store.state.products.filter((p) => productIsActive(p) && norm(p.name).includes(q)).slice(0, 6);
-    results.style.display = matches.length ? '' : 'none';
-    results.replaceChildren(...matches.map((p) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-prodresult', onclick: () => { items.push({ productId: p.id, qty: 1, unitPrice: suggested(p.id), ...(isBundleProduct(p) ? { bundleItems: [] } : {}) }); search.value = ''; renderResults(); renderItems(); renderTotal(); } }, [
-      el('div', { class: 'pa-grow' }, [el('strong', { text: p.name }), isBundleProduct(p) && el('span', { class: 'pa-badge pa-urg', text: `${bundleKindLabel(p)} ¬∑ escolher conte√∫do` })].filter(Boolean)), el('span', { class: 'pa-add', text: '+' }),
-    ])));
-  }
-  search.addEventListener('input', renderResults);
-  frete.input.addEventListener('input', renderTotal);
-  discount.input.addEventListener('input', renderTotal);
-  renderTotal();
-
-  function save() {
-    if (!items.length) { search.focus(); return; }
-    const incompleteBundle = items.find((it) => isBundleProduct(store.get('products', it.productId)) && !(it.bundleItems || []).some((child) => (Number(child.qty) || 0) > 0));
-    if (incompleteBundle) { window.alert('Escolha os produtos que comp√µem cada cesta, kit ou combo antes de salvar.'); return; }
-    const discountValue = Math.max(0, parseNum(discount.input.value) || 0);
-    if (discountValue > grossTotal() + 0.005) { discount.input.setCustomValidity('O desconto n√£o pode ser maior que o total bruto.'); discount.input.reportValidity(); return; }
-    const cost = items.reduce((s, it) => s + (Number(it.qty) || 0) * (orderItemUnitCost(store, it, unitCost) || 0), 0);
-    const fr = parseNum(frete.input.value);
-    const ob = notes.value.trim();
-    ctx.actions.mutate((s) => {
-      const order = {
-        ...(enc || { at: nowIso() }),
-        id: enc ? enc.id : uuid(),
-        deliveryDate: date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso(),
-        clienteId: cliPicker.value() || undefined,
-        itens: items.map((it) => ({ productId: it.productId, qty: Number(it.qty) || 0, unitPrice: Number(it.unitPrice) || 0, ...(it.bundleItems?.length ? { bundleItems: it.bundleItems.map((child) => ({ productId: child.productId, qty: Number(child.qty) || 0, unitPrice: Number(child.unitPrice) || 0 })) } : {}) })),
-        total: grandTotal(),
-        discount: discountValue || undefined,
-        costSnapshot: cost,
-        deliveryMethod: entrega.value,
-        frete: fr == null ? undefined : fr,
-        notes: ob || undefined,
-        urgente: urgenteChk.checked || undefined,
-      };
-      if (enc) s.upsertEncomenda(order);
-      else addOrAppendOrder(s, order);
-    });
-  }
-
-  // Payment summary + history (edit mode). Registering a payment happens from Fiado (or here, after
-  // a save) so unsaved item edits can't be lost ‚Äî the order's saldo/status are always derived.
-  const paymentSection = [];
-  if (enc) {
-    const st = paymentStatus(store, enc);
-    const hist = store.state.payments.filter((pg) => pg.encomendaId === enc.id).sort((a, b) => (a.at < b.at ? 1 : -1));
-    paymentSection.push(
-      el('h3', { class: 'pa-h3', text: 'Pagamento' }),
-      el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Total' }), el('td', { class: 'pa-num', text: brl(enc.total) })]),
-        el('tr', {}, [el('td', { text: 'Pago' }), el('td', { class: 'pa-num', text: brl(st.paid) })]),
-        st.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quita√ß√£o' }), el('td', { class: 'pa-num', text: brl(st.discounted) })]),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num' + (st.saldo > 0.005 ? ' pa-bad' : ''), text: brl(st.saldo) })]),
-      ]),
-      hist.length > 0 && el('ul', { class: 'pa-list pa-tight' }, hist.map((pg) => el('li', { class: 'pa-list-item' + (store.isReversed('payment', pg.id) ? ' pa-reversed' : '') }, [
-        el('span', { class: 'pa-grow pa-muted', text: `${fmtDate(pg.at)}${pg.forma ? ` ¬∑ ${pg.forma}` : ''}` }),
-        el('span', { class: 'pa-num', text: brl(pg.valor) }),
-        estornoControl(ctx, 'payment', pg.id),
-      ]))),
-      el('div', { class: 'pa-row pa-form' }, [
-        st.saldo > 0.005 && !enc.desistenciaAt && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-pagar', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: enc.id }) }, '+ Registrar pagamento'),
-        st.paid > 0.005 && reciboButton(ctx, enc),
-      ].filter(Boolean)),
-    );
-  }
-
-  const rows = [
-    enc && enc.desistenciaAt && el('div', { class: 'pa-callout pa-callout-danger' }, [
-      el('strong', { text: 'Desist√™ncia registrada' }),
-      el('span', { text: ` em ${fmtDate(enc.desistenciaAt)}. A encomenda foi mantida no hist√≥rico.` }),
-    ]),
-    field('Cliente', cliPicker.el),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Entrega' }), date, entrega]),
-    !enc && mergeNotice,
-    el('label', { class: 'pa-check' }, [urgenteChk, el('span', { text: 'Marcar como URGENTE (vai pro topo da lista)' })]),
-    el('h3', { class: 'pa-h3', text: 'Itens' }),
-    el('p', { class: 'pa-hint', text: 'Adicione uma cesta ou kit e escolha os produtos dentro dele. O total soma a embalagem e o conte√∫do. Para um produto fora do conjunto, adicione-o separadamente; se as cestas tiverem conte√∫dos diferentes, adicione uma linha para cada uma.' }),
-    itemsList,
-    search, results,
-    el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Total ' }), totalEl])]),
-    field('Frete (opcional)', frete),
-    field('Desconto da venda (opcional)', discount),
-    el('p', { class: 'pa-hint', text: 'Este desconto reduz o valor da venda. Um desconto negociado somente na quita√ß√£o pode ser registrado depois em Financeiro ‚Ä∫ A Receber.' }),
-    field('Observa√ß√µes (opcional)', notes),
-    enc && enc.clienteId && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'enc-client-statement', onclick: () => ctx.actions.openClientStatement(enc.clienteId) }, 'Abrir ficha do cliente'),
-    ...paymentSection.filter(Boolean),
-  ];
-
-  const cliName = enc && enc.clienteId ? (store.get('clients', enc.clienteId)?.name || 'cliente') : 'sem cliente';
-  return sheet({
-    title: enc ? 'Editar encomenda' : 'Nova encomenda',
-    rows,
-    onSave: save,
-    saveTestid: 'enc-save',
-    danger: enc ? [
-      !enc.desistenciaAt && { label: 'Marcar como desist√™ncia', className: 'pa-soft-danger', testid: 'enc-desistencia', onClick: () => confirmDesistencia(ctx, enc) },
-      { label: 'üóë Excluir encomenda', testid: 'enc-delete', onClick: () => confirmRemove(ctx, `a encomenda de ${cliName}`, (s) => s.removeEncomenda(enc.id)) },
-    ].filter(Boolean) : null,
-  });
-}
-
-// ‚îÄ‚îÄ Pagamentos (Rev 04 ‚Äî append-only; saldo/status derived; estorno corrige) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-MODALS['pagamento-add'] = (ctx, m) => pagamentoSheet(ctx, m.encomendaId);
-
-function pagamentoSheet(ctx, encomendaId) {
-  const { store } = ctx;
-  const enc = store.get('encomendas', encomendaId);
-  const cli = enc && enc.clienteId ? store.get('clients', enc.clienteId) : null;
-  const cliName = cli ? cli.name : 'Sem cliente';
-  const saldo = enc ? paymentStatus(store, enc).saldo : 0;
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'pag-date', type: 'date', value: todayInput() });
-  const valor = moneyField(saldo > 0 ? saldo : null, 'pag-valor');
-  const forma = paymentMethodSelect(store, 'pag-forma');
-
-  function save() {
-    const v = parseNum(valor.input.value);
-    if (v == null || !(v > 0)) { valor.input.focus(); return; }
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addPayment({ id: uuid(), at, encomendaId, valor: v, forma: forma.value }));
-  }
-  return sheet({
-    title: 'Registrar pagamento',
-    rows: [
-      // Client name in destaque so she confirms WHO before giving baixa (reduces operational errors).
-      el('div', { class: 'pa-pag-cli', 'data-testid': 'pag-cliente' }, [
-        el('span', { class: 'pa-muted', text: 'Pagamento de' }),
-        el('strong', { text: cliName }),
-        el('span', { class: 'pa-muted', text: enc ? `${encomendaItemsResumo(store, enc)} ¬∑ entrega ${fmtDate(enc.deliveryDate)}` : '' }),
-      ]),
-      el('p', { class: 'pa-hint', text: `Saldo a receber: ${brl(saldo)}` }),
-      field('Data', date),
-      field('Valor', valor),
-      field('Forma', forma),
-    ],
-    onSave: save,
-    saveTestid: 'pag-add',
-  });
-}
-
-// ‚îÄ‚îÄ Fichas (Rev 04 ‚Äî printable client folders, 3 per A4, via lazy pdf-lib) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-/** Group encomendas by client into ficha specs (orders + saldo) for the PDF generator. */
-function buildFichas(store, encomendas) {
-  const groups = new Map();
-  for (const e of encomendas.filter((x) => !x.desistenciaAt)) {
-    const key = e.clienteId || '__none__';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(e);
-  }
-  return [...groups.entries()].map(([key, ords]) => {
-    const client = key === '__none__' ? null : store.get('clients', key);
-    const orders = ords.slice().sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1)).map((e) => ({
-      date: fmtDate(e.deliveryDate), resumo: encomendaItemsResumo(store, e), total: e.total || 0, saldo: paymentStatus(store, e).saldo,
-    }));
-    return { client, orders, saldoTotal: orders.reduce((s, o) => s + Math.max(0, o.saldo), 0) };
-  });
-}
-
-/** Encomendas filtered by payment state, for the ficha report modes. */
-function encomendasByMode(store, mode) {
-  return store.state.encomendas.filter((e) => {
-    if (e.desistenciaAt) return false;
-    const saldo = paymentStatus(store, e).saldo;
-    if (mode === 'aberto') return saldo > 0.005;     // em aberto + parcialmente pagas
-    if (mode === 'pagas') return saldo <= 0.005;      // quitadas
-    return true;                                      // todas
-  });
-}
-
-/** A button that generates + saves a fichas PDF, with inline "Gerando‚Ä¶" feedback. */
-function fichasButton(ctx, label, getFichas, filename, testid = 'gerar-fichas') {
-  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': testid }, label);
-  btn.addEventListener('click', () => {
-    const fichas = getFichas();
-    if (!fichas.length) { window.alert('Nenhuma ficha para gerar com esse filtro.'); return; }
-    ctx.actions.openModal({ kind: 'ficha-preview', fichas, filename });
-  });
-  return btn;
-}
-
-MODALS['ficha-preview'] = (ctx, m) => fichaPreviewSheet(ctx, m);
-
-// Preview-before-print (Rev 07 #5): show the fichas' data for confer√™ncia, then "Gerar PDF".
-function fichaPreviewSheet(ctx, m) {
-  const { fichas, filename } = m;
-  const preview = el('div', { class: 'pa-ficha-prev', 'data-testid': 'ficha-preview' }, fichas.map((f) => el('div', { class: 'pa-ficha-card' }, [
-    el('div', {}, el('strong', { text: (f.client && f.client.name) || 'Sem cliente' })),
-    f.client && (f.client.phone || f.client.address) && el('div', { class: 'pa-muted', text: [f.client.phone, f.client.address].filter(Boolean).join(' ¬∑ ') }),
-    el('ul', { class: 'pa-list pa-tight' }, f.orders.slice(0, 6).map((o) => el('li', { class: 'pa-list-item' }, [
-      el('span', { class: 'pa-grow pa-muted', text: `${o.date} ¬∑ ${o.resumo}` }),
-      el('span', { class: 'pa-num', text: brl(o.total) }),
-      el('span', { class: o.saldo > 0.005 ? 'pa-badge pa-warn' : 'pa-badge pa-ok', text: o.saldo > 0.005 ? `deve ${brl(o.saldo)}` : 'pago' }),
-    ]))),
-    f.orders.length > 6 && el('p', { class: 'pa-hint', text: `+ ${f.orders.length - 6} pedido(s)‚Ä¶` }),
-    el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: 'Saldo devedor ' }), el('strong', { class: f.saldoTotal > 0.005 ? 'pa-bad' : '', text: brl(f.saldoTotal) })])]),
-  ].filter(Boolean))));
-  const genBtn = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'ficha-gerar' }, 'üñ® Gerar PDF para imprimir');
-  genBtn.addEventListener('click', async () => {
-    const orig = genBtn.textContent; genBtn.textContent = 'Gerando‚Ä¶'; genBtn.disabled = true;
-    try { await savePdf(await generateFichasPdf(fichas), filename); ctx.actions.closeModal(); }
-    catch (e) { window.alert('N√£o foi poss√≠vel gerar o PDF: ' + (e && e.message ? e.message : e)); genBtn.textContent = orig; genBtn.disabled = false; }
-  });
-  return sheet({
-    title: `Fichas ‚Äî pr√©via (${fichas.length})`,
-    rows: [
-      el('p', { class: 'pa-hint', text: 'Confira os dados antes de imprimir. O PDF sai com 3 fichas por folha, pra recortar e arquivar.' }),
-      preview,
-      el('div', { class: 'pa-row pa-form' }, [genBtn]),
-    ],
-  });
-}
-
-/** Assemble a recibo (payment proof) object from an encomenda + its derived payment state. */
-function buildRecibo(store, enc) {
-  const client = enc.clienteId ? store.get('clients', enc.clienteId) : null;
-  const st = paymentStatus(store, enc);
-  const formas = new Set(store.state.payments.filter((pg) => pg.encomendaId === enc.id && !store.isReversed('payment', pg.id) && pg.forma).map((pg) => pg.forma));
-  return {
-    numero: 'N¬∫ ' + enc.id.slice(0, 8),
-    date: fmtDate(nowIso()),
-    clientName: client ? client.name : 'Consumidor',
-    clientContato: client ? [client.phone, client.address].filter(Boolean).join(' ¬∑ ') : '',
-    items: enc.itens.map((it) => { const p = store.get('products', it.productId); const composition = bundleCompositionText(store, it); const qty = Number(it.qty) || 0; const total = orderItemGross(it); return { name: `${p ? p.name : '(produto)'}${composition ? ` (${composition})` : ''}`, qty, unitPrice: qty > 0 ? total / qty : 0, total }; }),
-    referente: `pedido de ${fmtDate(enc.deliveryDate)}`,
-    subtotal: (Number(enc.total) || 0) + (Number(enc.discount) || 0),
-    desconto: Number(enc.discount) || 0,
-    total: enc.total || 0,
-    pago: st.paid,
-    descontoQuitacao: st.discounted || 0,
-    saldo: st.saldo,
-    forma: formas.size === 1 ? [...formas][0] : undefined,
-    observacoes: enc.notes || undefined,
-    empresa: store.getConfig().empresa || undefined,
-  };
-}
-
-/** A button that generates + saves a recibo PDF for one order, with inline "Gerando‚Ä¶" feedback. */
-function reciboButton(ctx, enc) {
-  const { store } = ctx;
-  const btn = el('button', { class: 'pa-btn pa-sm', 'data-testid': 'gerar-recibo' }, 'üßæ Recibo (PDF)');
-  btn.addEventListener('click', async () => {
-    const orig = btn.textContent;
-    btn.textContent = 'Gerando‚Ä¶'; btn.disabled = true;
-    try {
-      const r = buildRecibo(store, enc);
-      const safe = (r.clientName || 'cliente').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-      await savePdf(await generateReciboPdf(r), `recibo-${safe}.pdf`);
-    } catch (e) { window.alert('N√£o foi poss√≠vel gerar o PDF: ' + (e && e.message ? e.message : e)); }
-    finally { btn.textContent = orig; btn.disabled = false; }
-  });
-  return btn;
-}
-
-// ‚îÄ‚îÄ Fiado / Quem me deve (Rev 04 ‚Äî outstanding order balances) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function fiadoPanel(ctx) {
-  const { store } = ctx;
-  const { fiadoStart: start, fiadoEnd: end, fiadoStatus: status } = ctx.view;
-  let orders = store.state.encomendas.filter((e) => !e.desistenciaAt && inDateRange(e.deliveryDate, start, end));
-  if (status === 'aberto') orders = orders.filter((e) => paymentStatus(store, e).saldo > 0.005);
-  else if (status === 'recebidos') orders = orders.filter((e) => paymentStatus(store, e).saldo <= 0.005);
-  const grouped = new Map();
-  for (const e of orders) {
-    const key = e.clienteId || '__sem__';
-    const g = grouped.get(key) || { key, orders: [], total: 0, received: 0, pending: 0 };
-    const statusRow = paymentStatus(store, e); const paid = Math.min(Number(e.total) || 0, statusRow.paid);
-    g.orders.push(e); g.total += Number(e.total) || 0; g.received += paid; g.pending += statusRow.saldo;
-    grouped.set(key, g);
-  }
-  const groups = [...grouped.values()].sort((a, b) => {
-    const an = a.key === '__sem__' ? 'zzz' : norm(store.get('clients', a.key)?.name || '');
-    const bn = b.key === '__sem__' ? 'zzz' : norm(store.get('clients', b.key)?.name || '');
-    return an.localeCompare(bn);
-  });
-  const displayValue = (g) => status === 'aberto' ? g.pending : status === 'recebidos' ? g.received : g.total;
-  const total = groups.reduce((sum, g) => sum + displayValue(g), 0);
-  const totalLabel = status === 'aberto' ? 'Total a receber' : status === 'recebidos' ? 'Total recebido' : 'Total das compras';
-  const ul = el('ul', { class: 'pa-list pa-rows' }, groups.map((g) => {
-    const cli = g.key === '__sem__' ? null : store.get('clients', g.key);
-    return el('li', { class: 'pa-row-item', 'data-testid': 'fiado-row', 'data-search': cli?.name || 'sem cliente', onclick: () => ctx.actions.openModal({ kind: 'fiado-cliente', clientKey: g.key, orderIds: g.orders.map((e) => e.id), status }) }, [
-      el('div', { class: 'pa-grow' }, [el('strong', { text: cli?.name || 'Sem cliente' }), el('span', { class: 'pa-muted', text: `${g.orders.length} compra(s) ¬∑ recebido ${brl(g.received)}` })]),
-      el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: status === 'aberto' ? 'em aberto' : status === 'recebidos' ? 'recebido' : 'total' }), el('strong', { class: g.pending > 0.005 && status !== 'recebidos' ? 'pa-bad' : '', text: brl(displayValue(g)) })]),
-      el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-    ]);
-  }));
-  const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFiadoPeriod({ fiadoStart: s, fiadoEnd: e }), 'fiado');
-  const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), onclick: () => ctx.actions.setFiadoPeriod({ fiadoStatus: key }) }, label);
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'A Receber' }),
-      orders.length > 0 && fichasButton(ctx, 'üñ® Fichas', () => buildFichas(store, orders), 'fichas-a-receber.pdf'),
-    ].filter(Boolean)),
-    el('p', { class: 'pa-hint', text: 'Compras agrupadas por cliente. Abra um cliente para conferir cada data, produto e pagamento.' }),
-    period,
-    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'A receber'), chip('recebidos', 'Recebidos'), chip('todos', 'Todos')]),
-    el('div', { class: 'pa-statgrid' }, [statCard(totalLabel, brl(total), status === 'aberto' && total > 0.005 ? 'warn' : 'ok')]),
-    groups.length ? el('div', {}, [searchInput('Buscar cliente‚Ä¶', ul, 'fiado-search'), ul]) : el('p', { class: 'pa-empty', text: 'Nenhuma compra com este filtro.' }),
-  ]);
-}
-
-MODALS['fiado-cliente'] = (ctx, m) => {
-  const { store } = ctx;
-  const cli = m.clientKey === '__sem__' ? null : store.get('clients', m.clientKey);
-  const orders = m.orderIds.map((id) => store.get('encomendas', id)).filter(Boolean).sort((a, b) => (a.deliveryDate < b.deliveryDate ? 1 : -1));
-  return sheet({
-    title: cli?.name || 'Sem cliente',
-    rows: [
-      cli && (cli.phone || cli.address) && el('p', { class: 'pa-sheet-msg', text: [cli.phone, cli.address].filter(Boolean).join(' ¬∑ ') }),
-      ...orders.map((e) => {
-        const st = paymentStatus(store, e);
-        return el('section', { class: 'pa-detail-card' }, [
-          el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: fmtDate(e.deliveryDate) }), el('span', { class: `pa-badge ${st.cls}`, text: st.label })]),
-          el('p', { class: 'pa-muted', text: encomendaItemsResumo(store, e) }),
-          el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Compra' }), el('td', { class: 'pa-num', text: brl(e.total) })]), el('tr', {}, [el('td', { text: 'Recebido' }), el('td', { class: 'pa-num', text: brl(st.paid) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Em aberto' }), el('td', { class: 'pa-num', text: brl(st.saldo) })])]),
-          st.saldo > 0.005 && el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.openModal({ kind: 'pagamento-add', encomendaId: e.id }) }, 'Registrar pagamento'),
-        ].filter(Boolean));
-      }),
-    ].filter(Boolean),
-  });
-};
-
-// ‚îÄ‚îÄ Custos vari√°veis (Rev 03 #4 ‚Äî dated expense ledger) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-// ‚îÄ‚îÄ Despesas (Rev 06 ‚Äî categorized cash-expense ledger; feeds the cash-basis result) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-// ‚îÄ‚îÄ Financeiro ERP ‚Äî t√≠tulos, baixas, caixa, compras e relat√≥rios ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-const FIN_STATUS = { aberto: ['Em aberto', 'pa-warn'], parcial: ['Parcial', 'pa-warn'], vencido: ['Vencido', 'pa-bad'], quitado: ['Quitado', 'pa-ok'], perda: ['Perda', 'pa-bad'], cancelado: ['Cancelado', ''] };
-const titleBadge = (status) => el('span', { class: `pa-badge ${FIN_STATUS[status]?.[1] || ''}`, text: FIN_STATUS[status]?.[0] || status });
-const activeFinanceCategories = (store, direction, selectedId = '') => {
-  const categories = store.state.categories.filter((c) => {
-    if (c.id === selectedId) return true;
-    if (c.archived || !c.parentId || c.cashFlowGroup === 'nao-caixa') return false;
-    if (c.direction) return c.direction === direction;
-    return direction === 'receber'
-      ? (c.nature === 'receita' || c.kind === 'receita')
-      : (['custo', 'despesa', 'investimento'].includes(c.nature || '') || ['custo', 'despesaFixa', 'despesaVariavel'].includes(c.kind));
-  }).sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
-  const unique = new Map();
-  for (const category of categories) {
-    const key = norm(category.name) || category.id;
-    const previous = unique.get(key);
-    if (!previous || category.id === selectedId || (previous.id !== selectedId && category.systemKey && !previous.systemKey)) unique.set(key, category);
-  }
-  return [...unique.values()];
-};
-const accountOptions = (store) => store.state.cashAccounts.filter((a) => !a.archived);
-const paymentMethodRecords = (store) => {
-  const configured = store.getConfig().paymentMethods;
-  const fallback = ['Pix', 'Dinheiro', 'Cart√£o de d√©bito', 'Cart√£o de cr√©dito', 'Transfer√™ncia banc√°ria', 'Boleto', 'Outro'];
-  const source = Array.isArray(configured) && configured.length ? configured : fallback;
-  return source.map((method, index) => typeof method === 'string'
-    ? { id: `forma-${index}-${norm(method).replace(/[^a-z0-9]+/g, '-')}`, name: method }
-    : method).filter((method) => method && method.name);
-};
-const paymentMethodNames = (store, includeArchived = false) => paymentMethodRecords(store)
-  .filter((method) => includeArchived || !method.archived)
-  .map((method) => method.name);
-const paymentMethodSelect = (store, testid, selected = '') => {
-  const names = paymentMethodNames(store);
-  if (selected && !names.includes(selected)) names.push(selected);
-  return el('select', { class: 'pa-input', ...(testid ? { 'data-testid': testid } : {}) }, names.map((name) => el('option', { value: name, text: name, ...(selected === name ? { selected: 'selected' } : {}) })));
-};
-const dateIso = (value) => value ? new Date(`${value}T12:00:00`).toISOString() : nowIso();
-
-function dashboardProfitLine(series) {
-  const width = 360; const height = 155; const left = 38; const right = 10; const top = 14; const bottom = 28;
-  const values = series.map((row) => Number(row.profit) || 0);
-  const minimum = Math.min(0, ...values); const maximum = Math.max(0, ...values);
-  const range = Math.max(1, maximum - minimum); const plotWidth = width - left - right; const plotHeight = height - top - bottom;
-  const x = (index) => left + (series.length <= 1 ? plotWidth / 2 : index * plotWidth / (series.length - 1));
-  const y = (value) => top + (maximum - value) * plotHeight / range;
-  const zeroY = y(0); const labelEvery = Math.max(1, Math.ceil(series.length / 6));
-  const children = [
-    svgEl('line', { x1: left, y1: zeroY, x2: width - right, y2: zeroY, stroke: 'var(--au-border)', 'stroke-width': 1 }),
-    svgEl('text', { x: left - 4, y: top + 4, 'text-anchor': 'end', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(maximum)}`),
-    svgEl('text', { x: left - 4, y: height - bottom, 'text-anchor': 'end', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(minimum)}`),
-  ];
-  if (series.length) {
-    const points = series.map((row, index) => `${x(index)},${y(Number(row.profit) || 0)}`).join(' ');
-    children.push(svgEl('polyline', { points, fill: 'none', stroke: 'var(--pa-teal)', 'stroke-width': 3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-    series.forEach((row, index) => {
-      const value = Number(row.profit) || 0;
-      children.push(svgEl('circle', { cx: x(index), cy: y(value), r: 3.5, fill: value >= 0 ? 'var(--pa-teal)' : 'var(--pa-terra)' }, [svgEl('title', {}, `${row.label}: ${brl(value)}`)]));
-      if (index % labelEvery === 0 || index === series.length - 1) children.push(svgEl('text', { x: x(index), y: height - 9, 'text-anchor': 'middle', 'font-size': 8, fill: 'var(--au-fg-soft)' }, row.label));
-    });
-  }
-  return svgEl('svg', { viewBox: `0 0 ${width} ${height}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': 'Evolu√ß√£o do lucro gerencial', 'data-testid': 'dashboard-profit-chart' }, children);
-}
-
-function dashboardProductVolume(rows) {
-  const visible = rows.slice(0, 8); const width = 360; const left = 132; const right = 38; const rowHeight = 27; const height = Math.max(82, visible.length * rowHeight + 18);
-  const maximum = Math.max(1, ...visible.map((row) => Number(row.qty) || 0)); const plotWidth = width - left - right;
-  const children = [];
-  visible.forEach((row, index) => {
-    const y = 8 + index * rowHeight; const barWidth = Math.max(2, (Number(row.qty) || 0) * plotWidth / maximum);
-    const name = row.name.length > 21 ? row.name.slice(0, 20) + '‚Ä¶' : row.name;
-    children.push(svgEl('text', { x: left - 7, y: y + 14, 'text-anchor': 'end', 'font-size': 9, fill: 'var(--au-fg)' }, name));
-    children.push(svgEl('rect', { x: left, y: y + 3, width: barWidth, height: 15, rx: 5, fill: 'var(--pa-gold)' }, [svgEl('title', {}, `${row.name}: ${fmtNum(row.qty)} unidade(s)`) ]));
-    children.push(svgEl('text', { x: Math.min(width - right + 4, left + barWidth + 5), y: y + 14, 'font-size': 9, fill: 'var(--au-fg-soft)' }, fmtNum(row.qty)));
-  });
-  if (!visible.length) children.push(svgEl('text', { x: width / 2, y: height / 2, 'text-anchor': 'middle', 'font-size': 11, fill: 'var(--au-fg-soft)' }, 'Sem vendas no per√≠odo'));
-  return svgEl('svg', { viewBox: `0 0 ${width} ${height}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': 'Volume de produtos vendidos', 'data-testid': 'dashboard-volume-chart' }, children);
-}
-
-function financeHomePanel(ctx) {
-  const quick = (icon, label, tab, tone = '') => el('button', { class: `pa-fin-home-link ${tone}`, onclick: () => tab === 'fin-ficha' ? ctx.actions.openClientStatement() : ctx.actions.setTab(tab) }, [el('span', { class: 'pa-fin-home-icon', text: icon }), el('strong', { text: label })]);
-  return el('section', { class: 'pa-card pa-fin-home' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Central financeira' }), el('h2', { text: 'O que voc√™ quer consultar?' })])]),
-    el('p', { class: 'pa-hint', text: 'Todos os atalhos financeiros ficam reunidos aqui. Cada fun√ß√£o aparece uma √∫nica vez.' }),
-    el('div', { class: 'pa-fin-home-grid' }, [
-      quick('‚ñ¶', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('‚Üì', 'Contas a receber', 'fin-receber'), quick('üë§', 'Ficha do cliente', 'fin-ficha'), quick('‚Üë', 'Contas a pagar', 'fin-pagar'),
-      quick('‚Üî', 'Fluxo de caixa', 'fin-fluxo'), quick('Ôºã', 'Lan√ßamentos', 'financeiro'), quick('‚ñ§', 'Recibo / Or√ßamento', 'fin-documentos'),
-      quick('üõí', 'Compras', 'fin-compras'), quick('‚ò∑', 'Plano de Contas', 'fin-plano'), quick('‚ñ•', 'Relat√≥rios financeiros', 'fin-relatorios'),
-      quick('‚åÅ', 'Relat√≥rio gerencial', 'relatorios'), quick('R$', 'Pre√ßos e custos', 'precos'), quick('‚âà', 'Simular pre√ßo', 'simulador'),
-    ]),
-  ]);
-}
-
-function financeDashboardPanel(ctx) {
-  const { store, view } = ctx;
-  const start = view.dashboardStart; const end = view.dashboardEnd; const presetKey = view.dashboardPreset || 'mes';
-  const flow = cashFlow(store, start, end, { projected: true });
-  const receivableRows = listTitles(store, { direction: 'receber', status: 'aberto', start, end });
-  const payableRows = listTitles(store, { direction: 'pagar', status: 'aberto', start, end });
-  const receivable = receivableRows.reduce((sum, row) => sum + row.balance, 0);
-  const payable = payableRows.reduce((sum, row) => sum + row.balance, 0);
-  const overdueReceivable = receivableRows.filter((row) => row.status === 'vencido').reduce((sum, row) => sum + row.balance, 0);
-  const overduePayable = payableRows.filter((row) => row.status === 'vencido').reduce((sum, row) => sum + row.balance, 0);
-  const decision = businessPeriodSummary(store, start, end);
-  const profitTrend = businessProfitTrend(store, start, end);
-  const preset = (key, label) => el('button', { class: 'pa-chip' + (presetKey === key ? ' pa-chip-on' : ''), 'data-testid': `dashboard-${key}`, onclick: () => { if (key === 'personalizado') ctx.actions.setDashboardView({ dashboardPreset: key }); else { const [s, e] = presetRange(key); ctx.actions.setDashboardView({ dashboardPreset: key, dashboardStart: s, dashboardEnd: e }); } } }, label);
-  const productQty = (row) => { const p = row ? store.get('products', row.id) : null; return row ? `${fmtNum(row.qty)} ${p?.saleUnit || 'un'}` : 'Sem dados'; };
-  const insight = (label, title, detail, tone = 'soft') => el('section', { class: `pa-insight pa-insight-${tone}` }, [el('span', { class: 'pa-eyebrow', text: label }), el('strong', { text: title || 'Sem dados no per√≠odo' }), detail && el('span', { class: 'pa-muted', text: detail })].filter(Boolean));
-  return el('section', { class: 'pa-card pa-fin-hero' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Vis√£o financeira e comercial' }), el('h2', { text: 'Dashboard do neg√≥cio' })])]),
-    el('div', { class: 'pa-chiprow' }, [preset('hoje', 'Hoje'), preset('semana', 'Semana'), preset('mes', 'M√™s'), preset('ano', 'Ano'), preset('personalizado', 'Per√≠odo espec√≠fico')]),
-    presetKey === 'personalizado'
-      ? periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setDashboardView({ dashboardStart: s, dashboardEnd: e }), 'dashboard')
-      : el('p', { class: 'pa-hint', text: `Per√≠odo selecionado automaticamente: ${fmtDate(`${start}T12:00:00`)} at√© ${fmtDate(`${end}T12:00:00`)}` }),
-    el('p', { class: 'pa-hint', text: 'Caixa realizado mostra somente dinheiro que entrou ou saiu. Indicadores de vendas usam a data da venda ou da entrega agendada.' }),
-    el('div', { class: 'pa-statgrid' }, [statCard('Entradas do per√≠odo', brl(flow.totalIn), 'ok'), statCard('Sa√≠das do per√≠odo', brl(flow.totalOut), flow.totalOut ? 'warn' : 'soft'), statCard('Saldo do per√≠odo', brl(flow.totalIn - flow.totalOut), flow.totalIn - flow.totalOut >= 0 ? 'navy' : 'bad')]),
-    el('div', { class: 'pa-statgrid' }, [statCard('A receber no per√≠odo', brl(receivable), receivable ? 'warn' : 'soft'), statCard('A pagar no per√≠odo', brl(payable), payable ? 'warn' : 'soft'), statCard('Vencido a receber', brl(overdueReceivable), overdueReceivable ? 'bad' : 'ok'), statCard('Vencido a pagar', brl(overduePayable), overduePayable ? 'bad' : 'ok')]),
-    el('div', { class: 'pa-dashboard-chartgrid' }, [
-      el('section', { class: 'pa-detail-card' }, [el('h3', { class: 'pa-h3', text: 'Evolu√ß√£o do lucro' }), dashboardProfitLine(profitTrend), el('p', { class: 'pa-hint', text: 'Resultado gerencial por compet√™ncia, agrupado por dia, semana ou m√™s conforme o per√≠odo.' })]),
-      el('section', { class: 'pa-detail-card' }, [el('h3', { class: 'pa-h3', text: 'Volume de produtos vendidos' }), dashboardProductVolume(decision.soldProducts), el('p', { class: 'pa-hint', text: 'Quantidade dos produtos vendidos no per√≠odo, do maior para o menor volume.' })]),
-    ]),
-    el('h3', { class: 'pa-h3', text: 'Clientes' }),
-    el('div', { class: 'pa-insight-grid' }, [
-      insight('Maior frequ√™ncia', decision.mostFrequentClient?.name, decision.mostFrequentClient ? `${decision.mostFrequentClient.orders} compra(s) ¬∑ ${brl(decision.mostFrequentClient.total)}` : null, 'teal'),
-      insight('Maior valor comprado', decision.highestValueClient?.name, decision.highestValueClient ? `${brl(decision.highestValueClient.total)} ¬∑ ${decision.highestValueClient.orders} compra(s)` : null, 'gold'),
-    ]),
-    el('h3', { class: 'pa-h3', text: 'Produtos' }),
-    el('div', { class: 'pa-insight-grid' }, [
-      insight('Mais vendido', decision.mostSoldProduct?.name, decision.mostSoldProduct ? `${productQty(decision.mostSoldProduct)} ¬∑ ${brl(decision.mostSoldProduct.revenue)}` : null, 'teal'),
-      insight('Menos vendido entre os vendidos', decision.leastSoldProduct?.name, decision.leastSoldProduct ? `${productQty(decision.leastSoldProduct)} ¬∑ ${brl(decision.leastSoldProduct.revenue)}` : null),
-      insight('Melhor margem estimada', decision.bestMarginProduct?.name, decision.bestMarginProduct ? `${pctStr(decision.bestMarginProduct.marginPct)} ¬∑ lucro estimado ${brl(decision.bestMarginProduct.profit)}` : null, 'green'),
-      insight('Menor margem estimada', decision.worstMarginProduct?.name, decision.worstMarginProduct ? `${pctStr(decision.worstMarginProduct.marginPct)} ¬∑ lucro estimado ${brl(decision.worstMarginProduct.profit)}` : null, decision.worstMarginProduct?.marginPct < 0 ? 'red' : 'soft'),
-      insight('Cestas, kits e combos', decision.baskets.length ? decision.baskets.map((p) => p.name).slice(0, 3).join(', ') : null, decision.baskets.length ? `${fmtNum(decision.basketQty)} unidade(s) ¬∑ ${brl(decision.basketRevenue)}` : null, 'gold'),
-      insight('Produtos sem vendas', String(decision.productsWithoutSales), 'Itens do cat√°logo sem venda no per√≠odo selecionado'),
-    ]),
-    decision.soldProducts.some((p) => p.qty > 0 && p.marginPct == null) && el('p', { class: 'pa-callout', text: 'Alguns produtos vendidos ainda n√£o t√™m margem calcul√°vel. Complete os pre√ßos dos insumos e a ficha t√©cnica da receita.' }),
-  ].filter(Boolean));
-}
-
-function financeTitlePanel(ctx, direction) {
-  const { store } = ctx;
-  const requestedStatus = ctx.view.finStatus === 'parcial' ? 'aberto' : ctx.view.finStatus || 'aberto';
-  const status = direction === 'pagar' && !['aberto', 'vencido', 'quitado', 'todos'].includes(requestedStatus) ? 'aberto' : requestedStatus;
-  const receivePeriod = ctx.view.finReceivePeriod || 'all';
-  const payPeriod = ctx.view.finPayPeriod || 'all';
-  const selectedPeriod = direction === 'receber' ? receivePeriod : payPeriod;
-  const start = selectedPeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveStart || '' : ctx.view.finPayStart || '';
-  const end = selectedPeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveEnd || '' : ctx.view.finPayEnd || '';
-  const receivedMethod = direction === 'receber' ? ctx.view.finMethod || '' : '';
-  const parties = direction === 'receber' ? store.state.clients : store.state.suppliers;
-  const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name }]));
-  for (const title of store.state.financeTitles.filter((t) => t.direction === direction && t.partyName)) {
-    const origin = direction === 'receber' && title.partyType === 'origem';
-    const key = origin ? `origin:${norm(title.partyName)}` : title.partyId || `name:${norm(title.partyName)}`;
-    if (!partyMap.has(key)) partyMap.set(key, { key, name: origin ? `Origem: ${title.partyName}` : title.partyName });
-  }
-  const partyChoices = [...partyMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  const personKey = (title) => title.partyType === 'origem' ? `origin:${norm(title.partyName || 'Sem origem')}` : `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
-  const financeCategoryMap = new Map();
-  if (direction === 'pagar') for (const title of store.state.financeTitles.filter((t) => t.direction === 'pagar' && !t.cancelledAt)) {
-    const category = title.categoryId ? store.get('categories', canonicalCategoryId(store, title.categoryId)) : null;
-    const name = category?.name || 'Sem categoria';
-    const key = category?.id || '__sem_categoria__';
-    if (!financeCategoryMap.has(key)) financeCategoryMap.set(key, { key, name });
-  }
-  const financeCategories = [...financeCategoryMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  const selectedParty = partyChoices.some((p) => p.key === ctx.view.finPartyId) ? ctx.view.finPartyId : undefined;
-  const selectedPersonKey = direction === 'receber' && selectedParty ? selectedParty.startsWith('name:') || selectedParty.startsWith('origin:') ? selectedParty : `name:${norm(store.get('clients', selectedParty)?.name || partyMap.get(selectedParty)?.name)}` : '';
-  const selectedCategory = financeCategories.some((c) => c.key === ctx.view.finTitleCategory) ? ctx.view.finTitleCategory : '';
-  let rows = listTitles(store, { direction, start: receivedMethod ? undefined : start, end: receivedMethod ? undefined : end, status });
-  if (selectedCategory) rows = rows.filter((row) => {
-    const category = row.title.categoryId ? store.get('categories', canonicalCategoryId(store, row.title.categoryId)) : null;
-    return (category?.id || '__sem_categoria__') === selectedCategory;
-  });
-  if (direction === 'receber') rows = rows.filter((r) => !r.title.cancelledAt);
-  const methodReceipts = (title) => titleSettlements(store, title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && norm(s.method) === norm(receivedMethod) && inDateRange(s.at, start, end));
-  if (receivedMethod) rows = rows.map((r) => ({ ...r, methodPaid: methodReceipts(r.title).reduce((sum, s) => sum + (Number(s.amount) || 0), 0) })).filter((r) => r.methodPaid > 0.005);
-  if (selectedParty) rows = rows.filter((r) => direction === 'receber' ? personKey(r.title) === selectedPersonKey : r.title.partyId === selectedParty || (!r.title.partyId && `name:${norm(r.title.partyName)}` === selectedParty));
-  const total = rows.reduce((s, r) => s + (receivedMethod ? r.methodPaid : status === 'quitado' ? r.paid : status === 'perda' ? r.writtenOff : r.balance), 0);
-  const currentClientBalance = direction === 'receber' ? listTitles(store, { direction: 'receber' }).filter((r) => !r.title.cancelledAt && (!selectedPersonKey || personKey(r.title) === selectedPersonKey)).reduce((sum, r) => sum + r.balance, 0) : 0;
-  const filteredGroups = new Map();
-  if (direction === 'receber' && status === 'todos' && receivePeriod === 'all' && !receivedMethod) {
-    for (const client of store.state.clients) {
-      const key = `name:${norm(client.name)}`;
-      if (selectedPersonKey && key !== selectedPersonKey) continue;
-      if (!filteredGroups.has(key)) filteredGroups.set(key, { key, name: client.name, kind: 'cliente', amount: 0, count: 0, date: '' });
-    }
-  }
-  if (direction === 'receber') for (const row of rows) {
-    const key = personKey(row.title);
-    const group = filteredGroups.get(key) || { key, name: store.get('clients', row.title.partyId)?.name || row.title.partyName || 'Sem cliente', kind: row.title.partyType === 'origem' ? 'origem' : 'cliente', amount: 0, count: 0, date: '' };
-    group.amount += receivedMethod ? row.methodPaid : status === 'quitado' ? row.paid : status === 'perda' ? row.writtenOff : row.balance;
-    group.count++;
-    const receiptDates = receivedMethod || status === 'quitado'
-      ? titleSettlements(store, row.title).filter((s) => !['discount', 'credit', 'loss'].includes(s.kind) && (!receivedMethod || norm(s.method) === norm(receivedMethod)) && inDateRange(s.at, start, end)).map((s) => s.at).sort()
-      : [];
-    const date = receiptDates.length ? receiptDates[receiptDates.length - 1] : row.title.dueDate;
-    if (date && (!group.date || (receivedMethod || status === 'quitado' ? date > group.date : date < group.date))) group.date = date;
-    filteredGroups.set(key, group);
-  }
-  const filteredClients = [...filteredGroups.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
-  const filteredClientList = direction === 'receber' && el('ul', { class: 'pa-list pa-rows', style: 'max-height:480px;overflow-y:auto', 'data-testid': 'fin-receber-client-balances' }, filteredClients.map((p) => el('li', {
-    class: 'pa-row-item', 'data-search': p.name, 'data-testid': 'fin-receber-client-balance', role: 'button', tabindex: '0', onclick: () => ctx.actions.openClientStatement(p.key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.openClientStatement(p.key); } },
-  }, [el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-row' }, [el('strong', { text: p.name }), p.kind === 'origem' && el('span', { class: 'pa-badge', text: 'Outra origem' })].filter(Boolean)), el('span', { class: 'pa-muted', text: p.date ? `${receivedMethod || status === 'quitado' ? '√öltimo recebimento' : 'Vencimento mais antigo'}: ${fmtDate(p.date)}${p.count > 1 ? ` ¬∑ ${p.count} lan√ßamentos` : ''}` : 'Sem lan√ßamentos' })]),
-    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: status === 'perda' ? 'Perda' : receivedMethod || status === 'quitado' ? 'Recebido' : 'Saldo' }), el('strong', { class: p.amount > 0.005 && status !== 'quitado' && !receivedMethod ? 'pa-bad' : '', text: brl(p.amount) })]), el('span', { class: 'pa-chev', text: '‚Ä∫' })])));
-  const ul = el('ul', { class: 'pa-list pa-rows' }, rows.map((r) => el('li', { class: 'pa-row-item', 'data-search': `${r.title.partyName || ''} ${r.title.description}`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: r.title.id }) }, [
-    el('div', { class: 'pa-grow' }, [el('div', { class: 'pa-enc-title' }, [el('strong', { text: r.title.partyName || r.title.description }), titleBadge(r.status)]), el('span', { class: 'pa-muted', text: `${fmtDate(r.title.dueDate)} ¬∑ ${r.title.description}${r.overdueDays ? ` ¬∑ ${r.overdueDays} dia(s) em atraso` : ''}` })]),
-    el('div', { class: 'pa-list-value' }, [el('span', { class: 'pa-muted', text: receivedMethod ? `recebido por ${receivedMethod}` : r.status === 'perda' ? 'perda' : r.status === 'quitado' ? 'recebido/pago' : 'saldo' }), el('strong', { class: r.status === 'vencido' ? 'pa-bad' : '', text: brl(receivedMethod ? r.methodPaid : r.status === 'perda' ? r.writtenOff : r.status === 'quitado' ? r.paid : r.balance) })]), el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-  ])));
-  const chip = (key, label) => el('button', { class: 'pa-chip' + (status === key ? ' pa-chip-on' : ''), onclick: () => ctx.actions.setFinanceView({ finStatus: key }) }, label);
-  const partyFilter = direction === 'receber' ? (() => {
-    const picker = el('div', { class: 'pa-cli-picker', 'data-testid': 'fin-receber-party' });
-    const selected = partyChoices.find((p) => p.key === selectedParty);
-    if (selected) {
-      picker.append(el('div', { class: 'pa-cli-chip' }, [
-        el('span', { class: 'pa-grow', text: selected.name }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os clientes e origens', 'aria-label': 'Mostrar todos os clientes e origens', onclick: () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }) }, '‚úï'),
-      ]));
-    } else {
-      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos ‚Äî digite cliente ou origem‚Ä¶', 'data-testid': 'fin-receber-party-search' });
-      const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none;max-height:240px;overflow-y:auto' });
-      search.addEventListener('input', () => {
-        const query = norm(search.value);
-        const all = query === 'todos' || query === 'todas' || query.startsWith('todos os clientes') || query.startsWith('todas as origens');
-        const matches = all ? partyChoices : query ? partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8) : [];
-        const showAll = () => ctx.actions.setFinanceView({ finPartyId: '', finStatus: 'todos', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' });
-        const allOption = all ? [el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-all', onclick: showAll, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showAll(); } } }, 'Todos os clientes e origens ‚Äî mostrar totais')] : [];
-        suggestions.replaceChildren(...allOption, ...matches.map((p) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': 'fin-receber-party-suggestion', onclick: () => ctx.actions.setFinanceView({ finPartyId: p.key }), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); ctx.actions.setFinanceView({ finPartyId: p.key }); } } }, p.name)));
-        suggestions.style.display = allOption.length || matches.length ? '' : 'none';
-      });
-      picker.append(search, suggestions);
-    }
-    return picker;
-  })() : (() => {
-    const picker = el('div', { class: 'pa-cli-picker', 'data-testid': 'fin-pagar-party' });
-    const selected = partyChoices.find((p) => p.key === selectedParty);
-    const showAll = () => ctx.actions.setFinanceView({ finPartyId: '' });
-    if (selected) {
-      picker.append(el('div', { class: 'pa-cli-chip' }, [
-        el('span', { class: 'pa-grow', text: selected.name }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Mostrar todos os fornecedores', 'aria-label': 'Mostrar todos os fornecedores', onclick: showAll }, '‚úï'),
-      ]));
-    } else {
-      const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Todos os fornecedores ‚Äî digite um nome‚Ä¶', 'data-testid': 'fin-pagar-party-search' });
-      const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
-      const selectParty = (key) => ctx.actions.setFinanceView({ finPartyId: key });
-      const option = (label, key, testid) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': testid, onclick: () => selectParty(key), onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectParty(key); } } }, label);
-      const update = () => {
-        const query = norm(search.value);
-        const all = !query || query === 'todos' || query === 'todas' || query.startsWith('todos os fornecedores');
-        const matches = all ? [] : partyChoices.filter((p) => norm(p.name).includes(query)).slice(0, 8);
-        suggestions.replaceChildren(...(all ? [option('Todos os fornecedores', '', 'fin-pagar-party-all')] : []), ...matches.map((p) => option(p.name, p.key, 'fin-pagar-party-suggestion')));
-        suggestions.style.display = all || matches.length ? '' : 'none';
-      };
-      search.addEventListener('focus', update);
-      search.addEventListener('input', update);
-      search.addEventListener('keydown', (event) => { if (event.key === 'Escape') suggestions.style.display = 'none'; });
-      picker.append(search, suggestions);
-    }
-    return picker;
-  })();
-  const catFilter = direction === 'pagar' && el('select', { class: 'pa-input', 'data-testid': 'fin-pagar-category', onchange: (e) => ctx.actions.setFinanceView({ finTitleCategory: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...financeCategories.map((c) => el('option', { value: c.key, text: c.name, ...(selectedCategory === c.key ? { selected: 'selected' } : {}) }))]);
-  const methodNames = [...new Set([...paymentMethodNames(store), ...store.state.payments.filter((p) => !store.isReversed('payment', p.id)).map((p) => p.forma), ...store.state.financeSettlements.filter((s) => !store.isReversed('financeSettlement', s.id) && !['discount', 'credit', 'loss'].includes(s.kind)).map((s) => s.method), ...store.state.cashAdjustments.filter((a) => a.kind === 'client-payment' && !store.isReversed('cashAdjustment', a.id)).map((a) => a.method)].filter(Boolean))];
-  const methodFilter = el('select', { class: 'pa-input', onchange: (e) => ctx.actions.setFinanceView({ finMethod: e.target.value, ...(e.target.value ? { finStatus: 'quitado' } : {}) }) }, [el('option', { value: '', text: 'Todas as formas' }), ...methodNames.map((m) => el('option', { value: m, text: m, ...(ctx.view.finMethod === m ? { selected: 'selected' } : {}) }))]);
-  const headerActions = el('div', { class: 'pa-row pa-form' }, [
-    direction === 'receber' && el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-client-statement-open', onclick: () => ctx.actions.openClientStatement(selectedParty || '') }, selectedPersonKey.startsWith('origin:') ? 'Ficha da origem' : 'Ficha do cliente'),
-    el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': `fin-${direction}-new`, onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction }) }, direction === 'receber' ? '+ Nova entrada' : '+ Nova sa√≠da'),
-  ].filter(Boolean));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: direction === 'receber' ? 'Clientes e receitas' : 'Fornecedores e despesas' }), el('h2', { text: direction === 'receber' ? 'Contas a Receber' : 'Contas a Pagar' })]), headerActions]),
-    el('p', { class: 'pa-hint', text: direction === 'receber' ? 'Vendas a prazo entram automaticamente. Cada cliente ou origem aparece uma vez, com o valor total do filtro. Clique no nome para ver os lan√ßamentos e pagamentos.' : 'Registre vencimentos antes de pagar. Uma compra de insumos entra aqui somente quando voc√™ escolher criar a conta a pagar no lan√ßamento.' }),
-    el('div', { class: 'pa-chiprow' }, [
-      el('button', { class: 'pa-chip' + (selectedPeriod === 'all' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-all`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' } : { finPayPeriod: 'all', finPayStart: '', finPayEnd: '' }) }, 'Per√≠odo completo'),
-      el('button', { class: 'pa-chip' + (selectedPeriod === 'custom' ? ' pa-chip-on' : ''), 'data-testid': `fin-${direction}-period-custom`, onclick: () => ctx.actions.setFinanceView(direction === 'receber' ? { finReceivePeriod: 'custom' } : { finPayPeriod: 'custom' }) }, 'Selecionar datas'),
-    ]),
-    selectedPeriod === 'custom' && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView(direction === 'receber' ? { finReceiveStart: s, finReceiveEnd: e } : { finPayStart: s, finPayEnd: e }), `fin-${direction}`),
-    selectedPeriod === 'custom' && !receivedMethod && el('p', { class: 'pa-hint', text: 'As datas limitam a lista aos t√≠tulos com vencimento no per√≠odo escolhido.' }),
-    receivedMethod && el('p', { class: 'pa-hint', text: `Mostrando recebimentos por ${receivedMethod} nas datas selecionadas. Para incluir contas ainda n√£o quitadas, escolha ‚ÄúEm aberto‚Äù ou ‚ÄúTodos‚Äù.` }),
-    el('div', { class: 'pa-filtergrid' }, [field(direction === 'receber' ? 'Cliente ou origem' : 'Fornecedor', partyFilter), direction === 'pagar' && field('Categoria', catFilter), direction === 'receber' && field('Forma recebida', methodFilter)].filter(Boolean)),
-    direction === 'pagar' && el('p', { class: 'pa-hint', text: 'Em aberto inclui contas pendentes, parcialmente pagas e vencidas.' }),
-    el('div', { class: 'pa-chiprow' }, [chip('aberto', 'Em aberto'), chip('vencido', 'Vencidos'), chip('quitado', 'Quitados'), direction === 'receber' && chip('perda', 'Perdas'), chip('todos', 'Todos')].filter(Boolean)),
-    direction === 'receber' && (receivePeriod === 'custom' || status !== 'aberto' || receivedMethod) && el('p', { class: 'pa-hint', text: `Saldo em aberto em todo o hist√≥rico: ${brl(currentClientBalance)}. Esse valor n√£o muda com os filtros de datas, situa√ß√£o ou forma recebida.` }),
-    el('div', { class: 'pa-statgrid' }, [statCard(direction === 'receber' ? receivedMethod ? `Recebido por ${receivedMethod} no filtro` : status === 'perda' ? 'Perdas no filtro' : status === 'quitado' ? 'Recebido no filtro' : 'Saldo do filtro' : status === 'quitado' ? 'Total pago' : 'Saldo do filtro', brl(total), total && status !== 'quitado' && !receivedMethod ? 'warn' : 'ok')]),
-    direction === 'receber' && el('h3', { class: 'pa-h3', text: `Clientes e origens no filtro (${filteredClients.length})` }),
-    direction === 'receber' && (filteredClients.length ? el('div', {}, [!selectedParty && searchInput('Buscar na lista de clientes e origens‚Ä¶', filteredClientList, 'fin-receber-client-list-search'), filteredClientList].filter(Boolean)) : el('p', { class: 'pa-empty', text: 'Nenhum cliente ou origem com lan√ßamentos neste filtro.' })),
-    direction === 'pagar' && (rows.length ? ul : el('p', { class: 'pa-empty', text: 'Nenhum t√≠tulo com este filtro.' })),
-  ]);
-}
-const financeReceivablePanel = (ctx) => financeTitlePanel(ctx, 'receber');
-const financePayablePanel = (ctx) => financeTitlePanel(ctx, 'pagar');
-
-function financeCommercialDocumentsPanel(ctx) {
-  const company = ctx.store.getConfig().empresa || {};
-  const missing = [!company.nome && 'nome', !company.cnpj && 'CNPJ', !company.telefone && 'telefone', !company.logo && 'logo'].filter(Boolean);
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Documentos comerciais' }), el('h2', { text: 'Recibo / Or√ßamento' })]),
-    ]),
-    el('p', { class: 'pa-hint', text: 'Gere documentos em PDF A4 para clientes cadastrados ou pessoas informadas somente no momento. Emitir o PDF n√£o altera vendas, pagamentos nem o Fluxo de Caixa.' }),
-    missing.length
-      ? el('p', { class: 'pa-callout', text: `Complete em Ajustes os seguintes dados que ainda faltam no cabe√ßalho: ${missing.join(', ')}.` })
-      : el('p', { class: 'pa-status', text: 'Dados e identidade da empresa prontos para os documentos.' }),
-    el('div', { class: 'pa-actiongrid' }, [
-      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'commercial-budget-new', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'orcamento' }) }, 'Novo or√ßamento'),
-      el('button', { class: 'pa-btn', 'data-testid': 'commercial-receipt-new', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo' }) }, 'Novo recibo n√£o fiscal'),
-    ]),
-    el('div', { class: 'pa-insight-grid' }, [
-      el('section', { class: 'pa-insight pa-insight-teal' }, [el('span', { class: 'pa-eyebrow', text: 'Or√ßamento' }), el('strong', { text: 'Proposta para aprova√ß√£o' }), el('span', { class: 'pa-muted', text: 'Itens, quantidades, pre√ßos, validade e condi√ß√£o de pagamento.' })]),
-      el('section', { class: 'pa-insight pa-insight-gold' }, [el('span', { class: 'pa-eyebrow', text: 'Recibo n√£o fiscal' }), el('strong', { text: 'Comprovante de pagamento' }), el('span', { class: 'pa-muted', text: 'Valor total, valor pago, saldo a pagar e forma ou condi√ß√£o de pagamento.' })]),
-    ]),
-  ]);
-}
-
-function commercialDefaultValidity() {
-  const d = new Date(); d.setDate(d.getDate() + 7);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-MODALS['commercial-document'] = (ctx, modal) => commercialDocumentSheet(ctx, modal);
-
-function commercialDocumentSheet(ctx, modal = {}) {
-  const { store } = ctx;
-  const order = modal.orderId ? store.get('encomendas', modal.orderId) : null;
-  const initialType = modal.type === 'recibo' ? 'recibo' : 'orcamento';
-  const initialClientId = modal.clientId || order?.clienteId || '';
-  const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
-  const type = el('select', { class: 'pa-input', 'data-testid': 'commercial-type' }, [
-    el('option', { value: 'orcamento', text: 'Or√ßamento', ...(initialType === 'orcamento' ? { selected: 'selected' } : {}) }),
-    el('option', { value: 'recibo', text: 'Recibo n√£o fiscal', ...(initialType === 'recibo' ? { selected: 'selected' } : {}) }),
-  ]);
-  const date = el('input', { class: 'pa-input', 'data-testid': 'commercial-date', type: 'date', value: todayInput() });
-  const validity = el('input', { class: 'pa-input', 'data-testid': 'commercial-validity', type: 'date', value: commercialDefaultValidity() });
-  const client = el('select', { class: 'pa-input', 'data-testid': 'commercial-client' }, [
-    el('option', { value: '', text: 'Pessoa n√£o cadastrada' }),
-    ...clients.map((c) => el('option', { value: c.id, text: `${clientLabel(c)}${c.inactive ? ' (inativo)' : ''}`, ...(c.id === initialClientId ? { selected: 'selected' } : {}) })),
-  ]);
-  const manualName = el('input', { class: 'pa-input', 'data-testid': 'commercial-client-name', type: 'text', placeholder: 'Nome da pessoa', value: modal.clientName || '' });
-  const manualPhone = el('input', { class: 'pa-input', 'data-testid': 'commercial-client-phone', type: 'tel', placeholder: 'Telefone (opcional)' });
-  const manualAddress = el('input', { class: 'pa-input', 'data-testid': 'commercial-client-address', type: 'text', placeholder: 'Endere√ßo (opcional)' });
-  const manualFields = el('div', { class: 'pa-filtergrid' }, [field('Nome', manualName), field('Telefone', manualPhone), field('Endere√ßo', manualAddress)]);
-  const registeredInfo = el('p', { class: 'pa-sheet-msg' });
-  const itemsBox = el('div', { 'data-testid': 'commercial-items' });
-  const totalPreview = el('div', { class: 'pa-statgrid', 'data-testid': 'commercial-totals' });
-  const paid = moneyField(order ? Math.min(Number(order.total) || 0, Math.max(0, store.paidFor(order.id))) : 0, 'commercial-paid');
-  const condition = el('input', { class: 'pa-input', 'data-testid': 'commercial-condition', type: 'text', placeholder: 'Ex.: Pix √† vista ou 50% na encomenda e 50% na entrega' });
-  const notes = el('textarea', { class: 'pa-input', 'data-testid': 'commercial-notes', rows: '3', placeholder: 'Observa√ß√µes adicionais (opcional)' });
-  if (order?.notes) notes.value = order.notes;
-  const receiptFields = el('div', {}, [field('Valor pago', paid)]);
-  const budgetFields = el('div', {}, [field('Validade do or√ßamento', validity)]);
-  const lines = [];
-
-  const currentClient = () => client.value ? store.get('clients', client.value) : null;
-  function renderClient() {
-    const selected = currentClient();
-    manualFields.style.display = selected ? 'none' : '';
-    registeredInfo.style.display = selected ? '' : 'none';
-    registeredInfo.textContent = selected ? [selected.name, selected.phone, selected.address].filter(Boolean).join(' ¬∑ ') : '';
-  }
-  function documentTotal() {
-    return lines.reduce((sum, line) => sum + (parseNum(line.qty.value) || 0) * (parseNum(line.price.input.value) || 0), 0);
-  }
-  function renderTotals() {
-    const total = documentTotal(); const paidValue = Math.max(0, parseNum(paid.input.value) || 0); const balance = Math.max(0, total - paidValue);
-    totalPreview.replaceChildren(
-      statCard('Total do documento', brl(total), 'navy'),
-      type.value === 'recibo' ? statCard('Valor pago', brl(paidValue), 'ok') : statCard('Validade', validity.value ? fmtDate(`${validity.value}T12:00:00`) : 'N√£o informada', 'soft'),
-      type.value === 'recibo' ? statCard('A pagar', brl(balance), balance > 0.005 ? 'warn' : 'ok') : statCard('Situa√ß√£o', 'Or√ßamento', 'teal'),
-    );
-  }
-  function renderType() {
-    budgetFields.style.display = type.value === 'orcamento' ? '' : 'none';
-    receiptFields.style.display = type.value === 'recibo' ? '' : 'none';
-    renderTotals();
-  }
-  function addLine(seed = {}) {
-    const seedProduct = seed.productId ? store.get('products', seed.productId) : null;
-    const choices = store.state.products.filter((p) => productIsActive(p) || p.id === seed.productId).slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-    const product = el('select', { class: 'pa-input', 'data-testid': 'commercial-item-product' }, [
-      el('option', { value: '', text: 'Outro item / descri√ß√£o livre' }),
-      ...choices.map((p) => el('option', { value: p.id, text: p.name, ...(p.id === seed.productId ? { selected: 'selected' } : {}) })),
-    ]);
-    const description = el('input', { class: 'pa-input', 'data-testid': 'commercial-item-name', type: 'text', placeholder: 'Descri√ß√£o do item', value: seed.name || seedProduct?.name || '' });
-    const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'commercial-item-qty', type: 'text', inputmode: 'decimal', value: String(seed.qty ?? 1).replace('.', ',') });
-    const price = moneyField(seed.unitPrice ?? (seedProduct ? sellingPrice(store, seedProduct.id) : null), 'commercial-item-price');
-    const line = { product, description, qty, price, row: null };
-    const remove = el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); if (!lines.length) addLine(); renderTotals(); } }, 'Remover item');
-    line.row = el('section', { class: 'pa-detail-card' }, [
-      field('Produto cadastrado (opcional)', product), field('Descri√ß√£o', description),
-      el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Valor unit√°rio', price)]), remove,
-    ]);
-    product.addEventListener('change', () => {
-      const selected = product.value ? store.get('products', product.value) : null;
-      if (selected) { description.value = selected.name; price.input.value = fmtMoneyInput(sellingPrice(store, selected.id)); }
-      renderTotals();
-    });
-    qty.addEventListener('input', renderTotals); price.input.addEventListener('input', renderTotals);
-    lines.push(line); itemsBox.append(line.row); renderTotals();
-  }
-
-  const orderGross = order ? (order.itens || []).reduce((sum, item) => sum + orderItemGross(item), Number(order.frete) || 0) : 0;
-  const orderFactor = orderGross > 0 ? Math.max(0, Number(order.total) || 0) / orderGross : 1;
-  const orderItems = order ? (order.itens || []).map((item) => {
-    const composition = bundleCompositionText(store, item);
-    const qty = Number(item.qty) || 0;
-    return { productId: item.productId, name: `${store.get('products', item.productId)?.name || '(produto removido)'}${composition ? ` (${composition})` : ''}`, qty, unitPrice: (qty > 0 ? orderItemGross(item) / qty : 0) * orderFactor };
-  }) : [];
-  if (order && Number(order.frete) > 0) orderItems.push({ name: 'Frete / entrega', qty: 1, unitPrice: Number(order.frete) * orderFactor });
-  if (orderItems.length) orderItems.forEach(addLine); else addLine();
-  client.addEventListener('change', renderClient); type.addEventListener('change', renderType);
-  validity.addEventListener('change', renderTotals); paid.input.addEventListener('input', renderTotals);
-  renderClient(); renderType();
-
-  async function generate(event) {
-    const selected = currentClient(); const clientName = selected?.name || manualName.value.trim();
-    if (!clientName) { window.alert('Informe o nome do cliente.'); manualName.focus(); return; }
-    const documentItems = lines.map((line) => {
-      const qtyValue = parseNum(line.qty.value); const unitPrice = parseNum(line.price.input.value);
-      return { name: line.description.value.trim(), qty: qtyValue, unitPrice, total: (qtyValue || 0) * (unitPrice || 0) };
-    });
-    if (!documentItems.length || documentItems.some((item) => !item.name || !(item.qty > 0) || item.unitPrice == null || item.unitPrice < 0)) {
-      window.alert('Confira a descri√ß√£o, quantidade e valor de todos os itens.'); return;
-    }
-    const total = documentItems.reduce((sum, item) => sum + item.total, 0);
-    const paidValue = type.value === 'recibo' ? (parseNum(paid.input.value) ?? 0) : 0;
-    if (paidValue < 0 || paidValue > total + 0.005) { window.alert('O valor pago n√£o pode ser negativo nem maior que o total.'); return; }
-    const button = event?.currentTarget; const old = button?.textContent;
-    if (button) { button.textContent = 'Gerando PDF‚Ä¶'; button.disabled = true; }
-    try {
-      const stamp = `${String(date.value || todayInput()).replaceAll('-', '')}-${String(Date.now()).slice(-6)}`;
-      const prefix = type.value === 'orcamento' ? 'ORC' : 'REC';
-      const spec = {
-        type: type.value, numero: `${prefix}-${stamp}`, date: date.value || todayInput(), validUntil: type.value === 'orcamento' ? validity.value : undefined,
-        clientName, clientPhone: selected?.phone || manualPhone.value.trim(), clientAddress: selected?.address || manualAddress.value.trim(),
-        items: documentItems, total, paid: paidValue, balance: Math.max(0, total - paidValue), paymentCondition: condition.value.trim(), notes: notes.value.trim(),
-        empresa: store.getConfig().empresa || {},
-      };
-      const safe = norm(clientName).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cliente';
-      await savePdf(await generateCommercialDocumentPdf(spec), `${type.value}-${safe}-${date.value || todayInput()}.pdf`);
-    } catch (error) { window.alert('N√£o foi poss√≠vel gerar o documento: ' + ((error && error.message) || error)); }
-    finally { if (button) { button.textContent = old; button.disabled = false; } }
-  }
-
-  return sheet({
-    title: 'Gerar recibo / or√ßamento',
-    rows: [
-      el('p', { class: 'pa-hint', text: 'O documento n√£o faz lan√ßamento financeiro. Confira os dados antes de gerar o PDF.' }),
-      el('div', { class: 'pa-filtergrid' }, [field('Tipo de documento', type), field('Data', date)]),
-      field('Cliente', client), registeredInfo, manualFields,
-      el('h3', { class: 'pa-h3', text: 'Itens' }), itemsBox,
-      el('button', { class: 'pa-btn pa-sm', 'data-testid': 'commercial-item-add', type: 'button', onclick: () => addLine() }, '+ Adicionar item'),
-      budgetFields, receiptFields, field('Condi√ß√£o ou forma de pagamento', condition), field('Observa√ß√µes', notes), totalPreview,
-    ],
-    onSave: generate, saveTestid: 'commercial-pdf', saveLabel: 'Gerar PDF A4',
-  });
-}
-
-MODALS['client-statement'] = (ctx, m) => clientStatementSheet(ctx, m);
-MODALS['client-statement-payment'] = (ctx, m) => clientStatementPaymentSheet(ctx, m.clientId);
-
-function clientStatementPaymentSheet(ctx, clientId) {
-  const { store } = ctx; const client = store.get('clients', clientId);
-  if (!client) return sheet({ title: 'Cliente n√£o encontrado', rows: [] });
-  const openTitles = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
-    .map((title) => ({ title, balance: titleState(store, title).balance }))
-    .filter((row) => row.balance > 0.005)
-    .sort((a, b) => String(a.title.issuedAt || '').localeCompare(String(b.title.issuedAt || '')));
-  const totalOpen = Math.round(openTitles.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'client-payment-date' });
-  const amount = moneyField(totalOpen || null, 'client-payment-amount');
-  const method = paymentMethodSelect(store, 'client-payment-method');
-  const account = el('select', { class: 'pa-input', 'data-testid': 'client-payment-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
-  const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observa√ß√£o (opcional)' });
-  amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
-  function save() {
-    const value = Math.round((parseNum(amount.input.value) || 0) * 100) / 100;
-    if (value <= 0) { amount.input.focus(); return; }
-    const latestOpen = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
-      .map((title) => ({ title, balance: titleState(store, title).balance }))
-      .filter((row) => row.balance > 0.005)
-      .sort((a, b) => String(a.title.issuedAt || '').localeCompare(String(b.title.issuedAt || '')));
-    const currentTotal = Math.round(latestOpen.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
-    if (value + 0.005 < currentTotal) {
-      amount.input.setCustomValidity(`Para quitar todas as faturas, informe pelo menos ${brl(currentTotal)}. Para uma fatura, use ‚ÄúQuitar esta fatura‚Äù na ficha.`);
-      amount.input.reportValidity(); return;
-    }
-    const at = dateIso(date.value);
-    ctx.actions.mutate((s) => {
-      const paymentId = uuid();
-      const creditAmount = Math.max(0, Math.round((value - currentTotal) * 100) / 100);
-      s.addCashAdjustment({ id: paymentId, at, kind: 'client-payment', direction: 'entrada', clientId, amount: value, creditAmount, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Pagamento total de ${clientLabel(client)}` });
-      for (const row of latestOpen) s.addFinanceSettlement({ id: uuid(), at, titleId: row.title.id, amount: row.balance, kind: 'client-payment-allocation', paymentId, method: method.value, notes: 'Quita√ß√£o pelo pagamento total do cliente' });
-    });
-    if (ctx.view.tab !== 'fin-ficha') ctx.actions.openModal({ kind: 'client-statement', clientId });
-  }
-  return sheet({ title: 'Registrar pagamento total', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. Registre um √∫nico recebimento para quitar todas as faturas em aberto. O excedente vira cr√©dito para a pr√≥xima compra.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Total em aberto: ' }), el('strong', { text: brl(totalOpen) })]), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observa√ß√£o', notes)], onSave: save, saveTestid: 'client-payment-save' });
-}
-
-function financeClientStatementPanel(ctx) {
-  return clientStatementSheet(ctx, { clientId: ctx.view.finStatementClientId }, true);
-}
-
-function clientStatementSheet(ctx, modal = {}, inline = false) {
-  const { store } = ctx;
-  let clientId = '';
-  const statementView = (rows) => inline ? el('section', { class: 'pa-card', 'data-testid': 'fin-client-statement-panel' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Clientes e receitas' }), el('h2', { text: clientId.startsWith('origin:') ? 'Ficha da origem' : 'Ficha do cliente' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('fin-receber') }, '‚Üê Contas a receber')]),
-    ...rows,
-  ]) : sheet({ title: clientId.startsWith('origin:') ? 'Ficha financeira da origem' : 'Ficha financeira do cliente', rows });
-  const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
-  const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyType !== 'origem' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
-    .filter(([key]) => !clients.some((c) => `name:${norm(c.name)}` === key))
-    .map(([id, name]) => ({ id, name }));
-  const originParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyType === 'origem' && t.partyName && !t.cancelledAt).map((t) => [`origin:${norm(t.partyName)}`, t.partyName])).entries()]
-    .map(([id, name]) => ({ id, name }));
-  if (!clients.length && !namedParties.length && !originParties.length) return statementView([el('p', { class: 'pa-empty', text: 'Cadastre um cliente ou lance uma entrada para consultar a ficha financeira.' })]);
-
-  const hasNamedParty = (id) => String(id || '').startsWith('name:') && (clients.some((c) => `name:${norm(c.name)}` === id) || namedParties.some((p) => p.id === id));
-  clientId = clients.some((c) => c.id === modal.clientId) || hasNamedParty(modal.clientId) || originParties.some((p) => p.id === modal.clientId) ? modal.clientId : '';
-  const registeredClientIds = () => clientId.startsWith('origin:') ? [] : clientId.startsWith('name:') ? clients.filter((c) => `name:${norm(c.name)}` === clientId).map((c) => c.id) : clientId ? [clientId] : [];
-  const clientPicker = el('div', { class: 'pa-cli-picker', 'data-testid': 'client-statement-client' });
-  const mode = el('select', { class: 'pa-input', 'data-testid': 'client-statement-mode' }, [el('option', { value: 'geral', text: 'Geral ‚Äî todo o hist√≥rico' }), el('option', { value: 'periodo', text: 'Per√≠odo espec√≠fico' })]);
-  const start = el('input', { class: 'pa-input', 'data-testid': 'client-statement-start', type: 'date', value: ctx.view.finStart || '' });
-  const end = el('input', { class: 'pa-input', 'data-testid': 'client-statement-end', type: 'date', value: ctx.view.finEnd || '' });
-  const period = el('div', { class: 'pa-period', 'data-testid': 'client-statement-period', style: 'display:none' }, [field('Data inicial', start), el('span', { class: 'pa-period-arrow', text: 'at√©' }), field('Data final', end)]);
-  const preview = el('div', { 'data-testid': 'client-statement-preview' });
-  const print = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'client-statement-pdf' }, 'Gerar PDF A4 para imprimir');
-
-  const currentStatement = () => clientFinancialStatement(store, clientId, mode.value === 'periodo' ? start.value : '', mode.value === 'periodo' ? end.value : '');
-  const movementRow = (row) => {
-    const purchase = row.type === 'purchase'; const charge = row.type === 'charge'; const payment = row.type === 'payment'; const discountRow = row.type === 'discount'; const creditRow = row.type === 'credit-application'; const lossRow = row.type === 'loss';
-    return el('section', { class: 'pa-detail-card', 'data-testid': `client-statement-${row.type}` }, [
-      el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: payment ? 'Pagamento' : discountRow ? 'Desconto na quita√ß√£o' : creditRow ? 'Cr√©dito utilizado' : lossRow ? 'Perda registrada' : purchase ? 'Compra / encomenda' : 'Valor a receber' }), el('span', { class: 'pa-muted', text: fmtDate(row.at) })]),
-        el('strong', { class: payment ? 'pa-positive' : discountRow || creditRow || lossRow ? 'pa-warn' : 'pa-num', text: `${payment ? '+ ' : discountRow || creditRow || lossRow ? '‚àí ' : ''}${brl(row.amount)}` }),
-      ]),
-      purchase && el('ul', { class: 'pa-list pa-tight' }, row.items.map((item) => el('li', { class: 'pa-list-item' }, [
-        el('span', { class: 'pa-grow', text: `${fmtNum(item.qty)}√ó ${item.name}` }),
-        el('span', { class: 'pa-muted', text: `${brl(item.unitPrice)} cada` }),
-        el('strong', { class: 'pa-num', text: brl(item.total) }),
-      ]))),
-      purchase && el('p', { class: 'pa-muted', text: [`Entrega: ${row.deliveryMethod === 'motoboy' ? 'Motoboy' : 'Retirada'}`, row.freight > 0 && `Frete ${brl(row.freight)}`, row.notes && `Obs.: ${row.notes}`].filter(Boolean).join(' ¬∑ ') }),
-      purchase && row.discount > 0 && el('p', { class: 'pa-badge pa-ok', text: `Desconto da venda: ${brl(row.discount)}` }),
-      !purchase && el('p', { class: 'pa-muted', text: `${row.description}${payment && row.method ? ` ¬∑ ${row.method}` : ''}` }),
-      (purchase || charge) && el('div', { class: 'pa-row' }, [
-        el('span', { class: 'pa-muted pa-grow', text: `Recebido ${brl(row.paid)}` }),
-        row.discounted > 0.005 && el('span', { class: 'pa-muted', text: `Desconto ${brl(row.discounted)}` }),
-        row.credited > 0.005 && el('span', { class: 'pa-muted', text: `Cr√©dito usado ${brl(row.credited)}` }),
-        row.writtenOff > 0.005 && el('span', { class: 'pa-muted', text: `Perda ${brl(row.writtenOff)}` }),
-        el('span', { class: row.balance > 0.005 ? 'pa-badge pa-warn' : row.writtenOff > 0.005 ? 'pa-badge pa-bad' : 'pa-badge pa-ok', text: row.balance > 0.005 ? `em aberto ${brl(row.balance)}` : row.writtenOff > 0.005 ? 'baixa por perda' : 'quitado' }),
-        row.titleId && row.balance > 0.005 && el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'client-statement-settle-title', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: row.titleId, fullOnly: true }) }, 'Quitar esta fatura'),
-        row.titleId && row.balance > 0.005 && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-loss-title', onclick: () => ctx.actions.openModal({ kind: 'finance-title-loss', id: row.titleId }) }, 'Registrar como perda'),
-        row.orderId && row.clientId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-order-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: row.clientId, orderId: row.orderId }) }, 'Gerar recibo'),
-        row.orderId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: row.orderId }) }, 'Abrir encomenda'),
-        row.titleId && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'client-statement-open-title', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: row.titleId }) }, 'Abrir lan√ßamento'),
-      ].filter(Boolean)),
-    ].filter(Boolean));
-  };
-  function renderStatement() {
-    details.style.display = clientId ? '' : 'none';
-    if (!clientId) return;
-    const actionClientIds = registeredClientIds();
-    payment.style.display = actionClientIds.length === 1 ? '' : 'none';
-    receipt.style.display = actionClientIds.length === 1 ? '' : 'none';
-    period.style.display = mode.value === 'periodo' ? '' : 'none';
-    const statement = currentStatement();
-    const label = mode.value === 'periodo' ? 'no per√≠odo' : 'no hist√≥rico geral';
-    preview.replaceChildren(
-      el('div', { class: 'pa-statgrid' }, [statCard(`${statement.isOrigin ? 'Lan√ßamentos' : 'Compras'} ${label}`, brl(statement.periodPurchases), 'navy'), statCard(`Pagamentos ${label}`, brl(statement.periodPayments), 'ok'), statement.periodLosses > 0.005 && statCard(`Perdas ${label}`, brl(statement.periodLosses), 'bad'), statCard('Saldo atual', brl(statement.currentBalance), statement.currentBalance > 0.005 ? 'bad' : 'ok'), !statement.isOrigin && statCard('Cr√©dito dispon√≠vel', brl(statement.creditBalance), 'ok')].filter(Boolean)),
-      el('p', { class: 'pa-hint', text: statement.isOrigin ? 'O saldo atual considera todo o hist√≥rico, mesmo quando a visualiza√ß√£o est√° limitada a um per√≠odo.' : 'O saldo atual e o cr√©dito dispon√≠vel consideram todo o hist√≥rico, mesmo quando a visualiza√ß√£o est√° limitada a um per√≠odo.' }),
-      statement.movements.length ? el('div', {}, statement.movements.slice().reverse().map(movementRow)) : el('p', { class: 'pa-empty', text: statement.isOrigin ? 'Nenhum lan√ßamento ou pagamento com este filtro.' : 'Nenhuma compra ou pagamento com este filtro.' }),
-    );
-  }
-  function renderClientPicker() {
-    const selected = clientId && (store.get('clients', clientId) || (clientId.startsWith('origin:') ? { name: `Origem: ${originParties.find((p) => p.id === clientId)?.name || clientId.slice(7)}` } : clientId.startsWith('name:') ? { name: clients.find((c) => `name:${norm(c.name)}` === clientId)?.name || namedParties.find((p) => p.id === clientId)?.name || clientId.slice(5) } : null));
-    if (selected) {
-      clientPicker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [el('span', { class: 'pa-grow', text: clientLabel(selected) }), el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Trocar cliente ou origem', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: '' }); else { clientId = ''; preview.replaceChildren(); renderClientPicker(); renderStatement(); } } }, '‚úï')]));
-      return;
-    }
-    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite cliente ou origem‚Ä¶', 'data-testid': 'client-statement-search' });
-    const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
-    search.addEventListener('input', () => {
-      const query = norm(search.value);
-      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query)), ...originParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
-      results.style.display = matches.length ? '' : 'none';
-      results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: c.id }); else { clientId = c.id; renderClientPicker(); renderStatement(); } } }, c.id.startsWith('origin:') ? `Origem: ${c.name}` : clientLabel(c))));
-    });
-    clientPicker.replaceChildren(search, results);
-  }
-  mode.addEventListener('change', renderStatement); start.addEventListener('change', renderStatement); end.addEventListener('change', renderStatement);
-  print.addEventListener('click', async () => {
-    const statement = currentStatement(); const original = print.textContent; print.textContent = 'Gerando PDF‚Ä¶'; print.disabled = true;
-    try {
-      const safe = norm(statement.client?.name || 'cliente').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cliente';
-      const suffix = statement.start || statement.end ? `${statement.start || 'inicio'}-${statement.end || 'hoje'}` : 'geral';
-      await savePdf(await generateClientStatementPdf(statement), `ficha-financeira-${safe}-${suffix}.pdf`);
-    } catch (error) { window.alert('N√£o foi poss√≠vel gerar a ficha financeira: ' + ((error && error.message) || error)); }
-    finally { print.textContent = original; print.disabled = false; }
-  });
-  const receipt = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-receipt', onclick: () => ctx.actions.openModal({ kind: 'commercial-document', type: 'recibo', clientId: registeredClientIds()[0] }) }, 'Novo recibo para o cliente');
-  const payment = el('button', { class: 'pa-btn pa-grow', 'data-testid': 'client-statement-add-payment', onclick: () => ctx.actions.openModal({ kind: 'client-statement-payment', clientId: registeredClientIds()[0] }) }, 'Registrar pagamento total');
-  const details = el('div', {}, [field('Visualiza√ß√£o', mode), period, preview, el('div', { class: 'pa-sheet-actions' }, [payment, receipt, print])]);
-  renderClientPicker();
-  renderStatement();
-  return statementView([el('p', { class: 'pa-hint', text: 'Busque um cliente ou uma origem para consultar os lan√ßamentos e pagamentos.' }), field('Cliente ou origem', clientPicker), details]);
-}
-
-function financeClientPicker(store, initialId = '', testid = 'fin-title-client') {
-  const clients = store.state.clients.filter((client) => !client.inactive || client.id === initialId)
-    .sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
-  let clientId = clients.some((client) => client.id === initialId) ? initialId : '';
-  const picker = el('div', { class: 'pa-cli-picker', 'data-testid': testid });
-  const render = () => {
-    const selected = clients.find((client) => client.id === clientId);
-    if (selected) {
-      picker.replaceChildren(el('div', { class: 'pa-cli-chip' }, [
-        el('span', { class: 'pa-grow', text: clientLabel(selected) }),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', title: 'Trocar cliente', 'aria-label': 'Trocar cliente', onclick: () => { clientId = ''; render(); } }, '‚úï'),
-      ]));
-      return;
-    }
-    const search = el('input', { class: 'pa-input pa-search', type: 'search', placeholder: 'Digite o nome do cliente‚Ä¶', 'data-testid': `${testid}-search` });
-    const suggestions = el('ul', { class: 'pa-list pa-tight pa-suggest', role: 'listbox', style: 'display:none;max-height:240px;overflow-y:auto' });
-    search.addEventListener('input', () => {
-      const query = norm(search.value);
-      const matches = query ? clients.filter((client) => norm(clientSearchText(client)).includes(query)).slice(0, 8) : [];
-      suggestions.replaceChildren(...matches.map((client) => el('li', { class: 'pa-row-item', role: 'option', tabindex: '0', 'data-testid': `${testid}-suggestion`, onclick: () => { clientId = client.id; render(); }, onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); clientId = client.id; render(); } } }, clientLabel(client))));
-      suggestions.style.display = matches.length ? '' : 'none';
-    });
-    picker.replaceChildren(search, suggestions);
-  };
-  render();
-  return { element: picker, selected: () => clients.find((client) => client.id === clientId), focus: () => picker.querySelector('input')?.focus() };
-}
-
-MODALS['finance-title-add'] = (ctx, m) => financeTitleAddSheet(ctx, m.direction || 'pagar');
-function financeTitleAddSheet(ctx, direction) {
-  const { store } = ctx; const isReceive = direction === 'receber';
-  const issue = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-title-issue' }); const due = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-title-due' });
-  const suppliers = store.state.suppliers.filter((s) => !s.archived);
-  const supplier = el('select', { class: 'pa-input', 'data-testid': 'fin-title-party' }, [el('option', { value: '', text: 'Sem fornecedor / outro' }), ...suppliers.map((p) => el('option', { value: p.id, text: p.name }))]);
-  const sourceType = el('select', { class: 'pa-input', 'data-testid': 'fin-title-source-type' }, [el('option', { value: 'cliente', text: 'Cliente cadastrado' }), el('option', { value: 'origem', text: 'Outra origem' })]);
-  const clientPicker = financeClientPicker(store);
-  const originName = el('input', { class: 'pa-input', type: 'text', placeholder: 'Ex.: feira, curso, parceria', 'data-testid': 'fin-title-origin-name' });
-  const sourceFields = el('div', {}, [field('Cliente', clientPicker.element), el('p', { class: 'pa-hint', text: 'Digite o nome e escolha uma sugest√£o para vincular ao cadastro.' })]);
-  const originFields = el('div', { style: 'display:none' }, [field('Nome da origem', originName), el('p', { class: 'pa-hint', text: 'Identifique de onde vir√° o valor. Esta entrada ficar√° separada das fichas de clientes.' })]);
-  const sourceError = el('p', { class: 'pa-sheet-msg', role: 'alert' });
-  sourceType.addEventListener('change', () => {
-    sourceError.textContent = '';
-    sourceFields.style.display = sourceType.value === 'cliente' ? '' : 'none';
-    originFields.style.display = sourceType.value === 'origem' ? '' : 'none';
-  });
-  const description = el('input', { class: 'pa-input', type: 'text', placeholder: isReceive ? 'Ex.: encomenda especial' : 'Ex.: conta de energia', 'data-testid': 'fin-title-desc' }); const amount = moneyField(null, 'fin-title-amount');
-  const preferredCategory = categoryByKey(store, isReceive ? 'outras-receitas' : 'outras-despesas');
-  const preferred = preferredCategory?.archived ? null : preferredCategory;
-  const categories = activeFinanceCategories(store, direction, preferred?.id);
-  const category = el('select', { class: 'pa-input', 'data-testid': 'fin-title-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}`.trim(), ...(preferred?.id === c.id ? { selected: 'selected' } : {}) })));
-  const situation = el('select', { class: 'pa-input', 'data-testid': 'fin-title-situation' }, [el('option', { value: 'pendente', text: isReceive ? 'Ainda n√£o recebi' : 'Ainda n√£o paguei' }), el('option', { value: 'quitado', text: isReceive ? 'J√° foi recebido' : 'J√° foi pago' })]);
-  const method = paymentMethodSelect(store, 'fin-title-method');
-  const account = el('select', { class: 'pa-input', 'data-testid': 'fin-title-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('textarea', { class: 'pa-input', rows: '2', placeholder: 'Observa√ß√µes (opcional)' });
-  function save() {
-    sourceError.textContent = '';
-    const value = parseNum(amount.input.value); if (!(value > 0)) { amount.input.focus(); return; }
-    const client = isReceive && sourceType.value === 'cliente' ? clientPicker.selected() : null;
-    const otherOrigin = isReceive && sourceType.value === 'origem' ? originName.value.trim() : '';
-    if (isReceive && sourceType.value === 'cliente' && !client) { sourceError.textContent = 'Digite o nome e selecione um cliente sugerido.'; clientPicker.focus(); return; }
-    if (isReceive && sourceType.value === 'origem' && !otherOrigin) { sourceError.textContent = 'Informe o nome da origem desta entrada.'; originName.focus(); return; }
-    const selectedSupplier = !isReceive ? suppliers.find((p) => p.id === supplier.value) : null;
-    const id = uuid();
-    ctx.actions.mutate((s) => {
-      s.upsertFinanceTitle({ id, direction, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), amount: value, description: description.value.trim() || (isReceive ? 'Receita manual' : 'Conta manual'), categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || 'Outro fornecedor', expectedMethod: method.value, sourceType: 'manual', notes: notes.value.trim() || undefined });
-      if (situation.value === 'quitado') s.addFinanceSettlement({ id: uuid(), at: dateIso(issue.value), titleId: id, amount: value, method: method.value, accountId: account.value || undefined });
-    });
-  }
-  return sheet({ title: isReceive ? 'Nova entrada' : 'Nova sa√≠da', rows: [el('p', { class: 'pa-hint', text: isReceive ? 'Escolha se o valor vem de um cliente cadastrado ou de outra origem. Depois registre a situa√ß√£o da entrada.' : 'Registre uma sa√≠da j√° paga ou uma conta que ainda ser√° paga.' }), field('Data do lan√ßamento', issue), field('Vencimento', due), isReceive ? field('Origem da entrada', sourceType) : field('Fornecedor / destino', supplier), isReceive && sourceFields, isReceive && originFields, isReceive && sourceError, field('Descri√ß√£o', description), field('Valor', amount), field('Categoria do plano de contas', category), field('Situa√ß√£o', situation), field('Forma de pagamento', method), field('Conta financeira', account), field('Observa√ß√µes', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-title-save' });
-}
-
-MODALS['finance-title-detail'] = (ctx, m) => financeTitleDetailSheet(ctx, m.id);
-function financeTitleDetailSheet(ctx, id) {
-  const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'T√≠tulo n√£o encontrado', rows: [] }); const state = titleState(ctx.store, title); const settlements = titleSettlements(ctx.store, title); const cat = title.categoryId ? ctx.store.get('categories', title.categoryId) : null;
-  const history = settlements.length ? el('ul', { class: 'pa-list pa-tight' }, settlements.slice().sort((a, b) => a.at < b.at ? 1 : -1).map((s) => {
-    const correctionKind = s.legacyKind === 'payment' ? 'payment' : ctx.store.get('financeSettlements', s.id) ? 'financeSettlement' : null;
-    const isDiscount = s.kind === 'discount'; const isCredit = s.kind === 'credit'; const isLoss = s.kind === 'loss'; const isAllocation = s.kind === 'client-payment-allocation';
-    return el('li', { class: 'pa-list-item' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: fmtDate(s.at) }), el('span', { class: 'pa-muted', text: isDiscount ? 'Desconto concedido na quita√ß√£o' : isCredit ? 'Cr√©dito do cliente utilizado' : isLoss ? 'Baixa por perda, sem entrada no caixa' : isAllocation ? 'Quita√ß√£o pelo pagamento total do cliente' : (s.method || 'Forma n√£o informada') })]), el('strong', { class: isDiscount || isCredit || isLoss ? 'pa-warn' : 'pa-positive', text: brl(s.amount) }), isLoss && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-loss-reverse', onclick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Estornar perda?', message: 'O valor voltar√° a ficar em aberto nesta fatura.', yesLabel: 'Estornar perda', onYes: () => ctx.actions.mutate((store) => store.addReversal({ id: uuid(), at: nowIso(), kind: 'financeSettlement', refId: s.id })) }) }, 'Estornar perda'), correctionKind && !isCredit && !isLoss && !isAllocation && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'fin-settlement-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', titleId: title.id, settlementId: s.id, settlementKind: correctionKind }) }, 'Corrigir')].filter(Boolean));
-  })) : el('p', { class: 'pa-empty', text: 'Nenhuma baixa registrada.' });
-  const editAction = title.sourceType === 'manual' && !title.cancelledAt
-    ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit', onclick: () => ctx.actions.openModal({ kind: 'finance-title-edit', id: title.id }) }, 'Editar valor e dados')
-    : title.sourceType === 'encomenda' && title.sourceId
-      ? el('button', { class: 'pa-btn', 'data-testid': 'fin-title-edit-order', onclick: () => ctx.actions.openModal({ kind: 'encomenda-edit', id: title.sourceId }) }, 'Editar encomenda')
-      : null;
-  const rows = [el('div', { class: 'pa-row' }, [el('strong', { class: 'pa-grow', text: title.partyName || title.description }), titleBadge(state.status)]), el('p', { class: 'pa-muted', text: title.description }), el('table', { class: 'pa-kv' }, [el('tr', {}, [el('td', { text: 'Emiss√£o' }), el('td', { class: 'pa-num', text: fmtDate(title.issuedAt) })]), el('tr', {}, [el('td', { text: 'Vencimento' }), el('td', { class: 'pa-num', text: fmtDate(title.dueDate) })]), el('tr', {}, [el('td', { text: 'Categoria' }), el('td', { class: 'pa-num', text: cat?.name || 'Sem categoria' })]), el('tr', {}, [el('td', { text: 'Valor' }), el('td', { class: 'pa-num', text: brl(title.amount) })]), el('tr', {}, [el('td', { text: title.direction === 'receber' ? 'Recebido' : 'Pago' }), el('td', { class: 'pa-num', text: brl(state.paid) })]), state.discounted > 0.005 && el('tr', {}, [el('td', { text: 'Desconto na quita√ß√£o' }), el('td', { class: 'pa-num', text: brl(state.discounted) })]), state.credited > 0.005 && el('tr', {}, [el('td', { text: 'Cr√©dito utilizado' }), el('td', { class: 'pa-num', text: brl(state.credited) })]), state.writtenOff > 0.005 && el('tr', {}, [el('td', { text: 'Perda registrada' }), el('td', { class: 'pa-num', text: brl(state.writtenOff) })]), el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Saldo' }), el('td', { class: 'pa-num', text: brl(state.balance) })])].filter(Boolean)), editAction, state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-settle-open', onclick: () => ctx.actions.openModal({ kind: 'finance-settle', id: title.id, fullOnly: title.direction === 'receber' }) }, title.direction === 'receber' ? 'Quitar esta fatura' : 'Registrar pagamento'), title.direction === 'receber' && state.balance > 0.005 && !title.cancelledAt && el('button', { class: 'pa-btn', 'data-testid': 'fin-loss-open', onclick: () => ctx.actions.openModal({ kind: 'finance-title-loss', id: title.id }) }, 'Registrar como perda'), el('h3', { class: 'pa-h3', text: 'Hist√≥rico de baixas' }), history, title.sourceType && el('p', { class: 'pa-hint', text: `Origem: ${title.sourceType}. O v√≠nculo evita lan√ßamentos duplicados.` })].filter(Boolean);
-  return sheet({ title: title.direction === 'receber' ? 'Detalhe a receber' : 'Detalhe a pagar', rows, danger: !title.cancelledAt && state.balance > 0.005 ? { label: 'Cancelar t√≠tulo', testid: 'fin-title-cancel', onClick: () => ctx.actions.openModal({ kind: 'confirm', title: 'Cancelar t√≠tulo?', message: 'O hist√≥rico e as baixas j√° realizadas ser√£o preservados.', yesLabel: 'Cancelar t√≠tulo', onYes: () => ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, cancelledAt: nowIso() })) }) } : null });
-}
-
-MODALS['finance-title-edit'] = (ctx, m) => financeTitleEditSheet(ctx, m.id);
-function financeTitleEditSheet(ctx, id) {
-  const title = ctx.store.get('financeTitles', id); if (!title) return sheet({ title: 'Lan√ßamento n√£o encontrado', rows: [] });
-  const isReceive = title.direction === 'receber'; const state = titleState(ctx.store, title);
-  const issue = el('input', { class: 'pa-input', type: 'date', value: dateOnly(title.issuedAt), 'data-testid': 'fin-edit-issue' });
-  const due = el('input', { class: 'pa-input', type: 'date', value: dateOnly(title.dueDate), 'data-testid': 'fin-edit-due' });
-  const suppliers = ctx.store.state.suppliers.filter((s) => !s.archived || s.id === title.partyId);
-  const supplier = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-party' }, [el('option', { value: '', text: 'Sem fornecedor / outro', ...(!title.partyId ? { selected: 'selected' } : {}) }), ...suppliers.map((p) => el('option', { value: p.id, text: p.name, ...(title.partyId === p.id ? { selected: 'selected' } : {}) }))]);
-  const initialSourceType = title.partyType === 'origem' || !title.partyId ? 'origem' : 'cliente';
-  const sourceType = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-source-type' }, [el('option', { value: 'cliente', text: 'Cliente cadastrado', ...(initialSourceType === 'cliente' ? { selected: 'selected' } : {}) }), el('option', { value: 'origem', text: 'Outra origem', ...(initialSourceType === 'origem' ? { selected: 'selected' } : {}) })]);
-  const clientPicker = financeClientPicker(ctx.store, title.partyId, 'fin-edit-client');
-  const originName = el('input', { class: 'pa-input', type: 'text', value: initialSourceType === 'origem' ? title.partyName || '' : '', placeholder: 'Ex.: feira, curso, parceria', 'data-testid': 'fin-edit-origin-name' });
-  const clientFields = el('div', { style: initialSourceType === 'cliente' ? '' : 'display:none' }, [field('Cliente', clientPicker.element)]);
-  const originFields = el('div', { style: initialSourceType === 'origem' ? '' : 'display:none' }, [field('Nome da origem', originName)]);
-  const sourceError = el('p', { class: 'pa-sheet-msg', role: 'alert' });
-  sourceType.addEventListener('change', () => { sourceError.textContent = ''; clientFields.style.display = sourceType.value === 'cliente' ? '' : 'none'; originFields.style.display = sourceType.value === 'origem' ? '' : 'none'; });
-  const description = el('input', { class: 'pa-input', type: 'text', value: title.description || '', 'data-testid': 'fin-edit-desc' });
-  const amount = moneyField(title.amount, 'fin-edit-amount'); const categories = activeFinanceCategories(ctx.store, title.direction, title.categoryId);
-  const category = el('select', { class: 'pa-input', 'data-testid': 'fin-edit-category' }, categories.map((c) => el('option', { value: c.id, text: `${c.code || ''} ${c.name}${c.archived ? ' (arquivada)' : ''}`.trim(), ...(title.categoryId === c.id ? { selected: 'selected' } : {}) })));
-  const method = paymentMethodSelect(ctx.store, 'fin-edit-method', title.expectedMethod || '');
-  const notes = el('textarea', { class: 'pa-input', rows: '2', 'data-testid': 'fin-edit-notes' }); notes.value = title.notes || '';
-  amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
-  function save() {
-    sourceError.textContent = '';
-    const value = parseNum(amount.input.value); if (!(value > 0) || value + 0.005 < state.settled) { amount.input.setCustomValidity(`O valor n√£o pode ser menor que o j√° baixado (${brl(state.settled)}).`); amount.input.reportValidity(); return; }
-    const client = isReceive && sourceType.value === 'cliente' ? clientPicker.selected() : null;
-    const otherOrigin = isReceive && sourceType.value === 'origem' ? originName.value.trim() : '';
-    if (isReceive && sourceType.value === 'cliente' && !client) { sourceError.textContent = 'Digite o nome e selecione um cliente sugerido.'; clientPicker.focus(); return; }
-    if (isReceive && sourceType.value === 'origem' && !otherOrigin) { sourceError.textContent = 'Informe o nome da origem desta entrada.'; originName.focus(); return; }
-    const selectedSupplier = !isReceive ? suppliers.find((p) => p.id === supplier.value) : null;
-    const manualDue = title.sourceType === 'encomenda' && dateOnly(due.value) !== dateOnly(title.dueDate);
-    ctx.actions.mutate((s) => s.upsertFinanceTitle({ ...title, issuedAt: dateIso(issue.value), competenceDate: dateIso(issue.value), dueDate: dateIso(due.value), ...(manualDue ? { paymentDueManual: true } : {}), amount: value, description: description.value.trim() || title.description, categoryId: category.value || undefined, partyType: isReceive ? sourceType.value : 'fornecedor', partyId: client?.id || selectedSupplier?.id, partyName: client?.name || otherOrigin || selectedSupplier?.name || title.partyName || 'Outro fornecedor', expectedMethod: method.value, notes: notes.value.trim() || undefined }));
-  }
-  return sheet({ title: 'Editar lan√ßamento', rows: [el('p', { class: 'pa-hint', text: 'Altere o valor, as datas ou a classifica√ß√£o. Pagamentos j√° registrados permanecem no hist√≥rico.' }), field('Emiss√£o', issue), field('Vencimento', due), isReceive ? field('Origem da entrada', sourceType) : field('Fornecedor', supplier), isReceive && clientFields, isReceive && originFields, isReceive && sourceError, field('Descri√ß√£o', description), field('Valor total', amount), field('Categoria', category), field('Forma prevista', method), field('Observa√ß√µes', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-edit-save' });
-}
-
-MODALS['finance-settlement-edit'] = (ctx, m) => financeSettlementEditSheet(ctx, m);
-function financeSettlementEditSheet(ctx, m) {
-  const title = ctx.store.get('financeTitles', m.titleId); const isPayment = m.settlementKind === 'payment';
-  const original = isPayment ? ctx.store.get('payments', m.settlementId) : ctx.store.get('financeSettlements', m.settlementId);
-  if (!title || !original) return sheet({ title: 'Pagamento n√£o encontrado', rows: [] });
-  const isDiscount = !isPayment && original.kind === 'discount';
-  const state = titleState(ctx.store, title); const oldAmount = Number(isPayment ? original.valor : original.amount) || 0;
-  const date = el('input', { class: 'pa-input', type: 'date', value: dateOnly(original.at), 'data-testid': 'fin-correct-date' });
-  const amount = moneyField(oldAmount, 'fin-correct-amount');
-  const currentMethod = isPayment ? original.forma : original.method;
-  const method = paymentMethodSelect(ctx.store, 'fin-correct-method', currentMethod || '');
-  const account = el('select', { class: 'pa-input', 'data-testid': 'fin-correct-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name, ...(!isPayment && original.accountId === a.id ? { selected: 'selected' } : {}) })));
-  amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
-  function save() {
-    const value = parseNum(amount.input.value); const otherSettled = Math.max(0, state.settled - oldAmount); const maximum = Math.max(0, title.amount - otherSettled);
-    if (!(value > 0) || value > maximum + 0.005) { amount.input.setCustomValidity(`O valor m√°ximo para este lan√ßamento √© ${brl(maximum)}.`); amount.input.reportValidity(); return; }
-    ctx.actions.mutate((s) => {
-      s.addReversal({ id: uuid(), at: nowIso(), kind: isPayment ? 'payment' : 'financeSettlement', refId: original.id });
-      if (isPayment) s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: original.encomendaId, valor: value, forma: method.value });
-      else s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: isDiscount ? 'discount' : 'payment', ...(isDiscount ? {} : { method: method.value, accountId: account.value || undefined }), notes: `Corre√ß√£o do lan√ßamento de ${fmtDate(original.at)}` });
-      if (title.sourceType === 'manual' && state.balance <= 0.005) s.upsertFinanceTitle({ ...title, amount: otherSettled + value });
-    });
-  }
-  return sheet({ title: isDiscount ? 'Corrigir desconto' : title.direction === 'receber' ? 'Corrigir recebimento' : 'Corrigir pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Valor anterior: ' }), el('strong', { text: brl(oldAmount) })]), el('p', { class: 'pa-hint', text: 'A corre√ß√£o n√£o apaga o registro anterior: ele ser√° estornado e o novo valor ficar√° no hist√≥rico.' }), field('Data', date), field('Valor correto', amount), !isDiscount && field('Forma', method), !isPayment && !isDiscount && field('Conta financeira', account)].filter(Boolean), onSave: save, saveTestid: 'fin-correct-save' });
-}
-
-MODALS['finance-settle'] = (ctx, m) => financeSettleSheet(ctx, m.id, m.fullOnly);
-function financeSettleSheet(ctx, id, fullOnly = false) {
-  const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title); if (!title || !state) return sheet({ title: 'T√≠tulo n√£o encontrado', rows: [] });
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-settle-date' }); const amount = moneyField(state.balance, 'fin-settle-amount'); const discount = moneyField(null, 'fin-settle-discount'); const method = paymentMethodSelect(ctx.store, 'fin-settle-method', title.expectedMethod || ''); const account = el('select', { class: 'pa-input', 'data-testid': 'fin-settle-account' }, accountOptions(ctx.store).map((a) => el('option', { value: a.id, text: a.name }))); const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observa√ß√£o (opcional)' });
-  const isReceivable = title.direction === 'receber';
-  const canCredit = isReceivable && title.partyId && ctx.store.get('clients', title.partyId);
-  if (fullOnly) amount.input.readOnly = true;
-  function save() {
-    const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
-    const currentBalance = titleState(ctx.store, title).balance;
-    if (fullOnly && (Math.abs(value - currentBalance) > 0.005 || currentBalance <= 0.005)) {
-      amount.input.setCustomValidity('O saldo desta fatura mudou. Reabra a quita√ß√£o para conferir o valor atual.'); amount.input.reportValidity(); return;
-    }
-    if (!fullOnly && (!(value + discountValue > 0) || discountValue > currentBalance + 0.005 || (!canCredit && value + discountValue > currentBalance + 0.005))) { amount.input.focus(); return; }
-    ctx.actions.mutate((s) => {
-      if (value > 0 && title.sourceType === 'encomenda') s.addPayment({ id: uuid(), at: dateIso(date.value), encomendaId: title.sourceId, valor: value, forma: method.value });
-      else if (value > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: value, kind: 'payment', method: method.value, accountId: account.value || undefined, notes: notes.value.trim() || undefined });
-      if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quita√ß√£o' });
-    });
-  }
-  return sheet({ title: fullOnly ? 'Quitar esta fatura' : isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && !fullOnly && field('Desconto concedido na quita√ß√£o (opcional)', discount), isReceivable && !fullOnly && el('p', { class: 'pa-hint', text: canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira cr√©dito para a pr√≥xima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observa√ß√£o', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save', saveLabel: fullOnly ? 'Quitar fatura' : undefined });
-}
-
-MODALS['finance-title-loss'] = (ctx, m) => financeTitleLossSheet(ctx, m.id);
-function financeTitleLossSheet(ctx, id) {
-  const title = ctx.store.get('financeTitles', id); const state = title && titleState(ctx.store, title);
-  if (!title || !state || title.direction !== 'receber' || title.cancelledAt || state.balance <= 0.005) return sheet({ title: 'Fatura sem saldo em aberto', rows: [] });
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'fin-loss-date' });
-  const notes = el('textarea', { class: 'pa-input', rows: '2', placeholder: 'Motivo da perda (opcional)', 'data-testid': 'fin-loss-notes' });
-  function save() {
-    const current = titleState(ctx.store, title);
-    if (current.balance <= 0.005) return;
-    ctx.actions.mutate((store) => store.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: current.balance, kind: 'loss', notes: notes.value.trim() || 'Baixa por perda' }));
-  }
-  return sheet({ title: 'Registrar como perda', rows: [el('p', { class: 'pa-hint', text: `Fatura de ${title.partyName || 'cliente'} ¬∑ ${title.description}. A perda encerrar√° apenas o saldo restante desta fatura, sem entrada no caixa.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo a baixar: ' }), el('strong', { text: brl(state.balance) })]), field('Data da perda', date), field('Motivo', notes)], onSave: save, saveTestid: 'fin-loss-save', saveLabel: 'Registrar perda' });
-}
-
-function presetRange(key) {
-  const now = new Date(); const local = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  if (key === 'hoje') return [local(now), local(now)];
-  if (key === 'semana') { const s = new Date(now); s.setDate(now.getDate() - ((now.getDay() + 6) % 7)); const e = new Date(s); e.setDate(s.getDate() + 6); return [local(s), local(e)]; }
-  if (key === 'ano') return [`${now.getFullYear()}-01-01`, `${now.getFullYear()}-12-31`];
-  const e = new Date(now.getFullYear(), now.getMonth() + 1, 0); return [`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`, local(e)];
-}
-
-function financeCashFlowPanel(ctx) {
-  const { store, view } = ctx; const start = view.finStart; const end = view.finEnd;
-  const flow = cashFlow(store, start, end, { projected: view.finProjected, accountId: view.finAccountId || undefined, categoryId: view.finCategoryId || undefined });
-  const preset = (key, label) => el('button', { class: 'pa-chip' + (view.finFlowPreset === key ? ' pa-chip-on' : ''), 'data-testid': `fin-flow-${key}`, onclick: () => { if (key === 'personalizado') ctx.actions.setFinanceView({ finFlowPreset: key }); else { const [s, e] = presetRange(key); ctx.actions.setFinanceView({ finFlowPreset: key, finStart: s, finEnd: e }); } } }, label);
-  const account = el('select', { class: 'pa-input', 'data-testid': 'fin-flow-account', onchange: (e) => ctx.actions.setFinanceView({ finAccountId: e.target.value }) }, [el('option', { value: '', text: 'Todas as contas' }), ...accountOptions(store).map((a) => el('option', { value: a.id, text: a.name, ...(view.finAccountId === a.id ? { selected: 'selected' } : {}) }))]);
-  const categories = store.state.categories.filter((c) => !c.archived && c.parentId && c.cashFlowGroup !== 'nao-caixa');
-  const category = el('select', { class: 'pa-input', 'data-testid': 'fin-flow-category', onchange: (e) => ctx.actions.setFinanceView({ finCategoryId: e.target.value }) }, [el('option', { value: '', text: 'Todas as categorias' }), ...categories.map((c) => el('option', { value: c.id, text: c.name, ...(view.finCategoryId === c.id ? { selected: 'selected' } : {}) }))]);
-
-  let actual = cashMovements(store).filter((m) => inDateRange(m.at, start, end));
-  actual = actual.filter((m) => view.finAccountId ? m.accountId === view.finAccountId : !m.transfer);
-  if (view.finCategoryId) actual = actual.filter((m) => canonicalCategoryId(store, m.categoryId) === canonicalCategoryId(store, view.finCategoryId));
-  actual.sort((a, b) => dateOnly(a.at).localeCompare(dateOnly(b.at)) || a.label.localeCompare(b.label, 'pt-BR'));
-
-  let pending = view.finProjected ? listTitles(store, { status: 'aberto', categoryId: view.finCategoryId || undefined }) : [];
-  pending = pending.filter((r) => !r.title.cancelledAt && r.balance > 0.005 && (inDateRange(r.title.dueDate, start, end) || (r.status === 'vencido' && start && dateOnly(r.title.dueDate) < start)));
-
-  const detailHeader = () => el('div', { class: 'pa-cash-head', 'aria-hidden': 'true' }, [el('span', { text: 'Data' }), el('span', { text: 'Descri√ß√£o' }), el('span', { text: 'Valor' })]);
-  const actualRows = actual.map((m) => {
-    const cat = m.categoryId ? store.get('categories', m.categoryId) : null; const acc = m.accountId ? store.get('cashAccounts', m.accountId) : null;
-    let correction = null;
-    if (m.sourceType === 'financeSettlement' && m.titleId) correction = { titleId: m.titleId, settlementId: m.sourceId, settlementKind: 'financeSettlement' };
-    if (m.sourceType === 'payment' && m.order?.id) {
-      const orderTitle = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === m.order.id);
-      if (orderTitle) correction = { titleId: orderTitle.id, settlementId: m.sourceId, settlementKind: 'payment' };
-    }
-    const meta = [m.direction === 'entrada' ? 'Entrada realizada' : 'Sa√≠da realizada', cat?.name, acc?.name, m.method, correction ? 'Toque para corrigir' : null].filter(Boolean).join(' ¬∑ ');
-    return el(correction ? 'button' : 'div', { class: `pa-cash-row ${m.direction === 'entrada' ? 'pa-cash-in' : 'pa-cash-out'}${correction ? ' pa-cash-editable' : ''}`, 'data-testid': 'fin-flow-actual-row', ...(correction ? { onclick: () => ctx.actions.openModal({ kind: 'finance-settlement-edit', ...correction }) } : {}) }, [el('time', { class: 'pa-cash-date', datetime: dateOnly(m.at), text: fmtDate(m.at) }), el('div', { class: 'pa-cash-description' }, [el('strong', { text: m.label }), el('span', { class: 'pa-muted', text: meta })]), el('strong', { class: `pa-cash-value ${m.direction === 'entrada' ? 'pa-positive' : 'pa-bad'}`, text: `${m.direction === 'entrada' ? '+' : '‚àí'} ${brl(m.amount)}` })]);
-  });
-  const pendingRows = pending.map((r) => {
-    const title = r.title; const isIn = title.direction === 'receber'; const overdue = r.status === 'vencido'; const cat = title.categoryId ? store.get('categories', title.categoryId) : null;
-    const meta = [isIn ? 'A receber' : 'A pagar', cat?.name, r.settled > 0.005 ? `Parcial ¬∑ j√° baixado ${brl(r.settled)}` : null].filter(Boolean).join(' ¬∑ ');
-    return el('button', { class: `pa-cash-row pa-cash-pending ${isIn ? 'pa-cash-in' : 'pa-cash-out'}${overdue ? ' pa-cash-overdue' : ''}`, 'data-testid': 'fin-flow-pending-row', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [el('time', { class: 'pa-cash-date', datetime: dateOnly(title.dueDate), text: fmtDate(title.dueDate) }), el('div', { class: 'pa-cash-description' }, [el('div', {}, [el('strong', { text: title.partyName || title.description }), overdue && el('span', { class: 'pa-badge pa-warn', text: 'Vencido' })].filter(Boolean)), el('span', { class: 'pa-muted', text: `${title.description} ¬∑ ${meta}` })]), el('strong', { class: `pa-cash-value ${isIn ? 'pa-positive' : 'pa-bad'}`, text: `${isIn ? '+' : '‚àí'} ${brl(r.balance)}` })]);
-  });
-
-  const dayTable = flow.days.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Dia' }), el('td', { class: 'pa-num', text: 'Entradas' }), el('td', { class: 'pa-num', text: 'Sa√≠das' }), el('td', { class: 'pa-num', text: 'Saldo dia' }), el('td', { class: 'pa-num', text: 'Acumulado' })]), ...flow.days.map((r) => el('tr', {}, [el('td', { text: fmtDate(`${r.date}T12:00:00`) }), el('td', { class: 'pa-num pa-positive', text: brl(r.in) }), el('td', { class: 'pa-num pa-bad', text: brl(r.out) }), el('td', { class: 'pa-num', text: brl(r.balance) }), el('td', { class: 'pa-num', text: brl(r.cumulative) })]))])) : el('p', { class: 'pa-empty', text: 'Nenhuma movimenta√ß√£o realizada neste per√≠odo.' });
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Realizado e futuro' }), el('h2', { text: 'Fluxo de Caixa' })]),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'dre-open', onclick: () => ctx.actions.openModal({ kind: 'dre-preview', start, end }) }, 'DRE do per√≠odo'),
-        el('label', { class: 'pa-toggle' }, [el('input', { type: 'checkbox', ...(view.finProjected ? { checked: 'checked' } : {}), onchange: (e) => ctx.actions.setFinanceView({ finProjected: e.target.checked }) }), el('span', { text: 'Mostrar valores a quitar' })]),
-      ]),
-    ]),
-    el('div', { class: 'pa-chiprow' }, [preset('hoje', 'Hoje'), preset('semana', 'Semana'), preset('mes', 'M√™s'), preset('ano', 'Ano'), preset('personalizado', 'Per√≠odo espec√≠fico')]),
-    view.finFlowPreset === 'personalizado' ? periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), 'fin-flow') : el('p', { class: 'pa-hint', text: `Per√≠odo selecionado automaticamente: ${fmtDate(`${start}T12:00:00`)} at√© ${fmtDate(`${end}T12:00:00`)}` }),
-    el('p', { class: 'pa-hint', text: 'A DRE usa este mesmo per√≠odo e considera toda a empresa. Os filtros de conta e categoria abaixo servem apenas para analisar o caixa.' }),
-    el('div', { class: 'pa-filtergrid' }, [field('Conta', account), field('Categoria', category)]),
-    el('div', { class: 'pa-statgrid' }, [statCard('Entradas realizadas', brl(flow.totalIn), 'ok'), statCard('Sa√≠das realizadas', brl(flow.totalOut), flow.totalOut ? 'warn' : 'soft'), statCard('Saldo realizado', brl(flow.totalIn - flow.totalOut), flow.totalIn - flow.totalOut >= 0 ? 'navy' : 'bad'), statCard('Saldo acumulado', brl(flow.ending), flow.ending >= 0 ? 'navy' : 'bad')]),
-    view.finProjected && el('div', { class: 'pa-callout' }, [el('strong', { text: `Previs√£o do per√≠odo: +${brl(flow.projectedIn)} ¬∑ ‚àí${brl(flow.projectedOut)}` }), el('span', { text: ' Contas pendentes n√£o alteram o realizado. Vencidos anteriores tamb√©m aparecem no alerta abaixo.' })]),
-    el('h3', { class: 'pa-h3', text: 'Tudo que entrou e saiu' }),
-    actualRows.length ? el('div', { class: 'pa-cash-list' }, [detailHeader(), ...actualRows]) : el('p', { class: 'pa-empty', text: 'Nenhuma entrada ou sa√≠da realizada neste per√≠odo.' }),
-    view.finProjected && el('h3', { class: 'pa-h3', text: 'Valores a quitar' }),
-    view.finProjected && (pendingRows.length ? el('div', { class: 'pa-cash-list' }, [detailHeader(), ...pendingRows]) : el('p', { class: 'pa-empty', text: 'Nenhum valor pendente neste per√≠odo.' })),
-    el('h3', { class: 'pa-h3', text: 'Resumo por dia' }), dayTable,
-  ].filter(Boolean));
-}
-
-MODALS['dre-preview'] = (ctx, modal) => drePreviewSheet(ctx, modal);
-
-function drePreviewSheet(ctx, modal = {}) {
-  const start = modal.start || ctx.view.finStart; const end = modal.end || ctx.view.finEnd;
-  const dre = managerialDre(ctx.store, start, end);
-  const line = (label, amount, options = {}) => el('tr', options.total ? { class: 'pa-kv-total' } : {}, [
-    el('td', { class: options.detail ? 'pa-muted' : '', text: `${options.detail ? '‚Äî ' : ''}${label}` }),
-    el('td', { class: `pa-num${options.bad ? ' pa-bad' : ''}${options.good ? ' pa-positive' : ''}`, text: options.negative ? `‚àí ${brl(amount)}` : brl(amount) }),
-  ]);
-  const diagnosis = dre.diagnostics.map((item) => el('section', { class: `pa-callout${item.tone === 'bad' ? ' pa-callout-danger' : ''}`, 'data-testid': `dre-diagnosis-${item.tone}` }, [el('strong', { text: item.title }), el('span', { text: ` ${item.text}` })]));
-  const pdf = el('button', { class: 'pa-btn pa-primary pa-grow', 'data-testid': 'dre-pdf' }, 'Gerar DRE em PDF A4');
-  pdf.addEventListener('click', async () => {
-    const original = pdf.textContent; pdf.textContent = 'Gerando PDF‚Ä¶'; pdf.disabled = true;
-    try { await savePdf(await generateDrePdf(dre), `dre-${start}-${end}.pdf`); }
-    catch (error) { window.alert('N√£o foi poss√≠vel gerar a DRE: ' + ((error && error.message) || error)); }
-    finally { pdf.textContent = original; pdf.disabled = false; }
-  });
-  return sheet({ title: 'DRE gerencial do per√≠odo', rows: [
-    el('p', { class: 'pa-callout', text: `Compet√™ncia de ${fmtDate(`${start}T12:00:00`)} at√© ${fmtDate(`${end}T12:00:00`)}. Valores quitados e pendentes entram integralmente; investimentos e transfer√™ncias ficam fora.` }),
-    el('table', { class: 'pa-kv pa-report', 'data-testid': 'dre-table' }, [
-      line('Receita de vendas', dre.salesRevenue), line('Outras receitas operacionais', dre.otherRevenue), line('Receita operacional', dre.grossRevenue, { total: true }),
-      ...dre.costRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })), line('Custos diretos', dre.directCosts, { total: true, negative: true }),
-      line('Lucro bruto', dre.grossProfit, { total: true, bad: dre.grossProfit < 0, good: dre.grossProfit >= 0 }),
-      ...dre.expenseRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })), line('Despesas operacionais', dre.operatingExpenses, { total: true, negative: true }),
-      line('Resultado do per√≠odo', dre.netResult, { total: true, bad: dre.netResult < 0, good: dre.netResult >= 0 }),
-    ]),
-    el('div', { class: 'pa-statgrid' }, [statCard('Margem bruta', dre.grossMarginPct == null ? 'Sem receita' : `${Math.round(dre.grossMarginPct * 100)}%`, dre.grossProfit >= 0 ? 'navy' : 'bad'), statCard('Margem l√≠quida', dre.netMarginPct == null ? 'Sem receita' : `${Math.round(dre.netMarginPct * 100)}%`, dre.netResult >= 0 ? 'ok' : 'bad'), statCard('Ainda a receber', brl(dre.openReceivables), dre.openReceivables ? 'warn' : 'soft'), statCard('Ainda a pagar', brl(dre.openPayables), dre.openPayables ? 'warn' : 'soft')]),
-    el('h3', { class: 'pa-h3', text: 'Diagn√≥stico autom√°tico' }), ...diagnosis,
-    el('p', { class: 'pa-hint', text: 'Esta √© uma DRE gerencial simplificada para decis√£o. Para obriga√ß√µes fiscais e cont√°beis formais, valide a classifica√ß√£o com seu contador.' }),
-    el('div', { class: 'pa-sheet-actions' }, [pdf]),
-  ] });
-}
-
-function financePurchasesPanel(ctx) {
-  const rows = ctx.store.state.purchases.slice().sort((a, b) => a.at < b.at ? 1 : -1);
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Fornecedores e insumos' }), el('h2', { text: 'Compras' })]), el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'purchase-new', onclick: () => ctx.actions.openModal({ kind: 'purchase-add' }) }, '+ Compra')]),
-    el('p', { class: 'pa-hint', text: 'Toda compra atualiza o custo dos insumos, fornecedor, hist√≥rico e estoque. Frete, impostos, juros e encargos s√£o rateados entre os itens. Voc√™ decide no lan√ßamento se o total tamb√©m deve entrar no Contas a Pagar.' }),
-    rows.length ? el('ul', { class: 'pa-list pa-rows' }, rows.map((purchase) => {
-      const supplier = purchase.supplierId ? ctx.store.get('suppliers', purchase.supplierId) : null;
-      const title = purchase.titleId ? ctx.store.get('financeTitles', purchase.titleId) : null;
-      const state = title ? titleState(ctx.store, title) : null;
-      return el('li', { class: 'pa-row-item', onclick: () => title && ctx.actions.openModal({ kind: 'finance-title-detail', id: title.id }) }, [
-        el('div', { class: 'pa-grow' }, [
-          el('div', { class: 'pa-enc-title' }, [el('strong', { text: supplier?.name || 'Sem fornecedor' }), state ? titleBadge(state.status) : el('span', { class: 'pa-badge', text: 'Somente estoque' })]),
-          el('span', { class: 'pa-muted', text: `${fmtDate(purchase.at)} ¬∑ ${(purchase.items || []).map((item) => ctx.store.get('ingredients', item.ingredientId)?.name).filter(Boolean).join(', ')}` }),
-          ['freight', 'taxes', 'interest', 'fees'].some((key) => Number(purchase[key]) > 0) && el('span', { class: 'pa-muted', text: [['Frete', purchase.freight], ['Impostos', purchase.taxes], ['Juros', purchase.interest], ['Encargos', purchase.fees]].filter(([, value]) => Number(value) > 0).map(([label, value]) => `${label}: ${brl(value)}`).join(' ¬∑ ') }),
-        ]),
-        el('strong', { class: 'pa-num', text: brl(purchase.total) }),
-        title && el('span', { class: 'pa-chev', text: '‚Ä∫' }),
-      ].filter(Boolean));
-    })) : el('p', { class: 'pa-empty', text: 'Nenhuma compra registrada.' }),
-  ]);
-}
-
-MODALS['purchase-add'] = (ctx) => purchaseAddSheet(ctx);
-function purchaseAddSheet(ctx) {
-  const { store } = ctx; const suppliers = store.state.suppliers.filter((s) => !s.archived); const ingredients = store.state.ingredients;
-  if (!suppliers.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre pelo menos um fornecedor antes da primeira compra.' }), el('button', { class: 'pa-btn pa-primary', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Cadastrar fornecedor')] });
-  if (!ingredients.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre os insumos antes de registrar uma compra.' })] });
-  const supplier = el('select', { class: 'pa-input', 'data-testid': 'purchase-supplier' }, suppliers.map((s) => el('option', { value: s.id, text: s.name })));
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-date' });
-  const financeChoice = el('select', { class: 'pa-input', 'data-testid': 'purchase-finance' }, [el('option', { value: 'sim', text: 'Sim ¬∑ criar no Contas a Pagar' }), el('option', { value: 'nao', text: 'N√£o ¬∑ somente hist√≥rico e estoque' })]);
-  const due = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'purchase-due' });
-  const situation = el('select', { class: 'pa-input', 'data-testid': 'purchase-situation' }, [el('option', { value: 'pendente', text: 'Pagar depois' }), el('option', { value: 'quitado', text: 'Pago agora' })]);
-  const method = paymentMethodSelect(store, 'purchase-method');
-  const account = el('select', { class: 'pa-input', 'data-testid': 'purchase-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
-  const preferredPurchaseCategory = categoryByKey(store, 'insumos');
-  const defaultCategory = preferredPurchaseCategory?.archived ? null : preferredPurchaseCategory;
-  const payableCategories = activeFinanceCategories(store, 'pagar', defaultCategory?.id);
-  const category = el('select', { class: 'pa-input', 'data-testid': 'purchase-category' }, payableCategories.map((item) => el('option', { value: item.id, text: `${item.code ? `${item.code} ¬∑ ` : ''}${item.name}`, ...(item.id === defaultCategory?.id ? { selected: 'selected' } : {}) })));
-  const itemsBox = el('div', { class: 'pa-detail-list' }); const lines = []; let nextLineIndex = 0;
-  const freight = moneyField(0, 'purchase-freight');
-  const taxes = moneyField(0, 'purchase-taxes');
-  const interest = moneyField(0, 'purchase-interest');
-  const fees = moneyField(0, 'purchase-fees');
-  const extraFields = { freight, taxes, interest, fees };
-  const costPreview = el('section', { class: 'pa-detail-card', 'data-testid': 'purchase-cost-preview' });
-  const readItems = () => lines.map((line) => ({ ingredientId: line.ing.value, qty: parseNum(line.qty.value) || 0, unitPrice: parseNum(line.price.input.value) || 0 }));
-  const readExtras = () => Object.fromEntries(Object.entries(extraFields).map(([key, control]) => [key, control.input.value.trim() ? parseNum(control.input.value) : 0]));
-  function allocateCosts(items, extras) {
-    const baseCosts = items.map((item) => item.qty * item.unitPrice);
-    const subtotal = baseCosts.reduce((sum, value) => sum + value, 0);
-    const extraCents = Object.values(extras).reduce((sum, value) => sum + Math.round(value * 100), 0);
-    let cumulativeBase = 0; let allocated = 0;
-    const allocatedItems = items.map((item, index) => {
-      cumulativeBase += baseCosts[index];
-      const nextAllocated = index === items.length - 1 ? extraCents : Math.round(extraCents * cumulativeBase / subtotal);
-      const allocatedCharges = (nextAllocated - allocated) / 100;
-      allocated = nextAllocated;
-      return { ...item, allocatedCharges, totalCost: baseCosts[index] + allocatedCharges, landedUnitPrice: (baseCosts[index] + allocatedCharges) / item.qty };
-    });
-    return { items: allocatedItems, subtotal, total: Math.round(subtotal * 100 + extraCents) / 100 };
-  }
-  function renderCostPreview() {
-    const items = readItems().filter((item) => item.qty > 0 && item.unitPrice > 0);
-    const extras = readExtras();
-    if (!items.length || Object.values(extras).some((value) => value == null || value < 0)) {
-      costPreview.replaceChildren(el('p', { class: 'pa-hint', text: 'Informe os itens e valores positivos para ver o rateio.' }));
-      return;
-    }
-    const costs = allocateCosts(items, extras);
-    costPreview.replaceChildren(
-      el('h3', { class: 'pa-h3', text: 'Resumo e rateio da compra' }),
-      el('table', { class: 'pa-kv' }, [
-        el('tr', {}, [el('td', { text: 'Itens' }), el('td', { class: 'pa-num', text: brl(costs.subtotal) })]),
-        ...[['Frete', extras.freight], ['Impostos', extras.taxes], ['Juros', extras.interest], ['Encargos', extras.fees]].map(([label, value]) => el('tr', {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: brl(value) })])),
-        el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Total da compra' }), el('td', { class: 'pa-num', 'data-testid': 'purchase-total', text: brl(costs.total) })]),
-      ]),
-      el('p', { class: 'pa-hint', text: 'Custos adicionais distribu√≠dos proporcionalmente ao valor de cada item:' }),
-      ...costs.items.map((item) => el('p', { class: 'pa-muted', text: `${store.get('ingredients', item.ingredientId)?.name || 'Insumo'} ¬∑ adicional ${brl(item.allocatedCharges)} ¬∑ custo R$ ${item.landedUnitPrice.toFixed(4).replace('.', ',')} por ${store.get('ingredients', item.ingredientId)?.stockUnit || 'unidade'}` })),
-    );
-  }
-  function addLine() {
-    const index = nextLineIndex++;
-    const ing = el('select', { class: 'pa-input', 'data-testid': `purchase-item-${index}` }, ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
-    const qty = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0.001', step: 'any', value: '1', 'data-testid': `purchase-qty-${index}` });
-    const price = moneyField(null, `purchase-price-${index}`);
-    const line = { ing, qty, price, row: null };
-    line.row = el('div', { class: 'pa-detail-card' }, [
-      field('Insumo/embalagem', ing),
-      el('div', { class: 'pa-filtergrid' }, [field('Quantidade', qty), field('Pre√ßo por unidade de compra', price)]),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { line.row.remove(); lines.splice(lines.indexOf(line), 1); renderCostPreview(); } }, 'Remover item'),
-    ]);
-    lines.push(line); itemsBox.append(line.row);
-    [ing, qty, price.input].forEach((control) => { control.addEventListener('input', renderCostPreview); control.addEventListener('change', renderCostPreview); });
-    renderCostPreview();
-  }
-  addLine();
-  Object.values(extraFields).forEach((control) => control.input.addEventListener('input', renderCostPreview));
-  const financeFields = el('section', { class: 'pa-detail-card', 'data-testid': 'purchase-finance-fields' }, [
-    field('Categoria no Plano de Contas', category),
-    el('div', { class: 'pa-filtergrid' }, [field('Vencimento', due), field('Situa√ß√£o', situation)]),
-    field('Forma de pagamento', method), field('Conta financeira', account),
-  ]);
-  const syncFinanceVisibility = () => { financeFields.style.display = financeChoice.value === 'sim' ? '' : 'none'; };
-  financeChoice.addEventListener('change', syncFinanceVisibility); syncFinanceVisibility();
-  function save() {
-    const items = readItems();
-    if (!items.length || items.some((item) => !(item.qty > 0) || !(item.unitPrice > 0))) { window.alert('Informe quantidade e pre√ßo v√°lidos em todos os itens da compra.'); return; }
-    const extras = readExtras();
-    if (Object.values(extras).some((value) => !Number.isFinite(value) || value < 0)) { window.alert('Frete, impostos, juros e encargos devem ter valores num√©ricos iguais ou maiores que zero.'); return; }
-    const costs = allocateCosts(items, extras);
-    const total = costs.total; const purchaseId = uuid(); const financiallyTracked = financeChoice.value === 'sim'; const titleId = financiallyTracked ? uuid() : undefined; const selectedSupplier = store.get('suppliers', supplier.value);
-    ctx.actions.mutate((nextStore) => {
-      nextStore.upsertPurchase({ id: purchaseId, at: dateIso(date.value), supplierId: supplier.value, items: costs.items, subtotal: costs.subtotal, ...extras, total, financiallyTracked, ...(titleId ? { titleId } : {}) });
-      if (financiallyTracked) nextStore.upsertFinanceTitle({ id: titleId, direction: 'pagar', issuedAt: dateIso(date.value), competenceDate: dateIso(date.value), dueDate: dateIso(due.value), amount: total, description: `Compra ¬∑ ${selectedSupplier?.name || 'Fornecedor'}`, categoryId: category.value || undefined, partyType: 'fornecedor', partyId: supplier.value, partyName: selectedSupplier?.name || 'Fornecedor', expectedMethod: method.value, sourceType: 'compra', sourceId: purchaseId });
-      const byIngredient = new Map();
-      for (const item of costs.items) {
-        const sum = byIngredient.get(item.ingredientId) || { qty: 0, totalCost: 0 };
-        sum.qty += item.qty; sum.totalCost += item.totalCost;
-        byIngredient.set(item.ingredientId, sum);
-      }
-      for (const [ingredientId, sum] of byIngredient) {
-        const ingredient = nextStore.get('ingredients', ingredientId);
-        nextStore.addPriceChange({ id: uuid(), at: dateIso(date.value), ingredientId, price: sum.totalCost / sum.qty });
-        if (ingredient) nextStore.upsertIngredient({ ...ingredient, lastSupplier: selectedSupplier?.name || ingredient.lastSupplier, shoppingHidden: false });
-      }
-      if (financiallyTracked && situation.value === 'quitado') nextStore.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId, amount: total, method: method.value, accountId: account.value || undefined });
-    });
-  }
-  return sheet({ title: 'Registrar compra', rows: [field('Fornecedor', supplier), field('Data da compra', date), itemsBox, el('button', { class: 'pa-btn', onclick: addLine }, '+ Adicionar item'), el('div', { class: 'pa-filtergrid' }, [field('Frete', freight), field('Impostos', taxes), field('Juros', interest), field('Encargos', fees)]), costPreview, field('Entrar no Contas a Pagar?', financeChoice), financeFields, el('p', { class: 'pa-hint', text: 'Se escolher ‚ÄúN√£o‚Äù, a compra atualizar√° custo, fornecedor, hist√≥rico e estoque, mas n√£o entrar√° no Contas a Pagar nem na DRE.' }), el('p', { class: 'pa-hint', text: 'Informe o pre√ßo por kg, litro ou unidade ‚Äî a mesma unidade cadastrada no insumo. Os custos adicionais s√£o rateados pelo valor dos itens.' })], onSave: save, saveTestid: 'purchase-save' });
-}
-
-function financeChartPanel(ctx) {
-  const cats = ctx.store.state.categories.filter((c) => !c.archived).slice()
-    .sort((a, b) => String(a.code || '99').localeCompare(String(b.code || '99'), undefined, { numeric: true }) || a.name.localeCompare(b.name, 'pt-BR'));
-  return el('section', { class: 'pa-card' }, [el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Organiza√ß√£o cont√°bil da confeitaria' }), el('h2', { text: 'Plano de Contas' })]), el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cat-manage', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, 'Organizar categorias')]), el('p', { class: 'pa-hint', text: 'O plano separa receitas, custos diretos, despesas operacionais, investimentos e movimenta√ß√µes da propriet√°ria. Categorias repetidas s√£o arquivadas sem alterar lan√ßamentos antigos.' }), el('div', { class: 'pa-actiongrid' }, [el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-accounts' }) }, 'Contas e bancos'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-methods' }) }, 'Formas de pagamento'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Fornecedores')]), el('ul', { class: 'pa-list pa-tight' }, cats.map((c) => el('li', { class: 'pa-list-item' }, [el('span', { class: 'pa-num pa-muted pa-category-code', text: c.code || '' }), el('div', { class: 'pa-grow pa-category-info' }, [el('strong', { text: `${c.parentId ? '‚Äî ' : ''}${c.name}` }), el('span', { class: 'pa-muted', text: [c.nature || c.kind, c.behavior, c.cashFlowGroup].filter(Boolean).join(' ¬∑ ') })]), el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'category-edit', id: c.id }) }, 'Editar')])))]);
-}
-
-MODALS['finance-suppliers'] = (ctx) => financeSuppliersSheet(ctx);
-function financeSuppliersSheet(ctx) {
-  const name = el('input', { class: 'pa-input', type: 'text', placeholder: 'Nome do fornecedor', 'data-testid': 'supplier-name' });
-  const birthday = el('input', { class: 'pa-input', type: 'date', 'data-testid': 'supplier-birthday' });
-  const rows = ctx.store.state.suppliers.map((supplier) => {
-    const editName = el('input', { class: 'pa-input', type: 'text', value: supplier.name });
-    const editBirthday = el('input', { class: 'pa-input', type: 'date', value: supplier.birthday || '' });
-    return el('section', { class: `pa-detail-card${supplier.archived ? ' pa-reversed' : ''}` }, [
-      el('div', { class: 'pa-filtergrid' }, [field('Nome', editName), field('Data de anivers√°rio', editBirthday)]),
-      el('div', { class: 'pa-row' }, [
-        el('button', { class: 'pa-btn pa-primary pa-sm', onclick: () => ctx.actions.mutateModal((store) => store.upsertSupplier({ ...supplier, name: editName.value.trim() || supplier.name, birthday: editBirthday.value || undefined })) }, 'Salvar'),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((store) => store.upsertSupplier({ ...supplier, archived: !supplier.archived })) }, supplier.archived ? 'Reativar' : 'Arquivar'),
-      ]),
-    ]);
-  });
-  return sheet({ title: 'Fornecedores', rows: [el('div', { class: 'pa-filtergrid' }, [field('Nome', name), field('Data de anivers√°rio', birthday)]), el('button', { class: 'pa-btn pa-primary', 'data-testid': 'supplier-add', onclick: () => { if (name.value.trim()) ctx.actions.mutateModal((store) => store.upsertSupplier({ id: uuid(), name: name.value.trim(), birthday: birthday.value || undefined })); } }, '+ Adicionar fornecedor'), ...rows] });
-}
-
-MODALS['finance-accounts'] = (ctx) => financeAccountsSheet(ctx);
-function financeAccountsSheet(ctx) {
-  const types = [['caixa', 'Caixa em dinheiro'], ['conta-corrente', 'Conta corrente'], ['poupanca', 'Poupan√ßa'], ['carteira-digital', 'Carteira digital'], ['maquininha', 'Conta de maquininha'], ['outro', 'Outra']];
-  const rows = ctx.store.state.cashAccounts.map((a) => {
-    const name = el('input', { class: 'pa-input', type: 'text', value: a.name || '' });
-    const institution = el('input', { class: 'pa-input', type: 'text', value: a.institution || '', placeholder: 'Ex.: Nubank, Sicredi, Mercado Pago' });
-    const type = el('select', { class: 'pa-input' }, types.map(([value, label]) => el('option', { value, text: label, ...((a.accountType || 'outro') === value ? { selected: 'selected' } : {}) })));
-    const balance = moneyField(a.openingBalance || 0);
-    const date = el('input', { class: 'pa-input', type: 'date', value: dateOnly(a.openingDate) || todayInput() });
-    const save = () => {
-      if (!name.value.trim()) { name.focus(); return; }
-      ctx.actions.mutateModal((s) => s.upsertCashAccount({ ...a, name: name.value.trim(), institution: institution.value.trim() || undefined, accountType: type.value, openingBalance: parseNum(balance.input.value) || 0, openingDate: dateIso(date.value) }));
-    };
-    return el('section', { class: 'pa-detail-card' + (a.archived ? ' pa-reversed' : '') }, [
-      el('div', { class: 'pa-filtergrid' }, [field('Nome da conta', name), field('Banco ou institui√ß√£o', institution), field('Tipo', type), field('Saldo inicial', balance), field('Data inicial', date)]),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-primary pa-sm', onclick: save }, 'Salvar altera√ß√µes'),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((s) => s.upsertCashAccount({ ...a, archived: !a.archived })) }, a.archived ? 'Reativar' : 'Arquivar'),
-      ]),
-    ]);
-  });
-  const name = el('input', { class: 'pa-input', type: 'text', placeholder: 'Ex.: Banco Inter' });
-  const institution = el('input', { class: 'pa-input', type: 'text', placeholder: 'Banco ou institui√ß√£o' });
-  const type = el('select', { class: 'pa-input' }, types.map(([value, label]) => el('option', { value, text: label })));
-  const add = () => {
-    if (!name.value.trim()) { name.focus(); return; }
-    ctx.actions.mutateModal((s) => s.upsertCashAccount({ id: uuid(), name: name.value.trim(), institution: institution.value.trim() || undefined, accountType: type.value, openingBalance: 0 }));
-  };
-  return sheet({ title: 'Contas, caixas e bancos', rows: [
-    el('p', { class: 'pa-hint', text: 'Cadastre onde o dinheiro fica. Voc√™ pode alterar o nome, o banco, o tipo e o saldo inicial sem perder o hist√≥rico.' }),
-    ...rows,
-    el('h3', { class: 'pa-h3', text: 'Adicionar nova conta' }),
-    el('div', { class: 'pa-filtergrid' }, [field('Nome da conta', name), field('Banco ou institui√ß√£o', institution), field('Tipo', type)]),
-    el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', 'data-testid': 'finance-account-add', onclick: add }, '+ Adicionar conta'), el('button', { class: 'pa-btn', onclick: () => ctx.actions.openModal({ kind: 'finance-adjustment' }) }, 'Ajuste ou transfer√™ncia')]),
-  ] });
-}
-
-MODALS['finance-methods'] = (ctx) => financeMethodsSheet(ctx);
-function financeMethodsSheet(ctx) {
-  const methods = paymentMethodRecords(ctx.store);
-  const saveMethods = (next) => ctx.actions.mutateModal((store) => store.setConfig({ paymentMethods: next }));
-  const rows = methods.map((method) => {
-    const name = el('input', { class: 'pa-input pa-grow', type: 'text', value: method.name });
-    return el('div', { class: 'pa-row pa-detail-card' + (method.archived ? ' pa-reversed' : '') }, [
-      name,
-      el('button', { class: 'pa-btn pa-sm', onclick: () => { const value = name.value.trim(); if (!value) { name.focus(); return; } saveMethods(methods.map((item) => item.id === method.id ? { ...item, name: value } : item)); } }, 'Salvar'),
-      el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => saveMethods(methods.map((item) => item.id === method.id ? { ...item, archived: !item.archived } : item)) }, method.archived ? 'Reativar' : 'Arquivar'),
-    ]);
-  });
-  const newName = el('input', { class: 'pa-input pa-grow', 'data-testid': 'finance-method-name', type: 'text', placeholder: 'Ex.: Link de pagamento, Vale, Fiado' });
-  const add = () => {
-    const name = newName.value.trim(); if (!name) { newName.focus(); return; }
-    saveMethods([...methods, { id: uuid(), name }]);
-  };
-  return sheet({ title: 'Formas de pagamento', rows: [
-    el('p', { class: 'pa-hint', text: 'Estas op√ß√µes aparecem nos recebimentos, pagamentos e filtros. Arquivar mant√©m o hist√≥rico antigo e retira a op√ß√£o dos novos lan√ßamentos.' }),
-    ...rows,
-    el('div', { class: 'pa-row' }, [newName, el('button', { class: 'pa-btn pa-primary', 'data-testid': 'finance-method-add', onclick: add }, '+ Adicionar')]),
-  ] });
-}
-
-function financeReportsPanel(ctx) {
-  const { store, view } = ctx;
-  const start = view.finStart; const end = view.finEnd;
-  const mode = view.finReportMode || 'realizado';
-  const openPeriod = view.finReportOpenPeriod || 'all';
-  const filterStart = mode === 'aberto' && openPeriod === 'all' ? null : start;
-  const filterEnd = mode === 'aberto' && openPeriod === 'all' ? null : end;
-  const direction = view.finReportDirection || 'todos';
-  const selectedCategory = view.finReportCategoryId || '';
-  const purchaseExtras = [['freight', 'frete-compras', 'Frete'], ['taxes', 'impostos-compras', 'Impostos'], ['interest', 'juros-compras', 'Juros'], ['fees', 'encargos-compras', 'Encargos']];
-  const baseMovements = mode === 'aberto'
-    ? listTitles(store, { status: 'aberto' }).filter((row) => row.balance > 0.005).map((row) => ({
-      id: `open:${row.title.id}`, titleId: row.title.id, at: row.title.dueDate,
-      direction: row.title.direction === 'receber' ? 'entrada' : 'saida', amount: row.balance,
-      label: row.title.description, partyName: row.title.partyName, status: row.status, categoryId: row.title.categoryId,
-    }))
-    : cashMovements(store).filter((movement) => !movement.transfer);
-  const allMovements = baseMovements.flatMap((movement) => {
-    if (!movement.titleId || movement.direction !== 'saida') return [movement];
-    const title = store.get('financeTitles', movement.titleId);
-    const purchase = title?.sourceType === 'compra' ? store.get('purchases', title.sourceId) : null;
-    if (!purchase) return [movement];
-    const extras = purchaseExtras.map(([field, key, label]) => ({ key, label, cents: Math.round((Number(purchase[field]) || 0) * 100) })).filter((part) => part.cents > 0);
-    if (!extras.length) return [movement];
-    const purchaseCents = Math.round((Number(purchase.total) || 0) * 100);
-    const extraCents = extras.reduce((sum, part) => sum + part.cents, 0);
-    if (purchaseCents < extraCents || purchaseCents <= 0) return [movement];
-    const parts = [{ key: 'items', label: 'Itens', cents: purchaseCents - extraCents, categoryId: movement.categoryId },
-      ...extras.map((part) => ({ ...part, categoryId: categoryByKey(store, part.key)?.id || movement.categoryId }))];
-    const paidCents = Math.round(movement.amount * 100);
-    let cumulative = 0; let assigned = 0;
-    return parts.map((part, index) => {
-      cumulative += part.cents;
-      const nextAssigned = index === parts.length - 1 ? paidCents : Math.round(paidCents * cumulative / purchaseCents);
-      const amount = (nextAssigned - assigned) / 100;
-      assigned = nextAssigned;
-      return { ...movement, id: `${movement.id}:${part.key}`, label: `${movement.label} ¬∑ ${part.label}`, amount, categoryId: part.categoryId };
-    }).filter((part) => part.amount > 0);
-  });
-  const categoryId = (movement) => canonicalCategoryId(store, movement.categoryId) || '__sem__';
-  const categoryName = (id) => id === '__sem__' ? 'Sem categoria' : store.get('categories', id)?.name || 'Categoria antiga';
-  const categories = new Map();
-  const directions = direction === 'todos' ? ['receber', 'pagar'] : [direction === 'entrada' ? 'receber' : 'pagar'];
-  for (const value of directions) for (const category of activeFinanceCategories(store, value)) {
-    const id = canonicalCategoryId(store, category.id);
-    if (!categories.has(id)) categories.set(id, store.get('categories', id) || category);
-  }
-  for (const movement of allMovements) {
-    if (direction !== 'todos' && movement.direction !== direction) continue;
-    const id = categoryId(movement);
-    if (!categories.has(id)) categories.set(id, store.get('categories', id) || null);
-  }
-  const categoryOptions = [...categories.entries()].sort((a, b) => {
-    if (a[0] === '__sem__') return 1;
-    if (b[0] === '__sem__') return -1;
-    return String(a[1]?.code || '').localeCompare(String(b[1]?.code || ''), undefined, { numeric: true }) || categoryName(a[0]).localeCompare(categoryName(b[0]), 'pt-BR');
-  });
-  const movements = allMovements.filter((m) => inDateRange(m.at, filterStart, filterEnd)
-    && (direction === 'todos' || m.direction === direction)
-    && (!selectedCategory || categoryId(m) === selectedCategory));
-  const openTitleCount = mode === 'aberto' ? new Set(movements.map((movement) => movement.titleId)).size : 0;
-  const inTotal = movements.filter((m) => m.direction === 'entrada').reduce((s, m) => s + m.amount, 0);
-  const outTotal = movements.filter((m) => m.direction === 'saida').reduce((s, m) => s + m.amount, 0);
-  const byCategory = new Map();
-  for (const movement of movements) {
-    const id = categoryId(movement);
-    const totals = byCategory.get(id) || { entrada: 0, saida: 0 };
-    totals[movement.direction] += movement.amount;
-    byCategory.set(id, totals);
-  }
-  const overdue = mode === 'realizado' ? listTitles(store, { direction: 'receber', status: 'vencido' }) : [];
-  const categoryRows = [...byCategory.entries()].sort((a, b) => (b[1].entrada + b[1].saida) - (a[1].entrada + a[1].saida)).map(([id, totals]) => el('tr', {}, [
-    el('td', { text: categoryName(id) }),
-    el('td', { class: 'pa-num', text: brl(totals.entrada) }),
-    el('td', { class: 'pa-num', text: brl(totals.saida) }),
-  ]));
-  const movementRows = movements.map((movement) => el('tr', {}, [
-    el('td', { text: fmtDate(movement.at) }),
-    mode === 'aberto' && el('td', { text: movement.partyName || 'N√£o informado' }),
-    el('td', {}, mode === 'aberto' ? el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.openModal({ kind: 'finance-title-detail', id: movement.titleId }) }, movement.label) : movement.label),
-    el('td', { text: categoryName(categoryId(movement)) }),
-    mode === 'aberto' && el('td', { text: FIN_STATUS[movement.status]?.[0] || movement.status || 'Em aberto' }),
-    el('td', { class: `pa-num${movement.direction === 'saida' ? ' pa-bad' : ' pa-positive'}`, text: `${movement.direction === 'saida' ? '‚àí ' : '+ '}${brl(movement.amount)}` }),
-  ]));
-  const overdueRows = overdue.map((r) => el('tr', {}, [
-    el('td', { text: `${r.title.partyName || 'Sem cliente'} ¬∑ ${r.overdueDays} dia(s)` }),
-    el('td', { class: 'pa-num pa-bad', text: brl(r.balance) }),
-  ]));
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Decis√µes com clareza' }), el('h2', { text: 'Relat√≥rios financeiros' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => {
-      const lines = [['Data', 'Tipo', 'Pessoa / fornecedor', 'Descri√ß√£o', 'Plano de conta', 'Situa√ß√£o', 'Valor'], ...movements.map((m) => [dateOnly(m.at), m.direction === 'entrada' ? 'Entrada' : 'Sa√≠da', m.partyName || '', m.label, categoryName(categoryId(m)), mode === 'aberto' ? FIN_STATUS[m.status]?.[0] || m.status || 'Em aberto' : 'Realizado', m.amount.toFixed(2).replace('.', ',')])];
-      downloadFile(`financeiro-${mode}-${filterStart || 'inicio'}-${filterEnd || 'fim'}.csv`, lines.map((r) => r.map(csvCell).join(';')).join('\n'), 'text/csv');
-    } }, 'Exportar CSV')]),
-    el('div', { class: 'pa-chiprow' }, [
-      el('button', { class: `pa-chip${mode === 'realizado' ? ' pa-chip-on' : ''}`, 'data-testid': 'fin-report-realized', onclick: () => ctx.actions.setFinanceView({ finReportMode: 'realizado', finReportCategoryId: '' }) }, 'Pagamentos e recebimentos'),
-      el('button', { class: `pa-chip${mode === 'aberto' ? ' pa-chip-on' : ''}`, 'data-testid': 'fin-report-open', onclick: () => ctx.actions.setFinanceView({ finReportMode: 'aberto', finReportCategoryId: '' }) }, 'Contas em aberto'),
-    ]),
-    mode === 'aberto' && el('div', { class: 'pa-chiprow' }, [
-      el('button', { class: `pa-chip${openPeriod === 'all' ? ' pa-chip-on' : ''}`, 'data-testid': 'fin-report-period-all', onclick: () => ctx.actions.setFinanceView({ finReportOpenPeriod: 'all' }) }, 'Todos os vencimentos'),
-      el('button', { class: `pa-chip${openPeriod === 'custom' ? ' pa-chip-on' : ''}`, 'data-testid': 'fin-report-period-custom', onclick: () => ctx.actions.setFinanceView({ finReportOpenPeriod: 'custom' }) }, 'Selecionar datas'),
-    ]),
-    (mode === 'realizado' || openPeriod === 'custom') && periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finStart: s, finEnd: e }), 'fin-report'),
-    el('div', { class: 'pa-filtergrid' }, [
-      field(mode === 'aberto' ? 'Tipo de conta' : 'Tipo de movimenta√ß√£o', el('select', { class: 'pa-input', 'data-testid': 'fin-report-direction', onchange: (event) => ctx.actions.setFinanceView({ finReportDirection: event.target.value, finReportCategoryId: '' }) }, mode === 'aberto' ? [
-        el('option', { value: 'todos', text: 'A receber e a pagar', ...(direction === 'todos' ? { selected: 'selected' } : {}) }),
-        el('option', { value: 'entrada', text: 'Contas a receber', ...(direction === 'entrada' ? { selected: 'selected' } : {}) }),
-        el('option', { value: 'saida', text: 'Contas a pagar', ...(direction === 'saida' ? { selected: 'selected' } : {}) }),
-      ] : [
-        el('option', { value: 'todos', text: 'Todas as entradas e sa√≠das', ...(direction === 'todos' ? { selected: 'selected' } : {}) }),
-        el('option', { value: 'entrada', text: 'Receitas e outras entradas', ...(direction === 'entrada' ? { selected: 'selected' } : {}) }),
-        el('option', { value: 'saida', text: 'Despesas e outras sa√≠das', ...(direction === 'saida' ? { selected: 'selected' } : {}) }),
-      ])),
-      field('Plano de conta', el('select', { class: 'pa-input', 'data-testid': 'fin-report-category', onchange: (event) => ctx.actions.setFinanceView({ finReportCategoryId: event.target.value }) }, [
-        el('option', { value: '', text: 'Todos os planos de conta' }),
-        ...categoryOptions.map(([id, category]) => el('option', { value: id, text: `${category?.code ? `${category.code} ¬∑ ` : ''}${categoryName(id)}`, ...(selectedCategory === id ? { selected: 'selected' } : {}) })),
-      ])),
-    ]),
-    el('p', { class: 'pa-hint', text: mode === 'aberto'
-      ? 'Mostra o saldo que ainda falta receber ou pagar. Com datas selecionadas, o filtro usa o vencimento; pagamentos parciais j√° foram abatidos. Nas compras, os valores adicionais s√£o distribu√≠dos proporcionalmente ao saldo restante.'
-      : 'Os valores consideram a data em que o dinheiro entrou ou saiu. Contas ainda em aberto n√£o entram neste total. Nas compras, frete, impostos, juros e encargos aparecem em contas pr√≥prias; os itens permanecem na categoria escolhida no registro.' }),
-    el('div', { class: 'pa-statgrid' }, [statCard(mode === 'aberto' ? 'A receber' : 'Entradas recebidas', brl(inTotal), 'ok'), statCard(mode === 'aberto' ? 'A pagar' : 'Sa√≠das pagas', brl(outTotal), outTotal ? 'warn' : 'soft'), statCard(mode === 'aberto' ? 'Diferen√ßa do filtro' : 'Saldo do filtro', brl(inTotal - outTotal), inTotal - outTotal >= 0 ? 'navy' : 'bad')]),
-    el('h3', { class: 'pa-h3', text: 'Total por plano de conta' }),
-    categoryRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Plano de conta' }), el('td', { class: 'pa-num', text: mode === 'aberto' ? 'A receber' : 'Entradas' }), el('td', { class: 'pa-num', text: mode === 'aberto' ? 'A pagar' : 'Sa√≠das' })]), ...categoryRows])) : el('p', { class: 'pa-empty', text: 'Nenhuma conta encontrada para estes filtros.' }),
-    el('h3', { class: 'pa-h3', text: mode === 'aberto' ? `Contas em aberto (${openTitleCount} t√≠tulo(s), ${movements.length} linha(s) por conta)` : `Lan√ßamentos do filtro (${movements.length})` }),
-    movementRows.length ? el('div', { class: 'pa-table-scroll' }, el('table', { class: 'pa-kv pa-report', 'data-testid': 'fin-report-movements' }, [el('tr', { class: 'pa-kv-total' }, [el('td', { text: mode === 'aberto' ? 'Vencimento' : 'Data' }), mode === 'aberto' && el('td', { text: 'Cliente / fornecedor' }), el('td', { text: 'Descri√ß√£o' }), el('td', { text: 'Plano de conta' }), mode === 'aberto' && el('td', { text: 'Situa√ß√£o' }), el('td', { class: 'pa-num', text: mode === 'aberto' ? 'Saldo' : 'Valor' })]), ...movementRows])) : el('p', { class: 'pa-empty', text: 'Nenhum lan√ßamento encontrado para estes filtros.' }),
-    mode === 'realizado' && el('details', {}, [el('summary', { text: `Clientes inadimplentes (${overdueRows.length})` }), overdueRows.length ? el('table', { class: 'pa-kv pa-report' }, overdueRows) : el('p', { class: 'pa-empty', text: 'Nenhum cliente inadimplente.' }), el('p', { class: 'pa-hint', text: 'Consulta do saldo atual dos clientes; n√£o segue os filtros deste relat√≥rio.' })]),
-    mode === 'realizado' && el('p', { class: 'pa-hint', text: 'Saldo de caixa n√£o √© o mesmo que lucro. Perdas sem movimenta√ß√£o de dinheiro ficam fora deste relat√≥rio e continuam no relat√≥rio gerencial de produ√ß√£o.' }),
-  ]);
-}
-
-const CATEGORY_KINDS = [
-  ['despesaVariavel', 'Despesa Vari√°vel', 'Despesas Vari√°veis'],
-  ['despesaFixa', 'Despesa Fixa', 'Despesas Fixas'],
-  ['custo', 'Custo', 'Custos'],
-  ['receita', 'Receita', 'Receitas'],
-  ['perda', 'Perda', 'Perdas'],
-];
-const kindShort = (k) => ({ despesaFixa: 'Fixa', despesaVariavel: 'Vari√°vel', custo: 'Custo', receita: 'Receita', perda: 'Perda' }[k] || '');
-
-/** <optgroup>s of the despesa-able categories (fixa/vari√°vel), subcategorias indented, archived hidden. */
-function despesaCategoryGroups(store) {
-  return [['despesaVariavel', 'Despesas Vari√°veis'], ['despesaFixa', 'Despesas Fixas'], ['custo', 'Custos']].map(([kind, label]) => {
-    const cats = store.state.categories.filter((c) => c.kind === kind && !c.archived);
-    const tops = cats.filter((c) => !c.parentId);
-    const opts = [];
-    for (const t of tops) {
-      opts.push(el('option', { value: t.id, text: t.name }));
-      for (const sub of cats.filter((c) => c.parentId === t.id)) opts.push(el('option', { value: sub.id, text: `‚Äî ${sub.name}` }));
-    }
-    for (const orphan of cats.filter((c) => c.parentId && !tops.some((t) => t.id === c.parentId))) opts.push(el('option', { value: orphan.id, text: orphan.name }));
-    return opts.length ? el('optgroup', { label }, opts) : null;
-  }).filter(Boolean);
-}
-
-function financeiroPanel(ctx) {
-  const { store } = ctx;
-  const month = ctx.view.financeMonth || currentMonth();
-  const [dreYear, dreMonthNumber] = month.split('-').map(Number);
-  const dreMonthStart = `${month}-01`;
-  const dreMonthEnd = `${month}-${String(new Date(dreYear, dreMonthNumber, 0).getDate()).padStart(2, '0')}`;
-  const type = ctx.view.financeType || 'todos';
-  const catName = (id) => store.get('categories', id)?.name || '(sem categoria)';
-  const movements = [];
-  for (const s of store.state.sales) movements.push({ id: s.id, at: s.at, type: 'receita', label: store.get('products', s.productId)?.name || 'Venda r√°pida', description: s.channel || 'Venda', amount: (s.qty || 0) * (s.unitPrice || 0), reversalKind: 'sale', reversed: store.isReversed('sale', s.id) });
-  for (const p of store.state.payments) {
-    const enc = store.get('encomendas', p.encomendaId); const cli = enc?.clienteId ? store.get('clients', enc.clienteId) : null;
-    movements.push({ id: p.id, at: p.at, type: 'receita', label: cli?.name || 'Pagamento de venda', description: ['Pagamento', p.forma].filter(Boolean).join(' ¬∑ '), amount: p.valor || 0, reversalKind: 'payment', reversed: store.isReversed('payment', p.id) });
-  }
-  for (const income of store.state.incomes || []) movements.push({ id: income.id, at: income.at, type: 'receita', label: catName(income.categoryId), description: income.description || 'Outra receita', amount: income.valor || 0, reversalKind: 'income', reversed: store.isReversed('income', income.id) });
-  for (const d of store.state.despesas) {
-    const kind = store.get('categories', d.categoryId)?.kind;
-    const movType = kind === 'custo' ? 'custo' : 'despesa';
-    movements.push({ id: d.id, at: d.at, type: movType, label: catName(d.categoryId), description: [kindShort(kind), d.description].filter(Boolean).join(' ¬∑ '), amount: d.valor || 0, reversalKind: 'despesa', reversed: store.isReversed('despesa', d.id) });
-  }
-  for (const v of store.state.variableCosts) movements.push({ id: v.id, at: v.at, type: 'custo', label: 'Custo antigo', description: v.note || '', amount: v.amount || 0, reversalKind: 'variableCost', reversed: store.isReversed('variableCost', v.id) });
-  for (const st of store.state.financeSettlements) {
-    const title = store.get('financeTitles', st.titleId); if (!title) continue;
-    if (st.kind === 'client-payment-allocation' || st.kind === 'credit') continue;
-    const kind = store.get('categories', title.categoryId)?.nature;
-    const discount = st.kind === 'discount'; const loss = st.kind === 'loss';
-    movements.push({ id: st.id, at: st.at, type: discount || loss ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: loss ? 'Perda com cliente' : discount ? 'Desconto concedido na quita√ß√£o' : (title.partyName || title.description), description: [title.partyName || title.description, discount || loss ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' ¬∑ '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount || loss });
-  }
-  for (const title of store.state.financeTitles) {
-    const state = titleState(store, title); if (title.cancelledAt || state.balance <= 0.005) continue;
-    const nature = store.get('categories', title.categoryId)?.nature;
-    movements.push({ id: `pending-${title.id}`, at: title.dueDate, type: title.direction === 'receber' ? 'receita' : nature === 'custo' ? 'custo' : 'despesa', label: title.partyName || title.description, description: `${state.status === 'vencido' ? 'Vencido' : 'Pendente'} ¬∑ ${title.description}`, amount: state.balance, pending: true });
-  }
-  for (const loss of store.state.perdas) movements.push({ id: loss.id, at: loss.at, type: 'custo', label: 'Perda de produ√ß√£o', description: loss.note || 'Sem sa√≠da de caixa', amount: loss.amount || 0, reversalKind: 'perda', reversed: store.isReversed('perda', loss.id), noncash: true });
-  for (const a of store.state.cashAdjustments) movements.push({ id: a.id, at: a.at, type: a.direction === 'saida' ? 'despesa' : 'receita', label: a.kind === 'transfer' ? 'Transfer√™ncia entre contas' : a.kind === 'client-payment' ? 'Pagamento total de cliente' : 'Ajuste financeiro', description: a.description || '', amount: a.amount || 0, reversalKind: 'cashAdjustment', reversed: store.isReversed('cashAdjustment', a.id), transfer: a.kind === 'transfer' });
-  let items = movements.filter((m) => monthOf(m.at) === month);
-  if (type !== 'todos') items = items.filter((m) => m.type === type);
-  items.sort((a, b) => (a.at < b.at ? 1 : -1));
-  const entrada = items.reduce((s, m) => !m.reversed && !m.pending && !m.noncash && !m.transfer && m.type === 'receita' ? s + m.amount : s, 0);
-  const saida = items.reduce((s, m) => !m.reversed && !m.pending && !m.noncash && !m.transfer && m.type !== 'receita' ? s + m.amount : s, 0);
-  const list = logList(items, (m) => el('li', { class: 'pa-list-item' + (m.reversed ? ' pa-reversed' : ''), 'data-search': `${m.label} ${m.description}` }, [
-    el('div', { class: 'pa-grow' }, [el('div', {}, [el('strong', { text: m.label }), m.pending && el('span', { class: 'pa-badge pa-warn', text: 'previsto' }), m.noncash && el('span', { class: 'pa-badge', text: 'sem caixa' })].filter(Boolean)), el('span', { class: 'pa-muted', text: m.description })]),
-    el('span', { class: `pa-num ${m.pending || m.noncash ? 'pa-muted' : m.type === 'receita' ? 'pa-positive' : 'pa-bad'}`, text: `${m.pending || m.noncash ? '‚óå' : m.type === 'receita' ? '+' : '‚àí'} ${brl(m.amount)}` }),
-    m.reversalKind && estornoControl(ctx, m.reversalKind, m.id),
-  ]));
-  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'fin-month', type: 'month', value: month });
-  monthInput.addEventListener('change', () => ctx.actions.setFinanceMonth(monthInput.value || currentMonth()));
-  const chip = (key, label) => el('button', { class: 'pa-chip' + (type === key ? ' pa-chip-on' : ''), onclick: () => ctx.actions.setFinanceType(key) }, label);
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Entradas e sa√≠das' }), el('h2', { text: 'Lan√ßamentos' })]),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'dre-month-open', onclick: () => ctx.actions.openModal({ kind: 'dre-preview', start: dreMonthStart, end: dreMonthEnd }) }, 'DRE do m√™s'),
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'cat-manage', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, 'Categorias'),
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-accounts-open', onclick: () => ctx.actions.openModal({ kind: 'finance-accounts' }) }, 'Contas e bancos'),
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'fin-methods-open', onclick: () => ctx.actions.openModal({ kind: 'finance-methods' }) }, 'Formas de pagamento'),
-      ]),
-    ]),
-    el('div', { class: 'pa-actiongrid' }, [
-      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'fin-entry-new', onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction: 'receber' }) }, '+ Nova entrada'),
-      el('button', { class: 'pa-btn', 'data-testid': 'fin-exit-new', onclick: () => ctx.actions.openModal({ kind: 'finance-title-add', direction: 'pagar' }) }, '+ Nova sa√≠da'),
-    ]),
-    el('p', { class: 'pa-hint', text: 'Escolha apenas Entrada ou Sa√≠da. Dentro do lan√ßamento voc√™ informa se j√° foi quitado ou se ficar√° pendente, al√©m da data, categoria, forma de pagamento e conta financeira.' }),
-    el('div', { class: 'pa-row pa-period-title' }, [el('span', { class: 'pa-lab', text: 'M√™s de refer√™ncia' }), monthInput]),
-    el('div', { class: 'pa-statgrid' }, [statCard('Entradas', brl(entrada), 'ok'), statCard('Sa√≠das', brl(saida), saida > 0 ? 'warn' : 'soft'), statCard('Saldo', brl(entrada - saida), entrada - saida >= 0 ? 'navy' : 'bad')]),
-    el('div', { class: 'pa-chiprow' }, [chip('todos', 'Todos'), chip('receita', 'Receitas'), chip('despesa', 'Despesas'), chip('custo', 'Custos')]),
-    items.length ? el('div', {}, [searchInput('Buscar movimenta√ß√£o‚Ä¶', list, 'fin-search'), list]) : el('p', { class: 'pa-empty', text: 'Nenhuma movimenta√ß√£o com este filtro.' }),
-  ]);
-}
-
-MODALS['finance-adjustment'] = (ctx) => financeAdjustmentSheet(ctx);
-function financeAdjustmentSheet(ctx) {
-  const accounts = accountOptions(ctx.store);
-  const kind = el('select', { class: 'pa-input', 'data-testid': 'fin-adjust-kind' }, [el('option', { value: 'adjustment', text: 'Ajuste de entrada ou sa√≠da' }), el('option', { value: 'transfer', text: 'Transfer√™ncia entre contas' })]);
-  const direction = el('select', { class: 'pa-input' }, [el('option', { value: 'entrada', text: 'Entrada' }), el('option', { value: 'saida', text: 'Sa√≠da' })]);
-  const from = el('select', { class: 'pa-input' }, accounts.map((a) => el('option', { value: a.id, text: a.name }))); const to = el('select', { class: 'pa-input' }, accounts.map((a) => el('option', { value: a.id, text: a.name })));
-  const date = el('input', { class: 'pa-input', type: 'date', value: todayInput() }); const amount = moneyField(null, 'fin-adjust-amount'); const description = el('input', { class: 'pa-input', type: 'text', placeholder: 'Motivo do ajuste' });
-  const directionField = field('Tipo do ajuste', direction); const toField = field('Conta de destino', to);
-  const reconcile = () => { const transfer = kind.value === 'transfer'; directionField.style.display = transfer ? 'none' : ''; toField.style.display = transfer ? '' : 'none'; };
-  kind.addEventListener('change', reconcile); reconcile();
-  function save() { const value = parseNum(amount.input.value); if (!(value > 0)) { amount.input.focus(); return; } if (kind.value === 'transfer' && from.value === to.value) { to.focus(); return; } ctx.actions.mutate((s) => s.addCashAdjustment({ id: uuid(), at: dateIso(date.value), kind: kind.value, direction: direction.value, amount: value, accountId: from.value || undefined, ...(kind.value === 'transfer' ? { toAccountId: to.value } : {}), description: description.value.trim() || (kind.value === 'transfer' ? 'Transfer√™ncia' : 'Ajuste financeiro') })); }
-  return sheet({ title: 'Ajuste financeiro', rows: [field('Opera√ß√£o', kind), field(kind.value === 'transfer' ? 'Conta de origem' : 'Conta', from), toField, directionField, field('Data', date), field('Valor', amount), field('Descri√ß√£o', description), el('p', { class: 'pa-hint', text: 'Transfer√™ncias mudam o dinheiro de lugar, mas n√£o s√£o receita nem despesa.' })], onSave: save, saveTestid: 'fin-adjust-save' });
-}
-
-MODALS['despesa-add'] = (ctx) => despesaSheet(ctx);
-MODALS['income-add'] = (ctx) => incomeSheet(ctx);
-
-function incomeSheet(ctx) {
-  const { store } = ctx;
-  const cats = store.state.categories.filter((c) => c.kind === 'receita' && !c.archived);
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'income-date', type: 'date', value: todayInput() });
-  const preferred = cats.find((c) => norm(c.name).includes('outra')) || cats[0];
-  const catSel = el('select', { class: 'pa-input', 'data-testid': 'income-cat' }, cats.map((c) => el('option', { value: c.id, text: c.name, ...(preferred && c.id === preferred.id ? { selected: 'selected' } : {}) })));
-  const desc = el('input', { class: 'pa-input', 'data-testid': 'income-desc', type: 'text', placeholder: 'Ex.: oficina, reembolso, renda extra' });
-  const amount = moneyField(null, 'income-amount');
-  function save() {
-    const valor = parseNum(amount.input.value);
-    if (!(valor > 0)) { amount.input.focus(); return; }
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addIncome({ id: uuid(), at, valor, categoryId: catSel.value || undefined, description: desc.value.trim() || 'Outra receita' }));
-  }
-  return sheet({ title: 'Lan√ßar outra receita', rows: [field('Data', date), cats.length ? field('Categoria', catSel) : null, field('Descri√ß√£o', desc), field('Valor recebido', amount), el('p', { class: 'pa-hint', text: 'Use somente para dinheiro que n√£o veio de uma venda. Pagamentos de encomendas j√° entram sozinhos.' })].filter(Boolean), onSave: save, saveTestid: 'income-save' });
-}
-
-function despesaSheet(ctx) {
-  const { store } = ctx;
-  const groups = despesaCategoryGroups(store);
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'desp-date', type: 'date', value: todayInput() });
-  const catSel = el('select', { class: 'pa-input', 'data-testid': 'desp-cat' }, groups);
-  const desc = el('input', { class: 'pa-input', 'data-testid': 'desp-desc', type: 'text', placeholder: 'descri√ß√£o (opcional)' });
-  const amount = moneyField(null, 'desp-amount');
-  function save() {
-    const a = parseNum(amount.input.value);
-    if (!catSel.value) { catSel.focus(); return; }
-    if (a == null || !(a > 0)) { amount.input.focus(); return; }
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addDespesa({ id: uuid(), at, valor: a, categoryId: catSel.value, ...(desc.value.trim() ? { description: desc.value.trim() } : {}) }));
-  }
-  if (!groups.length) {
-    return sheet({ title: 'Lan√ßar despesa', rows: [el('p', { class: 'pa-hint', text: 'Crie uma categoria de despesa primeiro ‚Äî toque em ‚ÄúCategorias‚Äù na tela de Despesas.' })] });
-  }
-  return sheet({
-    title: 'Lan√ßar despesa',
-    rows: [field('Data', date), field('Categoria', catSel), field('Descri√ß√£o', desc), field('Valor', amount)],
-    onSave: save, saveTestid: 'desp-add',
-  });
-}
-
-MODALS['categorias'] = (ctx) => categoriasSheet(ctx);
-
-const categoryNature = (kind) => kind === 'receita' ? 'receita' : kind === 'custo' || kind === 'perda' ? 'custo' : 'despesa';
-const categoryRootKey = (kind) => kind === 'receita' ? 'receitas' : kind === 'custo' || kind === 'perda' ? 'custos' : 'despesas';
-const categoryInUse = (store, id) => ['despesas', 'incomes', 'financeTitles', 'cashAdjustments']
-  .some((collection) => store.state[collection].some((record) => record.categoryId === id))
-  || store.state.categories.some((category) => category.parentId === id);
-const categoryDirection = (category) => category.direction || (category.nature === 'receita' || category.kind === 'receita' ? 'receber' : 'pagar');
-const categoryNameConflict = (store, name, direction, exceptId = '') => store.state.categories.some((category) =>
-  !category.archived && category.id !== exceptId && categoryDirection(category) === direction && norm(category.name) === norm(name));
-const categoryCodeConflict = (store, code, exceptId = '') => Boolean(code) && store.state.categories.some((category) =>
-  !category.archived && category.id !== exceptId && String(category.code || '').trim() === code);
-const categoryParents = (store, kind, exceptId = '') => store.state.categories.filter((category) =>
-  !category.archived && !category.parentId && category.id !== exceptId && category.nature === categoryNature(kind));
-function nextCategoryCode(store, parentId) {
-  const parent = store.get('categories', parentId);
-  if (!parent?.code) return '';
-  const prefix = `${parent.code}.`;
-  const used = new Set(store.state.categories.map((category) => String(category.code || '')));
-  let number = 1;
-  while (used.has(`${prefix}${number}`)) number++;
-  return `${prefix}${number}`;
-}
-
-// Keep old category ids for financial history; archived categories stay available for inspection.
-function categoriasSheet(ctx) {
-  const { store } = ctx;
-  const nameI = el('input', { class: 'pa-input pa-grow', 'data-testid': 'cat-name', type: 'text', placeholder: 'Nova categoria' });
-  const codeI = el('input', { class: 'pa-input', 'data-testid': 'cat-code', type: 'text', placeholder: 'C√≥digo autom√°tico' });
-  const kindSel = el('select', { class: 'pa-input', 'data-testid': 'cat-kind' }, CATEGORY_KINDS.map(([v, t]) => el('option', { value: v, text: t })));
-  const parentSel = el('select', { class: 'pa-input', 'data-testid': 'cat-parent' });
-  const error = el('p', { class: 'pa-sheet-msg', role: 'alert' });
-  function fillParents() {
-    const previous = parentSel.value;
-    const root = categoryByKey(store, categoryRootKey(kindSel.value));
-    const tops = categoryParents(store, kindSel.value);
-    parentSel.replaceChildren(el('option', { value: '', text: '‚Äî categoria principal ‚Äî' }), ...tops.map((top) => el('option', { value: top.id, text: top.name })));
-    parentSel.value = tops.some((top) => top.id === previous) ? previous : tops.some((top) => top.id === root?.id) ? root.id : '';
-  }
-  fillParents();
-  kindSel.addEventListener('change', fillParents);
-  function add() {
-    const nm = nameI.value.trim();
-    const code = codeI.value.trim() || nextCategoryCode(store, parentSel.value);
-    error.textContent = '';
-    if (!nm) { error.textContent = 'Informe o nome da categoria.'; nameI.focus(); return; }
-    if (categoryNameConflict(store, nm, kindSel.value === 'receita' ? 'receber' : 'pagar')) { error.textContent = 'J√° existe uma categoria ativa com esse nome para esta opera√ß√£o.'; nameI.focus(); return; }
-    if (categoryCodeConflict(store, code)) { error.textContent = 'Esse c√≥digo j√° pertence a outra categoria ativa.'; codeI.focus(); return; }
-    const parent = store.get('categories', parentSel.value);
-    ctx.actions.mutateModal((s) => s.upsertCategory({ id: uuid(), name: nm, ...(code ? { code } : {}), kind: kindSel.value, nature: categoryNature(kindSel.value), cashFlowGroup: kindSel.value === 'perda' ? 'nao-caixa' : parent?.cashFlowGroup || 'operacional', ...(parentSel.value ? { parentId: parentSel.value } : {}) }));
-  }
-
-  const active = store.state.categories.filter((category) => !category.archived).slice()
-    .sort((a, b) => String(a.code || '99').localeCompare(String(b.code || '99'), undefined, { numeric: true }) || a.name.localeCompare(b.name, 'pt-BR'));
-  const archived = store.state.categories.filter((category) => category.archived).slice()
-    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  const catRow = (category) => el('li', { class: 'pa-list-item', 'data-testid': 'cat-row' }, [
-    el('span', { class: 'pa-num pa-muted pa-category-code', text: category.code || '' }),
-    el('div', { class: 'pa-grow pa-category-info' }, [el('strong', { text: `${category.parentId ? '‚Äî ' : ''}${category.name}` }), el('span', { class: 'pa-muted', text: [kindShort(category.kind) || category.nature, category.duplicateOf ? `Consolidada em ${store.get('categories', category.duplicateOf)?.name || 'outra categoria'}` : category.archived ? 'Arquivada' : 'Ativa'].join(' ¬∑ ') })]),
-    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-edit', onclick: () => ctx.actions.openModal({ kind: 'category-edit', id: category.id }) }, 'Editar'),
-    !category.archived && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Arquivar', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: true })) }, 'üóÑ'),
-    category.archived && !category.duplicateOf && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutateModal((s) => s.upsertCategory({ ...category, archived: false })) }, 'Reativar'),
-    !category.archived && !category.systemKey && !categoryInUse(store, category.id) && el('button', { class: 'pa-btn pa-ghost pa-sm', title: 'Excluir categoria nunca usada', onclick: () => ctx.actions.mutateModal((s) => s.removeCategory(category.id)) }, '‚úï'),
-  ].filter(Boolean));
-
-  return sheet({
-    title: 'Organizar categorias',
-    rows: [
-      el('p', { class: 'pa-hint', text: 'Cada receita, custo ou despesa deve ter uma categoria clara. As c√≥pias consolidadas ficam arquivadas; os lan√ßamentos antigos continuam com seus v√≠nculos.' }),
-      field('Nova categoria', nameI),
-      el('div', { class: 'pa-filtergrid' }, [field('Tipo', kindSel), field('Grupo principal', parentSel), field('C√≥digo (opcional)', codeI)]),
-      error,
-      el('div', { class: 'pa-row' }, [el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'cat-add', onclick: add }, '+ Adicionar')]),
-      el('h3', { class: 'pa-h3', text: `Categorias ativas (${active.length})` }),
-      el('ul', { class: 'pa-list pa-tight' }, active.map(catRow)),
-      archived.length && el('details', {}, [el('summary', { text: `Categorias arquivadas (${archived.length})` }), el('ul', { class: 'pa-list pa-tight' }, archived.map(catRow))]),
-      el('div', { class: 'pa-row pa-cardfoot' }, [el('button', { class: 'pa-btn pa-ghost pa-sm', 'data-testid': 'cat-done', onclick: () => ctx.actions.closeModal() }, 'Concluir')]),
-    ].filter(Boolean),
-  });
-}
-
-MODALS['category-edit'] = (ctx, modal) => categoryEditSheet(ctx, modal.id);
-function categoryEditSheet(ctx, id) {
-  const { store } = ctx;
-  const category = store.get('categories', id);
-  if (!category) return sheet({ title: 'Categoria n√£o encontrada', rows: [] });
-  const locked = Boolean(category.systemKey || categoryInUse(store, id));
-  const name = el('input', { class: 'pa-input', type: 'text', value: category.name, 'data-testid': 'cat-edit-name' });
-  const code = el('input', { class: 'pa-input', type: 'text', value: category.code || '', 'data-testid': 'cat-edit-code' });
-  const kind = el('select', { class: 'pa-input', 'data-testid': 'cat-edit-kind' }, CATEGORY_KINDS.map(([value, label]) => el('option', { value, text: label, ...(value === category.kind ? { selected: 'selected' } : {}) })));
-  const parent = el('select', { class: 'pa-input', 'data-testid': 'cat-edit-parent' });
-  const fillParents = () => {
-    const choices = categoryParents(store, kind.value, id);
-    const root = categoryByKey(store, categoryRootKey(kind.value));
-    const previous = parent.value || category.parentId;
-    parent.replaceChildren(el('option', { value: '', text: '‚Äî categoria principal ‚Äî' }), ...choices.map((item) => el('option', { value: item.id, text: item.name })));
-    parent.value = choices.some((item) => item.id === previous) ? previous : choices.some((item) => item.id === root?.id) ? root.id : '';
-  };
-  fillParents(); kind.addEventListener('change', fillParents);
-  const error = el('p', { class: 'pa-sheet-msg', role: 'alert' });
-  function save() {
-    const newName = name.value.trim(); const newCode = code.value.trim();
-    const newKind = locked ? category.kind : kind.value;
-    const newParentId = locked ? category.parentId : parent.value || undefined;
-    error.textContent = '';
-    if (!newName) { error.textContent = 'Informe o nome da categoria.'; name.focus(); return; }
-    if (norm(newName) !== norm(category.name) && categoryNameConflict(store, newName, categoryDirection({ ...category, kind: newKind, nature: categoryNature(newKind) }), id)) { error.textContent = 'J√° existe uma categoria ativa com esse nome para esta opera√ß√£o.'; name.focus(); return; }
-    if (newCode !== String(category.code || '').trim() && categoryCodeConflict(store, newCode, id)) { error.textContent = 'Esse c√≥digo j√° pertence a outra categoria ativa.'; code.focus(); return; }
-    const parentCategory = store.get('categories', newParentId);
-    const record = category.systemKey
-      ? { ...category, name: newName, code: newCode, customName: newName !== DEFAULT_CHART.find((entry) => entry.systemKey === category.systemKey)?.name, customCode: newCode !== DEFAULT_CHART.find((entry) => entry.systemKey === category.systemKey)?.code }
-      : { ...category, name: newName, code: newCode || undefined, kind: newKind, nature: locked ? category.nature : categoryNature(newKind), parentId: newParentId, cashFlowGroup: locked ? category.cashFlowGroup : newKind === 'perda' ? 'nao-caixa' : parentCategory?.cashFlowGroup || 'operacional' };
-    ctx.actions.mutateModal((s) => s.upsertCategory(record));
-    ctx.actions.openModal({ kind: 'categorias' });
-  }
-  return sheet({ title: `Editar categoria ¬∑ ${category.name}`, rows: [
-    field('Nome', name), field('C√≥digo do plano de contas', code),
-    locked ? el('p', { class: 'pa-hint', text: category.systemKey ? 'Esta categoria faz parte do plano padr√£o. O tipo e o grupo s√£o fixos para preservar os relat√≥rios; nome e c√≥digo podem ser editados.' : 'Esta categoria j√° tem lan√ßamentos ou subcategorias. Para preservar o hist√≥rico, edite apenas o nome e o c√≥digo.' }) : el('div', { class: 'pa-filtergrid' }, [field('Tipo', kind), field('Grupo principal', parent)]),
-    error, el('button', { class: 'pa-btn pa-ghost', onclick: () => ctx.actions.openModal({ kind: 'categorias' }) }, '‚Üê Voltar √†s categorias'),
-  ], onSave: save, saveTestid: 'cat-edit-save' });
-}
-
-// ‚îÄ‚îÄ Perdas / baixas (Rev 03 #3 ‚Äî value lost to waste) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-const PERDA_KINDS = [['insumo', 'Insumo'], ['produto', 'Produto'], ['embalagem', 'Embalagem'], ['outro', 'Outro']];
-
-function perdasPanel(ctx) {
-  const { store } = ctx;
-  const all = store.state.perdas.slice().sort((a, b) => (a.at < b.at ? 1 : -1));
-  const month = ctx.view.logMonth;
-  const items = month ? all.filter((p) => monthOf(p.at) === month) : all;
-  const total = items.reduce((s, p) => (store.isReversed('perda', p.id) ? s : s + (p.amount || 0)), 0);
-  const list = logList(items, (p) => {
-    const kindLabel = PERDA_KINDS.find((k) => k[0] === p.refKind)?.[1] || 'Outro';
-    const resolved = (p.refKind === 'insumo' && p.refId && store.get('ingredients', p.refId)?.name)
-      || (p.refKind === 'produto' && p.refId && store.get('products', p.refId)?.name) || null;
-    // Title = the lost item (Insumo/Produto) in bold; observa√ß√£o (note) below in smaller type.
-    const title = resolved ? (p.qty ? `${resolved} ¬∑ ${fmtNum(p.qty)}` : resolved) : (p.note || kindLabel);
-    const subtitle = resolved ? (p.note || kindLabel) : (p.note ? kindLabel : '');
-    return el('li', { class: 'pa-list-item' + (store.isReversed('perda', p.id) ? ' pa-reversed' : ''), 'data-search': `${resolved || ''} ${p.note || ''}` }, [
-      el('div', { class: 'pa-grow' }, [
-        el('div', {}, el('strong', { text: title })),
-        subtitle && el('span', { class: 'pa-muted', text: subtitle }),
-      ].filter(Boolean)),
-      el('span', { class: 'pa-num pa-bad', text: `‚àí ${brl(p.amount)}` }),
-      estornoControl(ctx, 'perda', p.id),
-    ]);
-  });
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('h2', { class: 'pa-grow', text: 'Perdas' }),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'perda-new', onclick: () => ctx.actions.openModal({ kind: 'perda-add' }) }, '+ Registrar'),
-    ]),
-    el('p', { class: 'pa-hint', text: 'O que se perdeu: massa que deu errado, produto que n√£o vendeu, embalagem danificada. A perda afeta o resultado gerencial da produ√ß√£o, mas n√£o cria outra sa√≠da de dinheiro.' }),
-    all.length > 0 && logFilters(ctx, list, { searchPlaceholder: 'Buscar perda‚Ä¶', searchTestid: 'perda-search', monthTestid: 'perda-month' }),
-    items.length > 0 && el('div', { class: 'pa-row pa-totals' }, [el('span', { class: 'pa-grow' }, [el('strong', { text: `Total${month ? ` (${monthLabel(month)})` : ''} ` }), brl(total)])]),
-    all.length === 0
-      ? el('p', { class: 'pa-empty', text: 'Nenhuma perda registrada. Toque em ‚Äú+ Registrar‚Äù.' })
-      : items.length === 0 ? el('p', { class: 'pa-empty', text: 'Nenhuma perda neste m√™s.' }) : list,
-  ].filter(Boolean));
-}
-
-MODALS['perda-add'] = (ctx) => perdaSheet(ctx);
-
-function perdaSheet(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const es = store.toEngineStore();
-  const lens = estimateLens(config);
-  const date = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'perda-date', type: 'date', value: todayInput() });
-  const kind = el('select', { class: 'pa-input', 'data-testid': 'perda-kind' }, PERDA_KINDS.map(([v, t]) => el('option', { value: v, text: t })));
-  const qty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'perda-qty', type: 'text', inputmode: 'decimal', placeholder: 'qtd', value: '1' });
-  const refSel = el('select', { class: 'pa-input', 'data-testid': 'perda-ref' });
-  const note = el('input', { class: 'pa-input', 'data-testid': 'perda-note', type: 'text', placeholder: 'descri√ß√£o (opcional)' });
-  const amount = moneyField(null, 'perda-amount');
-  const refRow = el('div', { class: 'pa-row pa-form' }, [refSel, qty]);
-
-  const unitCostOf = (k, id) => {
-    try {
-      if (k === 'insumo') return store.currentPrice(id);
-      if (k === 'produto') return productUnitCost(es, id, config, lens);
-    } catch { /* unpriced */ }
-    return null;
-  };
-  function fillRefs() {
-    const k = kind.value;
-    const opts = k === 'insumo' ? store.state.ingredients : k === 'produto' ? store.state.products : [];
-    refSel.replaceChildren(...opts.map((o) => el('option', { value: o.id, text: o.name })));
-    const refable = k === 'insumo' || k === 'produto';
-    refRow.style.display = refable ? '' : 'none';
-    recalc();
-  }
-  function recalc() {
-    const k = kind.value;
-    if (k !== 'insumo' && k !== 'produto') return; // 'embalagem'/'outro' ‚Üí she types the amount
-    const c = unitCostOf(k, refSel.value);
-    const q = parseNum(qty.value) || 0;
-    if (c != null) amount.input.value = fmtMoneyInput(c * q);
-  }
-  kind.addEventListener('change', fillRefs);
-  refSel.addEventListener('change', recalc);
-  qty.addEventListener('input', recalc);
-  fillRefs();
-
-  function save() {
-    const a = parseNum(amount.input.value);
-    if (a == null || !(a > 0)) { amount.input.focus(); return; }
-    const k = kind.value;
-    const refable = k === 'insumo' || k === 'produto';
-    const ref = refable ? store.get(k === 'insumo' ? 'ingredients' : 'products', refSel.value) : null;
-    const q = parseNum(qty.value);
-    const noteText = note.value.trim() || (ref ? `${q} √ó ${ref.name}` : '');
-    const at = date.value ? new Date(`${date.value}T12:00:00`).toISOString() : nowIso();
-    ctx.actions.mutate((s) => s.addPerda({
-      id: uuid(), at, amount: a, refKind: k,
-      ...(refable && ref ? { refId: ref.id, qty: q } : {}),
-      ...(noteText ? { note: noteText } : {}),
-    }));
-  }
-  return sheet({
-    title: 'Registrar perda',
-    rows: [field('Data', date), field('Tipo', kind), refRow, field('Descri√ß√£o (opcional)', note), field('Valor perdido', amount),
-      el('p', { class: 'pa-hint', text: 'Para insumo ou produto, o valor j√° vem calculado pela quantidade ‚Äî ajuste se precisar.' })],
-    onSave: save, saveTestid: 'perda-add',
-  });
-}
-
-// ‚îÄ‚îÄ Relat√≥rios (period P&L; ¬ß4.5 actuals) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function relatoriosPanel(ctx) {
-  const { store } = ctx;
-  const month = ctx.view.reportMonth || currentMonth();
-  const sum = monthSummary(store, month);
-  const despCat = despesasByCategory(store, month);
-  const sortKey = ctx.view.prodSort || 'lucro';
-  const byProduct = productSummary(store, month).sort((a, b) =>
-    sortKey === 'qtd' ? b.qty - a.qty : sortKey === 'faturamento' ? b.faturamento - a.faturamento : b.lucroEstimado - a.lucroEstimado);
-  const byClient = clientSummary(store, month);
-
-  const monthInput = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'rel-month', type: 'month', value: month });
-  monthInput.addEventListener('change', () => ctx.actions.setReportMonth(monthInput.value || currentMonth()));
-
-  const kv = (label, value, cls, bad) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (bad ? ' pa-bad' : ''), text: value })]);
-  const empty = sum.recebido === 0 && sum.despesas === 0 && sum.faturado === 0;
-
-  // The cash-basis result.
-  const resultado = el('table', { class: 'pa-kv' }, [
-    el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Entrou' })]),
-    kv('Recebido', brl(sum.recebido)),
-    sum.recebidoOutrasReceitas > 0 && kv('Outras receitas', brl(sum.recebidoOutrasReceitas)),
-    sum.faturado !== sum.recebidoVendas && kv('Faturado (entregue)', brl(sum.faturado)),
-    sum.aReceber > 0 && kv('A receber', brl(sum.aReceber)),
-    el('tr', { class: 'pa-kv-sec' }, [el('td', { colspan: '2', text: 'Saiu' })]),
-    kv('Despesas vari√°veis', brl(sum.despVar)),
-    kv('Despesas fixas', brl(sum.despFix)),
-    sum.custos > 0 && kv('Custos', brl(sum.custos)),
-    sum.perdas > 0 && kv('Perdas', brl(sum.perdas)),
-          kv('Saldo de caixa', brl(sum.saldoCaixa), 'pa-kv-total', sum.saldoCaixa < 0),
-    // Margem only when the month is profitable ‚Äî on a stocking-up month (despesas ‚â´ recebido) the
-    // % is extreme noise; the negative Lucro do m√™s already tells the story.
-    sum.recebido > 0 && sum.lucro >= 0 && kv('Margem', `${(sum.margem * 100).toFixed(0)}%`),
-  ].filter(Boolean));
-
-  const prodSortBtn = (key, label) => el('button', { class: 'pa-chip' + (sortKey === key ? ' pa-chip-on' : ''), 'data-testid': `rel-sort-${key}`, onclick: () => ctx.actions.setProdSort(key) }, label);
-
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-row' }, [
-      el('h2', { class: 'pa-grow', text: 'Relat√≥rios' }),
-      el('span', { class: 'pa-lab', text: 'M√™s' }), monthInput,
-    ]),
-    empty
-      ? el('p', { class: 'pa-empty', text: 'Nada registrado neste m√™s.' })
-      : el('div', {}, [
-          resultado,
-          el('p', { class: 'pa-hint', text: 'Saldo de caixa = dinheiro recebido ‚àí pagamentos realizados. Perdas sem pagamento no momento ficam separadas para n√£o contar o mesmo custo duas vezes.' }),
-
-          despCat.length > 0 && el('h3', { class: 'pa-h3', text: 'Despesas por categoria' }),
-          despCat.length > 0 && el('table', { class: 'pa-kv pa-report' }, despCat.map((d) => el('tr', {}, [
-            el('td', { text: d.name }), el('td', { class: 'pa-num', text: brl(d.total) }),
-          ]))),
-
-          el('h3', { class: 'pa-h3', text: 'Saldo de caixa nos √∫ltimos meses' }),
-          barChart(revenueTrend(store, month, 6)),
-
-          byProduct.length > 0 && el('div', { class: 'pa-row pa-h3row' }, [el('h3', { class: 'pa-h3 pa-grow', text: 'Por produto' }), prodSortBtn('lucro', 'Lucro'), prodSortBtn('qtd', 'Qtd'), prodSortBtn('faturamento', 'Faturamento')]),
-          byProduct.length > 0 && el('table', { class: 'pa-kv pa-report' }, [
-            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Produto' }), el('td', { class: 'pa-num', text: 'Qtd' }), el('td', { class: 'pa-num', text: 'Fatur.' }), el('td', { class: 'pa-num', text: 'Lucro*' })]),
-            ...byProduct.map((r) => el('tr', {}, [
-              el('td', { text: r.name }),
-              el('td', { class: 'pa-num', text: fmtNum(r.qty) }),
-              el('td', { class: 'pa-num', text: brl(r.faturamento) }),
-              el('td', { class: 'pa-num' + (r.lucroEstimado >= 0 ? '' : ' pa-bad'), text: brl(r.lucroEstimado) }),
-            ])),
-          ]),
-          byProduct.length > 0 && el('p', { class: 'pa-hint', text: '* lucro por produto √© uma estimativa (pre√ßo ‚àí custo da receita), para comparar produtos ‚Äî n√£o √© o lucro do caixa acima.' }),
-
-          byClient.length > 0 && el('h3', { class: 'pa-h3', text: 'Por cliente' }),
-          byClient.length > 0 && el('table', { class: 'pa-kv pa-report' }, [
-            el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Cliente' }), el('td', { class: 'pa-num', text: 'Comprou' }), el('td', { class: 'pa-num', text: 'Recebido' }), el('td', { class: 'pa-num', text: 'A receber' })]),
-            ...byClient.map((c) => el('tr', {}, [
-              el('td', { text: c.name }),
-              el('td', { class: 'pa-num', text: brl(c.total) }),
-              el('td', { class: 'pa-num', text: brl(c.recebido) }),
-              el('td', { class: 'pa-num' + (c.saldo > 0.005 ? ' pa-bad' : ''), text: brl(c.saldo) }),
-            ])),
-          ]),
-
-          el('div', { class: 'pa-row pa-form' }, [
-            el('button', { class: 'pa-btn', 'data-testid': 'rel-export', onclick: () => downloadFile(`relatorio-${month}.csv`, reportCsv(month, sum, despCat, byProduct, byClient), 'text/csv') }, 'Exportar CSV'),
-          ]),
-        ].filter(Boolean)),
-  ]);
-}
-
-/** Tiny zero-dependency SVG bar chart of monthly profit (green up / red down). */
-function barChart(series) {
-  const W = 320; const H = 132; const top = 10; const bottom = 26; const left = 6;
-  const plotH = H - top - bottom;
-  const vals = series.map((s) => s.lucro);
-  const hasNeg = vals.some((v) => v < 0);
-  const maxAbs = Math.max(1, ...vals.map((v) => Math.abs(v)));
-  const zeroY = hasNeg ? top + plotH / 2 : top + plotH;
-  const scale = (hasNeg ? plotH / 2 : plotH) / maxAbs;
-  const bw = (W - left * 2) / Math.max(1, series.length);
-
-  const kids = [svgEl('line', { x1: left, y1: zeroY, x2: W - left, y2: zeroY, stroke: 'var(--au-border)' })];
-  series.forEach((s, i) => {
-    const x = left + i * bw + bw * 0.16;
-    const w = bw * 0.68;
-    const h = Math.max(1, Math.abs(s.lucro) * scale);
-    const y = s.lucro >= 0 ? zeroY - h : zeroY;
-    kids.push(svgEl('rect', { x, y, width: w, height: h, rx: 2, fill: s.lucro >= 0 ? 'var(--au-ok)' : '#b3261e' }));
-    kids.push(svgEl('text', { x: x + w / 2, y: H - bottom + 14, 'text-anchor': 'middle', 'font-size': 9, fill: 'var(--au-fg-soft)' }, monthLabel(s.month)));
-    kids.push(svgEl('text', { x: x + w / 2, y: s.lucro >= 0 ? y - 2 : y + h + 9, 'text-anchor': 'middle', 'font-size': 8, fill: 'var(--au-fg-soft)' }, `${Math.round(s.lucro)}`));
-  });
-  return svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'pa-chart', width: '100%', preserveAspectRatio: 'xMidYMid meet' }, kids);
-}
-
-const csvCell = (v) => { const s = String(v ?? ''); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-function reportCsv(month, sum, despCat, byProduct, byClient) {
-  const n2 = (x) => x.toFixed(2).replace('.', ','); // pt-BR decimals; ';' separator
-  const rows = [
-    ['Relat√≥rio', month], [],
-    ['Recebido', n2(sum.recebido)],
-    ['Faturado (entregue)', n2(sum.faturado)],
-    ['A receber', n2(sum.aReceber)],
-    ['Despesas vari√°veis', n2(sum.despVar)],
-    ['Despesas fixas', n2(sum.despFix)],
-    ['Custos', n2(sum.custos || 0)],
-    ['Perdas', n2(sum.perdas)],
-    ['Saldo de caixa', n2(sum.saldoCaixa)],
-    ['Margem %', (sum.margem * 100).toFixed(1).replace('.', ',')],
-    [],
-    ['Despesa (categoria)', 'Valor'],
-    ...despCat.map((d) => [d.name, n2(d.total)]),
-    [],
-    ['Produto', 'Qtd', 'Faturamento', 'Lucro estimado'],
-    ...byProduct.map((r) => [r.name, String(r.qty), n2(r.faturamento), n2(r.lucroEstimado)]),
-    [],
-    ['Cliente', 'Comprou', 'Recebido', 'A receber'],
-    ...byClient.map((c) => [c.name, n2(c.total), n2(c.recebido), n2(c.saldo)]),
-  ];
-  return rows.map((r) => r.map(csvCell).join(';')).join('\n');
-}
-
-// ‚îÄ‚îÄ Simulador (what-if: escalar a receita) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-//
-// Natalia's menu-decision tool: "se eu aumentar a receita em 50% o rendimento sobe e a m√£o de obra
-// sobe pouco ‚Üí margem maior. Preciso disso pra decidir se mantenho, adapto ou tiro o produto."
-// We run the REAL engine on a scaled throwaway recipe (ingredients + yield √ó factor ‚Üí ingredient
-// cost/un is invariant; only labor/gas/fixed per unit move with the new yield + minutes), then
-// compare cost, margin and profit against the registered baseline.
-
-/** Per-unit cost breakdown of recipe `recipeId` as if its batch were scaled, with editable times. */
-function simulateRecipeBreakdown(store, recipeId, factor, production, active, oven, config) {
-  const real = store.get('recipes', recipeId);
-  const sim = {
-    ...real,
-    yieldNominal: real.yieldNominal * factor,
-    productionMinutes: production, activeMinutes: active, ovenMinutes: oven,
-    components: real.components.map((c) => ({ ...c, qty: c.qty * factor })), // ingredients scale with the batch
-  };
-  const raw = {
-    ingredients: store.state.ingredients,
-    recipes: store.state.recipes.map((r) => (r.id === recipeId ? sim : r)),
-    products: store.state.products,
-    priceChanges: store.state.priceChanges, batches: store.state.batches, sales: store.state.sales,
-  };
-  return costBreakdown(indexStore(raw), recipeId, config, estimateLens(config));
-}
-// Direct labor is diagnostic only: salaries and payroll charges already live in fixed costs.
-const breakdownTotal = (b) => b.ingredients + b.gas + b.fixed;
-
-function simuladorPanel(ctx) {
-  const { store } = ctx;
-  const config = store.getConfig();
-  const recipes = store.state.recipes;
-  if (recipes.length === 0) {
-    return el('section', { class: 'pa-card' }, [el('h2', { text: 'Simulador' }), el('p', { class: 'pa-empty', text: 'Crie uma receita primeiro.' })]);
-  }
-  const sel = el('select', { class: 'pa-input', 'data-testid': 'sim-recipe' }, recipes.map((r) => el('option', { value: r.id, text: r.name })));
-  if (recipes.some((r) => r.id === ctx.view.simRecipeId)) sel.value = ctx.view.simRecipeId;
-  const body = el('div', {});
-  const rebuild = () => body.replaceChildren(simuladorBody(ctx, store.get('recipes', sel.value), config));
-  sel.addEventListener('change', () => { ctx.view.simRecipeId = sel.value; rebuild(); });
-  rebuild();
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Simulador' })]),
-    el('p', { class: 'pa-hint', text: 'Veja o que acontece com o custo e a margem se voc√™ fizer um lote maior ‚Äî pra decidir se mant√©m, adapta ou tira um produto do card√°pio.' }),
-    field('Receita', sel),
-    body,
-  ]);
-}
-
-function simuladorBody(ctx, recipe, config) {
-  const { store } = ctx;
-  let baseBreak;
-  try { baseBreak = costBreakdown(store.toEngineStore(), recipe.id, config, estimateLens(config)); }
-  catch (e) { return el('p', { class: 'pa-status', text: friendlyError(e) }); }
-  const baseRecipeCost = breakdownTotal(baseBreak);
-  const product = linkedProductForRecipe(store, recipe.id);
-  const recipeComponent = product?.components?.find((component) => component.kind === 'recipe' && component.id === recipe.id);
-  const recipeQty = Number(recipeComponent?.qty) || 1;
-  let registeredProductCost = baseRecipeCost * recipeQty + (Number(recipe.packagingCost) || 0);
-  if (product) {
-    try { registeredProductCost = productUnitCost(store.toEngineStore(), product.id, config, estimateLens(config)); }
-    catch { /* keep the recipe-only cost */ }
-  }
-  const registeredExtras = Math.max(0, registeredProductCost - baseRecipeCost * recipeQty);
-
-  const rates = effectiveSalesRates(product || recipe, config);
-  const salesRate = rates.total;
-  const fmtHora = (v) => (v == null ? '‚Äî' : brl(v));
-  const factor = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-factor', type: 'text', inputmode: 'decimal', value: '1,5' });
-  const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-production', type: 'text', inputmode: 'numeric', value: String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) });
-  const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
-  const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
-  const packaging = moneyField(registeredExtras, 'sim-packaging');
-  const initialMargin = product?.targetMarginPct ?? recipe.targetMarginPct ?? config.targetMarginPct;
-  const targetMargin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-margin', type: 'text', inputmode: 'decimal', value: String(pct(initialMargin)).replace('.', ',') });
-  const initialPrice = product && product.salePrice != null && product.salePrice !== ''
-    ? Number(product.salePrice) : priceFromCost(registeredProductCost, { ...config, ...rates, targetMarginPct: initialMargin });
-  const price = moneyField(initialPrice, 'sim-price');
-  const results = el('div', { 'data-testid': 'sim-results' });
-  // Capture the registered scenario once. Inputs below belong only to the simulated column.
-  const basePrice = initialPrice;
-  const baseTargetPrice = 1 - salesRate - initialMargin > 0
-    ? registeredProductCost / (1 - salesRate - initialMargin) : null;
-
-  function recompute() {
-    let f = parseNum(factor.value); if (!(f > 0)) f = 1;
-    const t = parseNum(production.value) || 0;
-    const a = parseNum(active.value) || 0;
-    const o = parseNum(oven.value) || 0;
-    const p = parseNum(price.input.value) || 0;
-    const extras = Math.max(0, parseNum(packaging.input.value) || 0);
-    const target = Math.max(0, (parseNum(targetMargin.value) || 0) / 100);
-    let simBreak;
-    try { simBreak = simulateRecipeBreakdown(store, recipe.id, f, t, a, o, config); }
-    catch (e) { results.replaceChildren(el('p', { class: 'pa-status', text: friendlyError(e) })); return; }
-    const simRecipeCost = breakdownTotal(simBreak);
-    const baseYield = Number(recipe.yieldNominal) || 0;
-    const simYield = baseYield * f;
-    const baseProductUnits = recipeQty > 0 ? baseYield / recipeQty : 0;
-    const simProductUnits = recipeQty > 0 ? simYield / recipeQty : 0;
-    const baseRecipeTotal = baseRecipeCost * baseYield;
-    const simRecipeTotal = simRecipeCost * simYield;
-    const baseIngredientsTotal = baseBreak.ingredients * baseYield;
-    const simIngredientsTotal = simBreak.ingredients * simYield;
-    const baseLaborIndicator = baseBreak.labor * baseYield;
-    const simLaborIndicator = simBreak.labor * simYield;
-    // The recipe roll-up includes ingredients, gas, and proportional fixed costs. Add each
-    // sellable product's packaging/complements so the displayed batch total is fully loaded.
-    const baseTotalCost = baseRecipeTotal + registeredExtras * baseProductUnits;
-    const simTotalCost = simRecipeTotal + extras * simProductUnits;
-    const baseRevenue = basePrice * baseProductUnits;
-    const simRevenue = p * simProductUnits;
-    const totalProfit = (revenue, cost) => revenue - cost - revenue * salesRate;
-    const baseProfit = totalProfit(baseRevenue, baseTotalCost);
-    const simProfit = totalProfit(simRevenue, simTotalCost);
-    const margin = (revenue, cost) => revenue > 0 ? totalProfit(revenue, cost) / revenue : 0;
-    const baseProductionMinutes = Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0);
-    const profitHour = (profit, minutes) => minutes > 0 ? profit / (minutes / 60) : null;
-    const divisor = 1 - salesRate - target;
-    const simCostPerProduct = simProductUnits > 0 ? simTotalCost / simProductUnits : 0;
-    const baseCostPerProduct = baseProductUnits > 0 ? baseTotalCost / baseProductUnits : 0;
-    const baseProfitPerProduct = baseProductUnits > 0 ? baseProfit / baseProductUnits : 0;
-    const simProfitPerProduct = simProductUnits > 0 ? simProfit / simProductUnits : 0;
-    const targetPrice = divisor > 0 ? simCostPerProduct / divisor : null;
-    const col = (atual, simu, fmt) => [el('td', { class: 'pa-num', text: fmt(atual) }), el('td', { class: 'pa-num pa-strong', text: fmt(simu) })];
-    const reachedTarget = margin(simRevenue, simTotalCost) + 0.0001 >= target;
-    results.replaceChildren(el('table', { class: 'pa-kv pa-sim' }, [
-      el('tr', { class: 'pa-sim-head' }, [el('td', {}), el('td', { class: 'pa-num', text: 'Atual' }), el('td', { class: 'pa-num', text: `Simulado (${fmtNum(f)}√ó)` })]),
-      el('tr', {}, [el('td', { text: 'Rendimento da receita' }), ...col(baseYield, simYield, (v) => `${fmtNum(v)} ${recipe.yieldUnit}`)]),
-      el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), ...col(baseIngredientsTotal, simIngredientsTotal, brl)]),
-      el('tr', {}, [el('td', { text: 'Custo total da receita (g√°s, fixos e embalagem inclu√≠dos)' }), ...col(baseTotalCost, simTotalCost, brl)]),
-      el('tr', {}, [el('td', { text: 'Custo por produto' }), ...col(baseCostPerProduct, simCostPerProduct, brl)]),
-      el('tr', {}, [el('td', { text: 'M√£o de obra direta (indicador)' }), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
-      el('tr', {}, [el('td', { text: 'Pre√ßo de venda por produto' }), ...col(basePrice, p, brl)]),
-      el('tr', {}, [el('td', { text: 'Pre√ßo de venda total da receita' }), ...col(baseRevenue, simRevenue, brl)]),
-      el('tr', {}, [el('td', { text: 'Margem desejada' }), ...col(initialMargin, target, pctStr)]),
-      el('tr', {}, [el('td', { text: 'Margem l√≠quida no pre√ßo informado' }), el('td', { class: 'pa-num', text: pctStr(margin(baseRevenue, baseTotalCost)) }), el('td', { class: `pa-num pa-strong${reachedTarget ? ' pa-positive' : ' pa-bad'}`, text: pctStr(margin(simRevenue, simTotalCost)) })]),
-      el('tr', {}, [el('td', { text: 'Lucro total da receita' }), ...col(baseProfit, simProfit, brl)]),
-      el('tr', {}, [el('td', { text: 'Lucro por produto' }), ...col(baseProfitPerProduct, simProfitPerProduct, brl)]),
-      el('tr', {}, [el('td', { text: 'Lucro por hora de produ√ß√£o' }), ...col(profitHour(baseProfit, baseProductionMinutes), profitHour(simProfit, t), fmtHora)]),
-      el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Pre√ßo para margem desejada' }), el('td', { class: 'pa-num', text: baseTargetPrice == null ? 'Margem inv√°lida' : brl(baseTargetPrice) }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inv√°lida' : brl(targetPrice) })]),
-    ]), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simula√ß√£o alcan√ßa a margem desejada com o pre√ßo informado.' : `A margem ficou abaixo da meta. Considere pre√ßo pr√≥ximo de ${targetPrice == null ? '‚Äî' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
-  }
-  [factor, production, active, oven, packaging.input, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
-  recompute();
-
-  return el('div', {}, [
-    el('p', { class: 'pa-muted', text: `Atual: rende ${fmtNum(recipe.yieldNominal)} ${recipe.yieldUnit} ¬∑ ${recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))}min de produ√ß√£o ¬∑ ${recipe.activeMinutes}min ativos ¬∑ ${recipe.ovenMinutes}min forno${product ? ` ¬∑ produto ${product.name}` : ''}` }),
-    el('h3', { class: 'pa-h3', text: 'E se eu fizer um lote maior?' }),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Escala' }), factor, el('span', { class: 'pa-lab', text: '√ó a receita' })]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produ√ß√£o (min)' }), production]),
-    el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno' }), oven]),
-    el('p', { class: 'pa-hint', text: 'O custo total inclui ingredientes, g√°s do forno, custos fixos proporcionais ao tempo de produ√ß√£o e embalagem/complementos por produto. Minutos ativos mostram a m√£o de obra como indicador, sem duplicar sal√°rios que j√° est√£o nos custos fixos.' }),
-    el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cen√°rio (%)', targetMargin), field('Pre√ßo de venda para testar', price)]),
-    el('p', { class: 'pa-hint', text: 'A coluna Atual usa os valores cadastrados e permanece fixa. A margem desejada altera o pre√ßo recomendado; o lucro do cen√°rio depende do pre√ßo de venda informado.' }),
-    el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos come√ßam com a diferen√ßa entre o custo total do produto e a parte da receita. Voc√™ pode alterar livremente para comparar cen√°rios.' : 'Esta receita ainda n√£o est√° vinculada a um produto. Informe manualmente embalagem e pre√ßo para fazer a simula√ß√£o.' }),
-    el('p', { class: 'pa-hint', text: `Taxa de pagamento + comiss√£o consideradas nos dois cen√°rios: ${pctStr(salesRate)}.` }),
-    results,
-  ]);
-}
-
-// ‚îÄ‚îÄ Ajustes (config + Dropbox) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-
-function automaticConfigSuggestions(store) {
-  const today = new Date();
-  const months = [];
-  // An unfinished month understates recurring expenses and production capacity.
-  // Use up to the last three completed calendar months for every suggestion.
-  for (let i = 3; i >= 1; i--) {
-    const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
-    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-  }
-  const start = `${months[0]}-01`;
-  const lastCompleteDay = new Date(today.getFullYear(), today.getMonth(), 0);
-  const end = `${lastCompleteDay.getFullYear()}-${String(lastCompleteDay.getMonth() + 1).padStart(2, '0')}-${String(lastCompleteDay.getDate()).padStart(2, '0')}`;
-  const actual = cashMovements(store).filter((m) => !m.transfer && dateOnly(m.at) >= start && dateOnly(m.at) <= end);
-  const category = (m) => m.categoryId ? store.get('categories', m.categoryId) : null;
-  const fixedExcluded = new Set(['tarifas']);
-  // These recurring operating costs have no separate per-recipe rate in the engine.
-  // Include their monthly average in the same production-time allocation as overhead.
-  const monthlyOverhead = new Set(['energia-producao', 'limpeza', 'manutencao']);
-  const isMonthlyOverhead = (category) => {
-    const seen = new Set();
-    for (let current = category; current && !seen.has(current.id); current = current.parentId ? store.get('categories', current.parentId) : null) {
-      if (monthlyOverhead.has(current.systemKey)) return true;
-      seen.add(current.id);
-    }
-    return false;
-  };
-  const fixed = actual.filter((m) => {
-    const c = category(m);
-    return m.direction === 'saida' && c &&
-      (c.kind === 'despesaFixa' || c.behavior === 'fixa' || isMonthlyOverhead(c)) &&
-      !fixedExcluded.has(c.systemKey);
-  });
-  const fixedMonths = new Set(fixed.map((m) => dateOnly(m.at).slice(0, 7)));
-  const fixedTotal = fixed.reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const gasTotal = actual.filter((m) => m.direction === 'saida' && category(m)?.systemKey === 'gas-producao').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const laborTotal = actual.filter((m) => m.direction === 'saida' && ['pro-labore', 'salarios'].includes(category(m)?.systemKey)).reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const tariffTotal = actual.filter((m) => m.direction === 'saida' && category(m)?.systemKey === 'tarifas').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const salesReceived = actual.filter((m) => m.direction === 'entrada' && category(m)?.systemKey === 'vendas').reduce((sum, m) => sum + (Number(m.amount) || 0), 0);
-  const batches = store.state.batches.filter((b) => dateOnly(b.at) >= start && dateOnly(b.at) <= end);
-  const convertSimple = (value, from, to) => {
-    if (from === to) return value;
-    if (from === 'kg' && to === 'g') return value * 1000;
-    if (from === 'g' && to === 'kg') return value / 1000;
-    if (from === 'l' && to === 'ml') return value * 1000;
-    if (from === 'ml' && to === 'l') return value / 1000;
-    return value;
-  };
-  const recipeMinutesPerUnit = (recipeId, phase, stack = new Set()) => {
-    const recipe = store.get('recipes', recipeId);
-    if (!recipe || stack.has(recipeId) || !(Number(recipe.yieldNominal) > 0)) return 0;
-    stack.add(recipeId);
-    const recipePhase = phase === 'productionMinutes'
-      ? (Number(recipe.productionMinutes) || (Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))
-      : (Number(recipe[phase]) || 0);
-    let total = recipePhase / Number(recipe.yieldNominal);
-    for (const component of recipe.components || []) if (component.ref?.kind === 'recipe') {
-      const sub = store.get('recipes', component.ref.id);
-      if (sub) total += convertSimple(Number(component.qty) || 0, component.unit, sub.yieldUnit) * recipeMinutesPerUnit(sub.id, phase, stack);
-    }
-    stack.delete(recipeId);
-    return total;
-  };
-  const productMinutesPerUnit = (productId, phase, stack = new Set()) => {
-    const product = store.get('products', productId);
-    if (!product || stack.has(productId)) return 0;
-    stack.add(productId);
-    let total = 0;
-    for (const component of product.components || []) {
-      if (component.kind === 'recipe') total += (Number(component.qty) || 0) * recipeMinutesPerUnit(component.id, phase);
-      else if (component.kind === 'product' && !isBundleProduct(product)) total += (Number(component.qty) || 0) * productMinutesPerUnit(component.id, phase, stack);
-    }
-    stack.delete(productId);
-    return total;
-  };
-  const commandas = store.state.comandas.filter((c) => dateOnly(c.date || c.id) >= start && dateOnly(c.date || c.id) <= end);
-  const estimatedFromCommandas = (phase) => commandas.reduce((sum, command) => sum + (command.itens || []).reduce((itemSum, item) => itemSum + (Number(item.realizado) || 0) * productMinutesPerUnit(item.productId, phase), 0), 0);
-  const hasBatches = batches.length > 0;
-  const activeMinutes = hasBatches
-    ? batches.reduce((sum, b) => sum + (Number(b.activeMinutes) || Number(store.get('recipes', b.recipeId)?.activeMinutes) || 0), 0)
-    : estimatedFromCommandas('activeMinutes');
-  const ovenMinutes = hasBatches
-    ? batches.reduce((sum, b) => sum + (Number(b.ovenMinutes) || Number(store.get('recipes', b.recipeId)?.ovenMinutes) || 0), 0)
-    : estimatedFromCommandas('ovenMinutes');
-  const productionMinutes = hasBatches
-    ? batches.reduce((sum, b) => {
-        const recipe = store.get('recipes', b.recipeId);
-        return sum + (Number(b.productionMinutes) || Number(recipe?.productionMinutes) || (Number(b.activeMinutes ?? recipe?.activeMinutes) || 0) + (Number(b.ovenMinutes ?? recipe?.ovenMinutes) || 0));
-      }, 0)
-    : estimatedFromCommandas('productionMinutes');
-  const productionMonths = new Set((hasBatches ? batches.map((b) => b.at) : commandas.filter((c) => (c.itens || []).some((it) => (Number(it.realizado) || 0) > 0)).map((c) => c.date || c.id)).map((iso) => dateOnly(iso).slice(0, 7)));
-  return {
-    period: `${fmtDate(`${start}T12:00:00`)} a ${fmtDate(`${end}T12:00:00`)}`,
-    values: {
-      custosFixosMes: fixedMonths.size ? fixedTotal / fixedMonths.size : null,
-      taxaGas: gasTotal > 0 && ovenMinutes > 0 ? gasTotal / ovenMinutes : null,
-      valorHora: laborTotal > 0 && activeMinutes > 0 ? laborTotal / (activeMinutes / 60) : null,
-      expectedProductionMinutesMonth: productionMonths.size && productionMinutes > 0 ? productionMinutes / productionMonths.size : null,
-    },
-    observedFeePct: tariffTotal > 0 && salesReceived > 0 ? tariffTotal / salesReceived : null,
-    facts: { fixedMonths: fixedMonths.size, gasTotal, laborTotal, tariffTotal, salesReceived, productions: hasBatches ? batches.length : commandas.length, productionSource: hasBatches ? 'tempos reais' : 'estimativa das comandas', activeMinutes, ovenMinutes, productionMinutes },
-  };
-}
-
-const SETTINGS_HELPERS = {
-  valorHora: {
-    title: 'Calcular o valor da sua hora', configKey: 'valorHora', suffix: 'R$/h',
-    intro: 'Este valor serve como indicador de esfor√ßo. Sal√°rios, pr√≥-labore e encargos continuam nos custos fixos e n√£o ser√£o somados duas vezes.',
-    fields: [['monthlyPay', 'Sal√°rios + pr√≥-labore + encargos no m√™s (R$)'], ['monthlyHours', 'Horas ativas de trabalho no m√™s']],
-    calculate: (v) => v.monthlyPay > 0 && v.monthlyHours > 0 ? v.monthlyPay / v.monthlyHours : null,
-    explanation: 'sal√°rios, pr√≥-labore e encargos √∑ horas ativas',
-  },
-  taxaGas: {
-    title: 'Calcular o g√°s por minuto', configKey: 'taxaGas', suffix: 'R$/min',
-    intro: 'Use o valor pago no botij√£o ou na recarga e uma estimativa de quantos minutos de forno ele dura.',
-    fields: [['gasCost', 'Valor do botij√£o ou recarga (R$)'], ['gasMinutes', 'Dura√ß√£o estimada em minutos de forno']],
-    calculate: (v) => v.gasCost > 0 && v.gasMinutes > 0 ? v.gasCost / v.gasMinutes : null,
-    explanation: 'valor do g√°s √∑ minutos de uso do forno',
-  },
-  custosFixosMes: {
-    title: 'Somar os custos fixos do m√™s', configKey: 'custosFixosMes', suffix: 'R$/m√™s',
-    intro: 'Informe a m√©dia mensal de cada gasto apenas uma vez. Inclua energia da produ√ß√£o aqui se ela ainda n√£o entrar em outro custo. Campos vazios contam como zero.',
-    fields: [['rent', 'Aluguel, condom√≠nio e IPTU'], ['utilities', '√Ågua e energia de toda a opera√ß√£o'], ['internet', 'Internet e telefone'], ['payroll', 'Sal√°rios, pr√≥-labore, diaristas e encargos'], ['accounting', 'Contador'], ['taxes', 'DAS, licen√ßas e taxas fixas'], ['cleaning', 'Limpeza e higiene'], ['maintenance', 'Manuten√ß√£o e reposi√ß√£o de equipamentos'], ['systems', 'Sistemas e assinaturas'], ['other', 'Outros custos fixos']],
-    calculate: (v) => Object.values(v).reduce((sum, value) => sum + Math.max(0, value || 0), 0),
-    explanation: 'soma dos custos fixos informados',
-  },
-  expected: {
-    title: 'Calcular o tempo total de produ√ß√£o mensal', configKey: 'expectedProductionMinutesMonth', suffix: 'min/m√™s',
-    intro: 'Considere o tempo total em que a estrutura da confeitaria fica dedicada √† produ√ß√£o.',
-    fields: [['workDays', 'Dias de produ√ß√£o por m√™s'], ['hoursPerDay', 'Horas de produ√ß√£o por dia']],
-    calculate: (v) => v.workDays > 0 && v.hoursPerDay > 0 ? v.workDays * v.hoursPerDay * 60 : null,
-    explanation: 'dias de produ√ß√£o √ó horas produtivas √ó 60',
-  },
-  margin: {
-    title: 'Estimar uma margem-alvo', configKey: 'targetMarginPct', suffix: '%', percent: true,
-    intro: 'A margem √© uma decis√£o do neg√≥cio. Esta conta ajuda a partir do faturamento e do lucro que voc√™ gostaria de alcan√ßar.',
-    fields: [['revenue', 'Faturamento mensal esperado (R$)'], ['profit', 'Lucro que deseja ter no m√™s (R$)']],
-    calculate: (v) => v.revenue > 0 && v.profit >= 0 ? (v.profit / v.revenue) * 100 : null,
-    explanation: 'lucro desejado √∑ faturamento esperado',
-  },
-  fee: {
-    title: 'Calcular a taxa m√©dia de pagamento', configKey: 'paymentFeePct', suffix: '%', percent: true,
-    intro: 'Use um m√™s comum: some as taxas de cart√£o, maquininha e plataformas e compare com o que recebeu.',
-    fields: [['fees', 'Total de taxas pagas no m√™s (R$)'], ['received', 'Total recebido no m√™s (R$)']],
-    calculate: (v) => v.received > 0 && v.fees >= 0 ? (v.fees / v.received) * 100 : null,
-    explanation: 'taxas pagas √∑ total recebido',
-  },
-  commission: {
-    title: 'Calcular a comiss√£o m√©dia sobre vendas', configKey: 'commissionPct', suffix: '%', percent: true,
-    intro: 'Informe o total de comiss√µes pagas e o valor das vendas que geraram essas comiss√µes.',
-    fields: [['commissions', 'Total de comiss√µes no per√≠odo (R$)'], ['sales', 'Total de vendas no per√≠odo (R$)']],
-    calculate: (v) => v.sales > 0 && v.commissions >= 0 ? (v.commissions / v.sales) * 100 : null,
-    explanation: 'comiss√µes pagas √∑ vendas correspondentes',
-  },
-};
-
-MODALS['settings-helper'] = (ctx, modal) => settingsHelperSheet(ctx, modal.key);
-function settingsHelperSheet(ctx, key) {
-  const spec = SETTINGS_HELPERS[key];
-  if (!spec) return sheet({ title: 'Ajuda de c√°lculo', rows: [el('p', { class: 'pa-empty', text: 'Este c√°lculo n√£o est√° dispon√≠vel.' })] });
-  const savedInputs = ctx.store.getConfig().settingsHelperInputs?.[key] || {};
-  const inputs = Object.fromEntries(spec.fields.map(([fieldKey]) => [fieldKey, el('input', { class: 'pa-input', type: 'text', inputmode: 'decimal', placeholder: '0', value: savedInputs[fieldKey] ?? '' })]));
-  const result = el('div', { class: 'pa-callout' });
-  let calculated = null;
-  const recompute = () => {
-    const values = Object.fromEntries(Object.entries(inputs).map(([fieldKey, input]) => [fieldKey, parseNum(input.value) || 0]));
-    calculated = spec.calculate(values);
-    result.replaceChildren(calculated == null || !Number.isFinite(calculated)
-      ? el('span', { text: 'Preencha os dados acima para ver o resultado.' })
-      : el('div', {}, [el('span', { text: 'Resultado sugerido: ' }), el('strong', { text: `${fmtNum(calculated)} ${spec.suffix}` }), el('p', { class: 'pa-hint', text: `C√°lculo: ${spec.explanation}.` })]));
-  };
-  Object.values(inputs).forEach((input) => input.addEventListener('input', recompute));
-  recompute();
-  const save = () => {
-    if (calculated == null || !Number.isFinite(calculated) || calculated < 0) { Object.values(inputs)[0].focus(); return; }
-    const stored = spec.percent ? calculated / 100 : calculated;
-    const current = ctx.store.getConfig();
-    const otherRates = ['targetMarginPct', 'paymentFeePct', 'commissionPct', 'salesTaxPct']
-      .filter((rateKey) => rateKey !== spec.configKey)
-      .reduce((sum, rateKey) => sum + (Number(current[rateKey]) || 0), 0);
-    if (spec.percent && stored + otherRates >= 1) { window.alert('O resultado precisa ficar abaixo de 100% quando somado √† margem, √† taxa, √† comiss√£o e ao imposto sobre a venda.'); return; }
-    const entered = Object.fromEntries(Object.entries(inputs).map(([fieldKey, input]) => [fieldKey, input.value.trim()]));
-    ctx.actions.mutate((store) => store.setConfig({
-      [spec.configKey]: stored,
-      settingsHelperInputs: { ...(store.getConfig().settingsHelperInputs || {}), [key]: entered },
-    }));
-  };
-  return sheet({ title: spec.title, rows: [el('p', { class: 'pa-hint', text: spec.intro }), Object.keys(savedInputs).length > 0 && el('p', { class: 'pa-hint', text: 'Dados do √∫ltimo c√°lculo aplicado. Voc√™ pode alter√°-los e usar um novo resultado.' }), ...spec.fields.map(([fieldKey, label]) => field(label, inputs[fieldKey])), result].filter(Boolean), onSave: save, saveLabel: 'Usar este resultado', saveTestid: `settings-helper-${key}` });
-}
-
-function ajustesPanel(ctx) {
-  const { store } = ctx;
-  const c = store.getConfig();
-  const automatic = automaticConfigSuggestions(store);
-  const f = {};
-  const draft = ctx.view.settingsDraft || (ctx.view.settingsDraft = {});
-  const field = (key, label, value, hint, helperKey) => {
-    const input = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', value: draft[key] ?? String(value).replace('.', ',') });
-    input.addEventListener('input', () => { draft[key] = input.value; });
-    f[key] = input;
-    return el('div', { class: 'pa-field' }, [el('label', { text: label }), el('div', { class: 'pa-row' }, [input, helperKey && el('button', { class: 'pa-btn pa-ghost pa-sm', type: 'button', onclick: () => ctx.actions.openModal({ kind: 'settings-helper', key: helperKey }) }, 'Calcular comigo')].filter(Boolean)), hint && el('span', { class: 'pa-hint', text: hint })]);
-  };
-
-  function save() {
-    const labels = {
-      valorHora: 'valor da hora', taxaGas: 'g√°s por minuto', custosFixosMes: 'custos fixos',
-      expected: 'minutos de produ√ß√£o', margin: 'margem', fee: 'taxa de pagamento', commission: 'comiss√£o', salesTax: 'imposto sobre a venda',
-    };
-    for (const [key, label] of Object.entries(labels)) {
-      if (!Object.hasOwn(draft, key)) continue;
-      const value = parseNum(f[key].value);
-      if (value == null || value < 0 || (key === 'expected' && value === 0)) {
-        window.alert(`Informe um valor v√°lido para ${label}${key === 'expected' ? ' (maior que zero)' : ''}.`);
-        f[key].focus();
-        return;
-      }
-    }
-    const next = {
-      valorHora: parseNum(f.valorHora.value) ?? c.valorHora,
-      taxaGas: parseNum(f.taxaGas.value) ?? c.taxaGas,
-      custosFixosMes: parseNum(f.custosFixosMes.value) ?? c.custosFixosMes,
-      expectedProductionMinutesMonth: parseNum(f.expected.value) ?? c.expectedProductionMinutesMonth ?? c.expectedActiveMinutesMonth,
-      targetMarginPct: (parseNum(f.margin.value) ?? pct(c.targetMarginPct)) / 100,
-      paymentFeePct: (parseNum(f.fee.value) ?? pct(c.paymentFeePct)) / 100,
-      commissionPct: (parseNum(f.commission.value) ?? pct(c.commissionPct || 0)) / 100,
-      salesTaxPct: (parseNum(f.salesTax.value) ?? pct(c.salesTaxPct || 0)) / 100,
-    };
-    const keys = { valorHora: 'valorHora', taxaGas: 'taxaGas', custosFixosMes: 'custosFixosMes', expected: 'expectedProductionMinutesMonth', margin: 'targetMarginPct', fee: 'paymentFeePct', commission: 'commissionPct', salesTax: 'salesTaxPct' };
-    const changed = Object.fromEntries(Object.entries(keys).filter(([inputKey]) => Object.hasOwn(draft, inputKey)).map(([inputKey, configKey]) => [configKey, next[configKey]]));
-    const prospective = { ...store.getConfig(), ...changed };
-    if (prospective.targetMarginPct + prospective.paymentFeePct + prospective.commissionPct + (prospective.salesTaxPct || 0) >= 1) {
-      window.alert('Margem, taxa de pagamento, comiss√£o e imposto sobre a venda precisam somar menos de 100%.');
-      return;
-    }
-    ctx.view.settingsDraft = null;
-    ctx.actions.setConfig(changed);
-  }
-
-  const autoRows = [
-    ['Valor da hora', automatic.values.valorHora, 'R$/h', automatic.facts.activeMinutes > 0 ? `${fmtNum(automatic.facts.activeMinutes / 60)} h ¬∑ ${automatic.facts.productionSource}` : 'registre produ√ß√£o nas comandas'],
-    ['G√°s por minuto', automatic.values.taxaGas, 'R$/min', automatic.facts.ovenMinutes > 0 ? `${fmtNum(automatic.facts.ovenMinutes)} min ¬∑ ${automatic.facts.productionSource}` : 'registre produ√ß√£o e tempo de forno'],
-    ['Custos fixos por m√™s', automatic.values.custosFixosMes, 'R$', automatic.facts.fixedMonths ? `${automatic.facts.fixedMonths} m√™s(es) com lan√ßamentos` : 'lance despesas fixas pagas'],
-    ['Minutos de produ√ß√£o por m√™s', automatic.values.expectedProductionMinutesMonth, 'min', automatic.facts.productions ? `${automatic.facts.productions} registro(s) ¬∑ ${automatic.facts.productionSource}` : 'registre produ√ß√£o nas comandas'],
-  ].map(([label, value, unit, source]) => el('div', { class: 'pa-auto-row' }, [
-    el('div', { class: 'pa-grow' }, [el('strong', { text: label }), el('span', { class: 'pa-muted', text: source })]),
-    el('strong', { class: value == null ? 'pa-muted' : 'pa-positive', text: value == null ? 'dados insuficientes' : (unit === 'R$' ? brl(value) : `${fmtNum(value)} ${unit}`) }),
-  ]));
-  const applicable = Object.fromEntries(Object.entries(automatic.values).filter(([, value]) => value != null && Number.isFinite(value)));
-  const applyAutomatic = () => {
-    ctx.view.settingsDraft = null;
-    ctx.actions.setConfig({ ...applicable });
-  };
-
-  return el('section', {}, [
-    el('section', { class: 'pa-card' }, [
-      el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Custos e forma√ß√£o de pre√ßo' }), el('h2', { text: 'Ajustes' })])]),
-      el('p', { class: 'pa-hint', text: 'Os valores salvos √† esquerda j√° s√£o usados para calcular custos e pre√ßos. Compare com os dados registrados antes de decidir se quer substitu√≠-los.' }),
-      el('div', { class: 'pa-settings-grid' }, [
-        el('section', { class: 'pa-settings-column' }, [
-          el('h3', { class: 'pa-h3', text: 'Seus valores atuais' }),
-          field('valorHora', 'Valor da hora de m√£o de obra (indicador)', c.valorHora, 'Usado para analisar o esfor√ßo dos minutos ativos; n√£o √© somado novamente ao custo.', 'valorHora'),
-          field('taxaGas', 'G√°s por minuto de forno (R$/min)', c.taxaGas, null, 'taxaGas'),
-          field('custosFixosMes', 'Custos fixos no m√™s (R$, inclui DAS)', c.custosFixosMes, null, 'custosFixosMes'),
-          field('expected', 'Minutos totais de produ√ß√£o esperados no m√™s', c.expectedProductionMinutesMonth ?? c.expectedActiveMinutesMonth, null, 'expected'),
-          field('margin', 'Margem alvo (%)', pct(c.targetMarginPct), null, 'margin'),
-          field('fee', 'Taxa de pagamento (%)', pct(c.paymentFeePct), null, 'fee'),
-          field('commission', 'Comiss√£o sobre vendas (%)', pct(c.commissionPct || 0), 'Entra na forma√ß√£o do pre√ßo da mesma forma que a taxa de pagamento.', 'commission'),
-          field('salesTax', 'Imposto proporcional sobre a venda (%)', pct(c.salesTaxPct || 0), 'Use apenas quando incidir sobre o faturamento. O DAS do MEI j√° est√° nos custos fixos acima.'),
-          el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', onclick: save }, 'Salvar e usar valores manuais')]),
-        ]),
-        el('aside', { class: 'pa-settings-column pa-auto-card', 'data-testid': 'automatic-settings' }, [
-          el('h3', { class: 'pa-h3', text: 'Calculado pelo sistema' }),
-          el('p', { class: 'pa-hint', text: `Estimativas a partir dos pagamentos e da produ√ß√£o registrados entre ${automatic.period} (meses completos). Confira se todos os gastos foram lan√ßados.` }),
-          ...autoRows,
-          el('div', { class: 'pa-auto-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: 'Taxa financeira observada' }), el('span', { class: 'pa-muted', text: 'tarifas √∑ recebimentos; apenas compara√ß√£o' })]), el('strong', { class: automatic.observedFeePct == null ? 'pa-muted' : '', text: automatic.observedFeePct == null ? 'dados insuficientes' : pctStr(automatic.observedFeePct) })]),
-          el('button', { class: 'pa-btn pa-primary', 'data-testid': 'apply-automatic-settings', disabled: Object.keys(applicable).length === 0, onclick: applyAutomatic }, 'Adotar valores calculados na precifica√ß√£o'),
-          el('p', { class: 'pa-hint', text: 'Este bot√£o substitui apenas os valores calcul√°veis acima: custo fixo mensal, g√°s, tempo de produ√ß√£o e valor da hora (indicador). A margem, a taxa de pagamento, a comiss√£o e o imposto sobre a venda continuam como voc√™ salvou √† esquerda.' }),
-        ]),
-      ]),
-    ]),
-    orderPaymentDueCard(ctx),
-    notificationSettingsCard(ctx),
-    shoppingSettingsCard(ctx),
-    empresaCard(ctx),
-    dadosCard(ctx),
-    trashPanel(ctx),
-    dropboxPanel(ctx),
-  ]);
-}
-
-function orderPaymentDueCard(ctx) {
-  const configuredDays = Number(ctx.store.getConfig().orderPaymentDueDays);
-  const currentDays = Number.isSafeInteger(configuredDays) && configuredDays >= 0 ? configuredDays : 0;
-  const input = el('input', { class: 'pa-input pa-narrow', type: 'number', min: '0', step: '1', value: String(currentDays), 'data-testid': 'order-payment-due-days' });
-  const overdue = listTitles(ctx.store, { direction: 'receber', status: 'vencido' }).filter((row) => !row.title.cancelledAt);
-  const overdueTotal = overdue.reduce((sum, row) => sum + row.balance, 0);
-  const save = () => {
-    const days = Number(input.value);
-    if (input.value.trim() === '' || !Number.isSafeInteger(days) || days < 0) {
-      input.setCustomValidity('Informe um n√∫mero inteiro de dias igual ou maior que zero.');
-      input.reportValidity();
-      return;
-    }
-    input.setCustomValidity('');
-    ctx.actions.setConfig({ orderPaymentDueDays: days });
-  };
-  input.addEventListener('input', () => input.setCustomValidity(''));
-  return el('section', { class: 'pa-card', 'data-testid': 'order-payment-due-settings' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Contas a receber' }), el('h2', { text: 'Vencimento das encomendas' })])]),
-    el('p', { class: 'pa-hint', text: 'Defina quantos dias ap√≥s a entrega o pagamento deve vencer. Zero dia significa vencimento na pr√≥pria data da entrega. Uma encomenda com saldo pendente passa a constar como vencida no dia seguinte ao vencimento.' }),
-    el('div', { class: 'pa-field' }, [el('label', { text: 'Prazo padr√£o ap√≥s a entrega (dias)' }), input]),
-    el('p', { class: 'pa-hint', text: 'O prazo vale para encomendas existentes e futuras. Datas de vencimento alteradas manualmente na conta a receber s√£o preservadas.' }),
-    el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', type: 'button', onclick: save }, 'Salvar prazo')]),
-    el('p', { text: `${overdue.length} conta(s) a receber vencida(s) ¬∑ saldo ${brl(overdueTotal)}` }),
-    el('button', { class: 'pa-btn pa-ghost', type: 'button', onclick: () => { ctx.actions.setFinanceView({ finStatus: 'vencido', finPartyId: '', finMethod: '', finReceivePeriod: 'all', finReceiveStart: '', finReceiveEnd: '' }); ctx.actions.setTab('fin-receber'); } }, 'Ver contas vencidas'),
-  ]);
-}
-
-// Dados da empresa (Rev 06) ‚Äî recibo header. Stored in config (synced/backed up), never in source.
-function empresaCard(ctx) {
-  const emp = ctx.store.getConfig().empresa || {};
-  const draft = ctx.view.companyDraft || (ctx.view.companyDraft = {});
-  let logo = draft.logo ?? emp.logo ?? '';
-  const f = {};
-  const tf = (key, label, ph) => {
-    const i = el('input', { class: 'pa-input', 'data-testid': `emp-${key}`, type: 'text', placeholder: ph || '', value: draft[key] ?? emp[key] ?? '' });
-    i.addEventListener('input', () => { draft[key] = i.value; });
-    f[key] = i;
-    return el('div', { class: 'pa-field' }, [el('label', { text: label }), i]);
-  };
-  const preview = el('div', { class: 'pa-logo-preview' });
-  const renderPreview = () => preview.replaceChildren(logo
-    ? el('img', { src: logo, alt: 'logo', class: 'pa-logo-img' })
-    : el('span', { class: 'pa-hint', text: 'Sem logo ainda.' }));
-  renderPreview();
-  const fileInput = el('input', {
-    type: 'file', accept: 'image/png,image/jpeg', style: 'display:none', 'data-testid': 'emp-logo-file',
-    onchange: (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => { logo = String(reader.result); draft.logo = logo; renderPreview(); };
-      reader.readAsDataURL(file);
-      e.target.value = '';
-    },
-  });
-  function save() {
-    ctx.view.companyDraft = null;
-    ctx.actions.setConfig({ empresa: {
-      nome: f.nome.value.trim(), cnpj: f.cnpj.value.trim(), endereco: f.endereco.value.trim(),
-      telefone: f.telefone.value.trim(), responsavel: f.responsavel.value.trim(), logo,
-    } });
-  }
-  return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Dados da empresa' }),
-    el('p', { class: 'pa-hint', text: 'Aparecem no cabe√ßalho do recibo. Ficam s√≥ no seu aparelho e no backup ‚Äî n√£o v√£o pro c√≥digo.' }),
-    tf('nome', 'Nome', 'Quitutes do Paiol'),
-    tf('cnpj', 'CNPJ / MEI', '00.000.000/0001-00'),
-    tf('endereco', 'Endere√ßo'),
-    tf('telefone', 'Telefone / contato'),
-    tf('responsavel', 'Respons√°vel'),
-    el('div', { class: 'pa-field' }, [
-      el('label', { text: 'Logo' }),
-      preview,
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-sm', 'data-testid': 'emp-logo-btn', onclick: () => fileInput.click() }, 'Escolher imagem'),
-        logo && el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { logo = ''; draft.logo = ''; renderPreview(); } }, 'Remover'),
-      ].filter(Boolean)),
-      fileInput,
-    ]),
-    el('div', { class: 'pa-row pa-form' }, [el('button', { class: 'pa-btn pa-primary', 'data-testid': 'emp-save', onclick: save }, 'Salvar dados da empresa')]),
-  ]);
-}
-
-function dadosCard(ctx) {
-  const fileInput = el('input', {
-    type: 'file', accept: '.yaml,.yml,.txt', style: 'display:none', 'data-testid': 'import-file',
-    onchange: async (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      try { ctx.actions.importData(await f.text()); }
-      catch (err) { ctx.actions.importFailed(String(err && err.message ? err.message : err)); }
-      e.target.value = '';
-    },
-  });
-  // Excel (.xlsx) ‚Äî the friendly, formatted face of the same name-based interchange.
-  const xlsxInput = el('input', {
-    type: 'file', accept: '.xlsx', style: 'display:none', 'data-testid': 'xlsx-file',
-    onchange: async (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const data = await parseInterchange(bytes);
-        ctx.actions.openModal({ kind: 'import-xlsx', data, preview: previewExchange(ctx.store, data), filename: file.name });
-      } catch (err) { ctx.actions.importFailed(String((err && err.message) || err)); }
-      e.target.value = '';
-    },
-  });
-  const xlsxExportBtn = el('button', { class: 'pa-btn', 'data-testid': 'xlsx-export' }, 'üü¢ Exportar planilha');
-  xlsxExportBtn.addEventListener('click', async () => {
-    const orig = xlsxExportBtn.textContent; xlsxExportBtn.textContent = 'Gerando‚Ä¶'; xlsxExportBtn.disabled = true;
-    try { downloadFile('paiol-planilha.xlsx', await workbookBytes(ctx.store), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); }
-    catch (e) { window.alert('N√£o foi poss√≠vel gerar a planilha: ' + ((e && e.message) || e)); }
-    finally { xlsxExportBtn.textContent = orig; xlsxExportBtn.disabled = false; }
-  });
-
-  return el('section', { class: 'pa-card' }, [
-    el('h2', { text: 'Dados' }),
-    el('h3', { class: 'pa-h3', text: 'Planilha (Excel)' }),
-    el('div', { class: 'pa-row pa-form' }, [
-      xlsxExportBtn,
-      el('button', { class: 'pa-btn', 'data-testid': 'xlsx-import', onclick: () => xlsxInput.click() }, 'üü¢ Importar planilha'),
-      xlsxInput,
-    ]),
-    el('p', { class: 'pa-hint', text: 'Baixa seus insumos, receitas e produtos numa planilha bonita (uma aba por receita). Edite no Excel e importe de volta ‚Äî mostra um resumo antes, mescla pelos nomes e n√£o apaga nada.' }),
-    el('h3', { class: 'pa-h3', text: 'Backup completo' }),
-    el('div', { class: 'pa-row pa-form' }, [
-      el('button', {
-        class: 'pa-btn pa-primary', 'data-testid': 'backup-extra', disabled: ctx.view.backupBusy,
-        onclick: () => {
-          downloadFile(`paiol-backup-${backupFileStamp()}.yaml`, exportYaml(ctx.store));
-          void ctx.actions.backupExtra();
-        },
-      }, ctx.view.backupBusy ? 'Criando backup‚Ä¶' : 'Criar backup extra agora'),
-      el('button', { class: 'pa-btn', 'data-testid': 'import-btn', onclick: () => fileInput.click() }, 'Importar dados'),
-      fileInput,
-    ]),
-    el('p', { class: 'pa-hint', text: 'Baixa uma c√≥pia completa neste aparelho. Se o Dropbox estiver conectado, tamb√©m cria uma c√≥pia extra na pasta de backups da nuvem.' }),
-  ]);
-}
-
-function notificationSettingsCard(ctx) {
-  const notices = ctx.store.state.notifications.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  return el('section', { class: 'pa-card', 'data-testid': 'notification-settings' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Agenda e lembretes' }), el('h2', { text: 'Notifica√ß√µes' })]),
-      el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'notification-new', onclick: () => ctx.actions.openModal({ kind: 'notification-add' }) }, '+ Notifica√ß√£o'),
-    ]),
-    el('p', { class: 'pa-hint', text: 'A notifica√ß√£o aparece no In√≠cio somente na data marcada e sai de l√° quando voc√™ indicar que foi feita. O hist√≥rico completo permanece aqui.' }),
-    ...(notices.length ? notices.map((notice) => el('div', { class: `pa-detail-card${notice.done ? ' pa-reversed' : ''}`, 'data-testid': 'notification-history-item' }, [
-      el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [el('strong', { text: notice.title || 'Lembrete' }), el('span', { class: 'pa-muted', text: `${fmtDate(`${notice.date}T12:00:00`)}${notice.notes ? ` ¬∑ ${notice.notes}` : ''}` })]),
-        el('span', { class: notice.done ? 'pa-badge' : 'pa-badge pa-warn', text: notice.done ? 'Feito' : 'Pendente' }),
-      ]),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.mutate((store) => store.upsertNotification({ ...notice, done: !notice.done, doneAt: !notice.done ? nowIso() : undefined })) }, notice.done ? 'Reabrir' : 'Marcar feito'),
-        el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.openModal({ kind: 'notification-edit', id: notice.id }) }, 'Editar'),
-        el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => { if (window.confirm('Enviar esta notifica√ß√£o para a lixeira?')) ctx.actions.mutate((store) => store.removeNotification(notice.id, nowIso())); } }, 'Excluir'),
-      ]),
-    ])) : [el('p', { class: 'pa-empty', text: 'Nenhuma notifica√ß√£o criada.' })]),
-  ]);
-}
-
-MODALS['notification-add'] = (ctx) => notificationSheet(ctx);
-MODALS['notification-edit'] = (ctx, modal) => notificationSheet(ctx, ctx.store.get('notifications', modal.id));
-function notificationSheet(ctx, notice = null) {
-  const date = el('input', { class: 'pa-input', type: 'date', value: notice?.date || todayInput(), 'data-testid': 'notification-date' });
-  const title = el('input', { class: 'pa-input', type: 'text', value: notice?.title || '', placeholder: 'Ex.: Confirmar encomenda da Maria', 'data-testid': 'notification-title' });
-  const notes = el('textarea', { class: 'pa-input', rows: '3', value: notice?.notes || '', placeholder: 'Detalhes opcionais' });
-  const save = () => {
-    if (!date.value) { date.focus(); return; }
-    if (!title.value.trim()) { title.focus(); return; }
-    ctx.actions.mutate((store) => store.upsertNotification({ ...(notice || {}), id: notice?.id || uuid(), date: date.value, title: title.value.trim(), notes: notes.value.trim() || undefined, done: Boolean(notice?.done), createdAt: notice?.createdAt || nowIso() }));
-  };
-  return sheet({ title: notice ? 'Editar notifica√ß√£o' : 'Nova notifica√ß√£o', rows: [field('Data em que deve aparecer', date), field('Lembrete', title), field('Detalhes', notes)], onSave: save, saveTestid: 'notification-save' });
-}
-
-function shoppingSettingsCard(ctx) {
-  const automatic = inventorySummary(ctx.store).filter((row) => row.low && !row.ingredient.shoppingHidden);
-  const manual = ctx.store.state.shoppingItems.filter((item) => !item.done).slice().sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR'));
-  const name = el('input', { class: 'pa-input pa-grow', type: 'text', placeholder: 'Ex.: Papel manteiga', 'data-testid': 'shopping-name' });
-  const qty = el('input', { class: 'pa-input pa-narrow', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
-  const unit = el('input', { class: 'pa-input pa-narrow', type: 'text', placeholder: 'un, kg‚Ä¶' });
-  const add = () => {
-    if (!name.value.trim()) { name.focus(); return; }
-    ctx.actions.mutate((store) => store.upsertShoppingItem({ id: uuid(), name: name.value.trim(), qty: Math.max(0, parseNum(qty.value) || 0) || undefined, unit: unit.value.trim() || undefined, createdAt: nowIso(), done: false }));
-  };
-  const automaticRows = automatic.map((row) => el('div', { class: 'pa-detail-card', 'data-testid': 'shopping-auto-item' }, [
-    el('div', { class: 'pa-row' }, [el('div', { class: 'pa-grow' }, [el('strong', { text: row.ingredient.name }), el('span', { class: 'pa-muted', text: `Estoque ${fmtNum(row.current)} ${row.ingredient.stockUnit} ¬∑ m√≠nimo ${fmtNum(row.minimum)} ${row.ingredient.stockUnit}` })]), el('span', { class: 'pa-badge pa-warn', text: 'Estoque baixo' })]),
-    el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutate((store) => store.upsertIngredient({ ...row.ingredient, shoppingHidden: true })) }, 'Ocultar desta lista'),
-  ]));
-  const manualRows = manual.map((item) => el('div', { class: 'pa-row pa-detail-card', 'data-testid': 'shopping-manual-item' }, [
-    el('div', { class: 'pa-grow' }, [el('strong', { text: item.name }), (item.qty || item.unit) && el('span', { class: 'pa-muted', text: [item.qty && fmtNum(item.qty), item.unit].filter(Boolean).join(' ') })].filter(Boolean)),
-    el('button', { class: 'pa-btn pa-ghost pa-sm', onclick: () => ctx.actions.mutate((store) => store.removeShoppingItem(item.id, nowIso())) }, 'Excluir'),
-  ]));
-  return el('section', { class: 'pa-card', 'data-testid': 'shopping-settings' }, [
-    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Reposi√ß√£o de materiais' }), el('h2', { text: 'Lista de compras' })])]),
-    el('p', { class: 'pa-hint', text: 'O sistema inclui automaticamente insumos que atingiram o estoque m√≠nimo. Voc√™ tamb√©m pode acrescentar itens livres.' }),
-    ...automaticRows,
-    ...manualRows,
-    (!automaticRows.length && !manualRows.length) && el('p', { class: 'pa-empty', text: 'Nenhum item aguardando compra.' }),
-    el('h3', { class: 'pa-h3', text: 'Adicionar item manual' }),
-    el('div', { class: 'pa-row pa-form' }, [name, qty, unit, el('button', { class: 'pa-btn pa-primary', 'data-testid': 'shopping-add', onclick: add }, 'Adicionar')]),
-    el('p', { class: 'pa-hint', text: 'A lista autom√°tica desaparece quando a compra eleva o estoque acima do m√≠nimo. Ocultar n√£o altera o estoque; apenas dispensa aquele aviso.' }),
-  ].filter(Boolean));
-}
-
-function backupFileStamp() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
-}
-
-function trashPanel(ctx) {
-  const items = ctx.store.activeTrash();
-  const typeNames = {
-    ingredients: 'Insumo', recipes: 'Receita', products: 'Produto', clients: 'Cliente', employees: 'Funcion√°rio', encomendas: 'Encomenda',
-    comandas: 'Comanda', categories: 'Categoria', suppliers: 'Fornecedor', cashAccounts: 'Conta financeira',
-    financeTitles: 'Lan√ßamento financeiro', purchases: 'Compra', notifications: 'Notifica√ß√£o', shoppingItems: 'Item da lista de compras',
-  };
-  const rows = items.map((item) => {
-    const remaining = Math.max(0, Math.ceil((new Date(item.expiresAt).getTime() - Date.now()) / 86400000));
-    return el('div', { class: 'pa-detail-card', 'data-testid': 'trash-item' }, [
-      el('div', { class: 'pa-row' }, [
-        el('div', { class: 'pa-grow' }, [
-          el('strong', { text: item.label || item.recordId }),
-          el('span', { class: 'pa-muted', text: `${typeNames[item.collection] || 'Registro'} ¬∑ exclu√≠do em ${fmtDateTime(item.deletedAt)}` }),
-        ]),
-        el('span', { class: remaining <= 5 ? 'pa-badge pa-warn' : 'pa-badge', text: remaining === 1 ? '1 dia restante' : `${remaining} dias restantes` }),
-      ]),
-      el('div', { class: 'pa-row pa-form' }, [
-        el('button', { class: 'pa-btn pa-primary pa-sm', 'data-testid': 'trash-restore', onclick: () => ctx.actions.restoreTrash(item.id) }, 'Restaurar'),
-      ]),
-    ]);
-  });
-  return el('section', { class: 'pa-card', 'data-testid': 'trash-panel' }, [
-    el('div', { class: 'pa-cardhead' }, [
-      el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Prote√ß√£o contra exclus√µes acidentais' }), el('h2', { text: `Lixeira${items.length ? ` (${items.length})` : ''}` })]),
-    ]),
-    el('p', { class: 'pa-hint', text: 'Registros exclu√≠dos ficam aqui por 30 dias e podem ser restaurados. Depois desse prazo, o conte√∫do √© eliminado automaticamente.' }),
-    ...(rows.length ? rows : [el('p', { class: 'pa-empty', text: 'A lixeira est√° vazia.' })]),
-  ]);
-}
-
-MODALS['import-xlsx'] = (ctx, m) => importXlsxSheet(ctx, m);
-
-// Preview-before-apply for the xlsx import: show what will be created/updated + warnings; confirm
-// applies (name-based merge, never deletes), Cancelar discards.
-function importXlsxSheet(ctx, m) {
-  const { data, preview, filename } = m;
-  if (preview.error) {
-    return sheet({ title: 'Importar planilha', rows: [el('p', { class: 'pa-status pa-bad', text: 'N√£o foi poss√≠vel ler a planilha: ' + preview.error })] });
-  }
-  const line = (label, c) => el('tr', {}, [el('td', { text: label }), el('td', { class: 'pa-num', text: `${c.novos} novo(s) ¬∑ ${c.att} atualizado(s)` })]);
-  const rows = [
-    el('p', { class: 'pa-hint', text: `Arquivo: ${filename}. Confira antes de importar ‚Äî mescla pelos nomes e N√ÉO apaga nada do que j√° existe.` }),
-    el('table', { class: 'pa-kv', 'data-testid': 'xlsx-preview' }, [
-      line('Insumos', preview.insumos), line('Receitas', preview.receitas), line('Produtos', preview.produtos),
-    ]),
-    preview.warnings.length > 0 && el('div', {}, [
-      el('h3', { class: 'pa-h3', text: `Avisos (${preview.warnings.length})` }),
-      el('ul', { class: 'pa-list pa-tight' }, preview.warnings.slice(0, 15).map((w) => el('li', { class: 'pa-list-item' }, el('span', { class: 'pa-muted', text: w })))),
-      preview.warnings.length > 15 && el('p', { class: 'pa-hint', text: `‚Ä¶ e mais ${preview.warnings.length - 15}.` }),
-    ].filter(Boolean)),
-  ].filter(Boolean);
-  return sheet({
-    title: 'Importar planilha',
-    rows,
-    onSave: () => ctx.actions.importParsed(data),
-    saveTestid: 'xlsx-apply', saveLabel: 'Importar',
-  });
-}
-
-function downloadFile(name, text, mime = 'text/yaml') {
-  const url = URL.createObjectURL(new Blob([text], { type: mime }));
-  const a = el('a', { href: url, download: name });
-  document.body.append(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function dropboxPanel(ctx) {
-  const { linked, busy, status, lastSyncAt, lastBackupAt, syncError } = ctx.view;
-  return el('section', { class: 'pa-card' }, [
-    el('div', { class: 'pa-row' }, [
-      el('strong', { text: 'Dropbox' }),
-      el('span', { class: linked ? 'pa-badge pa-ok' : 'pa-badge', text: linked ? 'Conectado' : 'N√£o conectado' }),
-    ]),
-    el('div', { class: 'pa-row' }, [
-      linked
-        ? el('button', { class: 'pa-btn', disabled: busy, onclick: () => ctx.actions.sync() }, busy ? 'Sincronizando‚Ä¶' : 'Sincronizar agora')
-        : el('button', { class: 'pa-btn pa-primary', onclick: () => ctx.actions.connect() }, 'Conectar ao Dropbox'),
-      linked && el('button', { class: 'pa-btn pa-ghost', onclick: () => ctx.actions.disconnect() }, 'Desconectar'),
-    ]),
-    status && el('p', { class: 'pa-status', text: status }),
-    // Sync runs automatically (on abrir, ao mudar algo, ao sair do app). Show the last result so a
-    // silent failure can't hide a stale backup.
-    linked && syncError
-      ? el('p', { class: 'pa-status pa-bad' }, [el('strong', { text: '‚ö† Backup pode estar desatualizado. ' }), 'Seus dados est√£o salvos no aparelho; tentaremos sincronizar de novo automaticamente.'])
-      : linked && lastSyncAt && el('p', { class: 'pa-hint', text: `Sincronizado automaticamente ¬∑ √∫ltima vez ${fmtDateTime(lastSyncAt)}.` }),
-    lastBackupAt && el('p', { class: 'pa-hint', text: `√öltimo backup extra solicitado em ${fmtDateTime(lastBackupAt)}.` }),
-    el('p', { class: 'pa-hint', text: 'Seus dados ficam primeiro neste aparelho. O Dropbox mant√©m uma c√≥pia sincronizada e permite recuperar os dados em outro aparelho.' }),
-  ]);
-}
+Y™Áäx-ÆÈ‹j◊ù¢Îi∫⁄+äßj[hëÈ‹¢ÈÌ◊ù;ÎƒËµ©h∫⁄n∂XßzÕKÀ»Z[€8†%RH
+Pîà›\ôòXŸJKàò[ö[H”Kõ»úò[Y]€‹öÀà[ô€\⁄Y[ùYöY\ú»[à€ŸK]ô\ûCBãÀ»Xô[ò^X\òHŸY\»[à‹ùY›Y\ŸKàHXòôY⁄[›ô\àH\›Y€‹ôNà[ú›[[‹ÀôXŸZ]\ÀBãÀ»õŸ]‹ÀHôpÈ€‹»^[ŸôàöY]»
+⁄\ôHH€‹›[ô⁄[ôH›\ôòXŸ\ K[ôZù\›\ÀÉBãÀ√BãÀ»ô[ô\ê\ôXùZ[»H”Húõ€H
+›‹ôKöY]ÀX›[€ú H€à]ô\ûH⁄[ôŸKàYYõ‹õ\»€õH]]]CBãÀ»€à›XõZ]€»\[ô»\»ô]ô\à[ù\úù\YûHHôK\ô[ô\ãÉBÉBö[\‹ù√Bà[ô^›‹ôK\›[X]S[úÀ€‹›úôXZŸ›€ãöXŸQúõ€P€‹›õŸX›[ö]€‹›õŸX›öXŸKõŸX›úôXZŸ›€ãBàYôôX›]ôSX\ô⁄[ãYôôX›]ôTÿ[\‘ò]\ÀöXŸQ\úõ‹ãﬁX€Q\úõ‹ãZY[\úõ‹ãX\ö›\\úõ‹ãôYë\úõ‹ãBüHúõ€H	Àãÿ€‹›Y[ô⁄[ôKöú…Œ√Bö[\‹ù»€€ùô\ú⁄[€ë\úõ‹àHúõ€H	Àã›[ö]Àöú…Œ√Bö[\‹ù»Ÿ[ô\ò]QöX⁄\‘ãŸ[ô\ò]TôX⁄Xõ‘ãŸ[ô\ò]P€€[Y\ò⁄X[ÿ›[Y[ùãŸ[ô\ò]P€€X[ôTãŸ[ô\ò]P€Y[ù›][Y[ùãŸ[ô\ò]QôTãÿ]ôTàHúõ€H	Àã‹ãöú…Œ√Bö[\‹ù»€‹öÿõ€⁄–û]\À\úŸR[ù\ò⁄[ôŸKô]öY]—^⁄[ôŸHHúõ€H	ÀãﬁﬁY^⁄[ôŸKöú…Œ√Bö[\‹ù»[€ù›[[X\ûK\‹\ÿ\–ûPÿ]Y€‹ûKõŸX››[[X\ûK€Y[ù›[[X\ûKô]ô[ùYUô[ôÿ[\‘\ö[Ÿ›[[X\ûKù\⁄[ô\‹‘\ö[Ÿ›[[X\ûKù\⁄[ô\‹‘õŸö]ô[ôHúõ€H	Àã‹ô\‹ùÀöú…Œ√Bö[\‹ù»QêUS–“Tï\›]\À]T›]K]TŸ][Y[ùÀÿ\⁄[›ô[Y[ùÀÿ\⁄õ›Àö[ò[òŸQ\⁄õÿ\ôÿ]Y€‹ûPûRŸ^Kÿ[õ€öXÿ[ÿ]Y€‹ûRYYò][ÿ\⁄Xÿ€›[ùHúõ€H	ÀãŸö[ò[òŸKöú…Œ√Bö[\‹ù»€Y[ùö[ò[ò⁄X[›][Y[ùHúõ€H	Àãÿ€Y[ù\›][Y[ùöú…Œ√Bö[\‹ù»X[òYŸ\öX[ôHHúõ€H	ÀãŸôKöú…Œ√Bö[\‹ù»[ùô[ù‹ûT›[[X\ûK[ô‹ôYY[ù[ùô[ù‹ûHHúõ€H	Àã⁄[ùô[ù‹ûKöú…Œ√Bö[\‹ù»T’ëTî“S”àHúõ€H	Àãÿ€€ôöYÀöú…Œ√Bö[\‹ù»õŸX›ÿ[R⁄[ô\–ù[ôTõŸX›ù[ôR⁄[ôXô[‹ô\í][Q‹õ‹‹À‹ô\í][Tÿ[S[ô\À‹ô\îõŸX›[€ã‹ô\í][U[ö]€‹›ù[ôP€€\‹⁄][€ï^ÿ[Sô]Húõ€H	Àãÿù[ô\Àöú…Œ√Bö[\‹ù»ö[ô‹[ì‹ô\ëõ‹ê€Y[ù]KY‹ê\[ô‹ô\àHúõ€H	Àã€‹ô\úÀöú…Œ√BÉBò€€ú›’–“◊’SíU»H…Ÿ…À	⁄Ÿ…À	€[	À	€	À	›[â◊N√BãÀ»ùZ[Z[à[ö][Y[ú⁄[€úÀàHôX⁄\H€€\€ô[ù\»Ÿôô\ôY€õHH[ö]»[à]»[ô‹ôYY[ù	‹√BãÀ»
+‹à›Xã\ôX⁄\I‹ H›€à[Y[ú⁄[€ãYò][[ô»»][ö]8†%€»YŸ‹»õ›Y⁄[à[ò\ôH\ŸY[ÉBãÀ»[ò
+õ»ŸZY⁄[ô K⁄[Hõ›\àõ›Y⁄[àŸÿÿ[à›[ôH\ŸY[àÿ
+ÿ[YH[Y[ú⁄[€äKÉBò€€ú›SíU—‘ì’T»H÷…Ÿ…À	⁄Ÿ…◊K…€[	À	€	◊K…›[â◊WN√Bôù[ò›[€à[ö]“[ë[Y[ú⁄[€äJH√Bà€€ú›‹õ›\HSíU—‘ì’TÀôö[ô
+
+ HOàÀö[ò€Y\ JJH›WN√Bàô]\õà›Kããô‹õ›\ôö[\ä
+
+HOàOOHJWN»À»ò]\ò[[ö]ö\ú›HHYò][Ÿ[X›[€ÉBüCBãÀ»õ›€K[ò]àŸX›[€ú»
+S‘À[ò]]ôHXàò\äKàXX⁄ŸX›[€à€»J»ÿ‹ôY[ú»⁄›€à\»H‹BãÀ»ŸY€Y[ùY€€ùõ€à‹õ›\YûHúô\]Y[òﬁK€Y[ù[[[Ÿ[€»ÿ‹ôY[ú»ö]çH[Xã\ôXX⁄XõHXúÀÉBò€€ú›—P’S”î»H√Bà»Yà	⁄[öX⁄[…ÀXô[à	“[∞ÎX⁄[…ÀX€€éà	¯£ âÀÿ‹ôY[úŒà÷…⁄[öX⁄[…À	“[∞ÎX⁄[…◊WHKBà»Yà	‹YY‹…ÀXô[à	‘YY‹…ÀX€€éà	¯•©	Àÿ‹ôY[úŒà÷…Ÿ[ò€€Y[ô\…À	—[ò€€Y[ô\…◊K…›ô[ô\…À	’ô[ôY‹…◊WHKBà»Yà	‹õŸXÿ[…ÀXô[à	‘õŸpÈË€…ÀX€€éà	¯•·…Àÿ‹ôY[úŒà÷…ÿ€€X[ôIÀ	–€€X[ôI◊K…‹\ô\…À	‘\ô\…◊WHKBà»Yà	ÿÿY\›õ…ÀXô[à	–ÿY\›õ…ÀX€€éà	˚Ô"…Àÿ‹ôY[úŒà÷…⁄[ú›[[‹…À	“[ú›[[‹…◊K…‹ôXŸZ]\…À	‘ôXŸZ]\…◊K…‹õŸ]‹…À	–ÿ]0Ë[Ÿ€…◊K…ÿ€Y[ù\…À	–€Y[ù\…◊K…Ÿõ‹õôXŸY‹ô\…À	—õ‹õôXŸY‹ô\…◊K…Ÿù[ò⁄[€ò\ö[‹…À	—ù[ò⁄[€∞Ë\ö[‹…◊WHKBà»Yà	Ÿö[ò[òŸZ\õ…ÀXô[à	—ö[ò[òŸZ\õ…ÀX€€éà	…	Àÿ‹ôY[úŒà÷…Ÿö[ãZ[öX⁄[…À	“[∞ÎX⁄[…◊K…Ÿö[ãY\⁄õÿ\ô	À	—\⁄õÿ\ô	◊K…Ÿö[ã\ôXŸXô\âÀ	–HôXŸXô\â◊K…Ÿö[ãYöX⁄IÀ	—öX⁄H»€Y[ùI◊K…Ÿö[ã\Yÿ\âÀ	–HYÿ\â◊K…Ÿö[ò[òŸZ\õ…À	”[∞Èÿ[Y[ù‹…◊K…Ÿö[ãYõ^…À	—õ^»HÿZ^I◊K…Ÿö[ãYÿ›[Y[ù‹…À	‘ôX⁄Xõ»»‹∞Èÿ[Y[ù…◊K…‹⁄[][Y‹âÀ	‘⁄[][Y‹â◊WHKBà»Yà	ÿZù\›\…ÀXô[à	–Zù\›\…ÀX€€éà	¯¶¶IÀÿ‹ôY[úŒà÷…ÿZù\›\…À	–Zù\›\…◊WHKBóN√Bò€€ú›—P’S”ó”—àHﬂN√Bôõ‹à
+€€ú›ŸX»Ÿà—P’S”î Hõ‹à
+€€ú›‹⁄YHŸàŸXÀúÿ‹ôY[ú H—P’S”ó”—ñ‹⁄YHHŸXŒ√Bôõ‹à
+€€ú›⁄YŸà…Ÿö[ãX€€\ò\…À	Ÿö[ã\[õ…À	Ÿö[ã\ô[]‹ö[‹…À	‹ôX€‹…À	‹ô[]‹ö[‹…◊JH—P’S”ó”—ñ‹⁄YHH—P’S”îÀôö[ô
+
+ HOàÀöYOOH	Ÿö[ò[òŸZ\õ… N√BÉBãÀ»ùZ[Z[à[
+Pîãò^X\òI‹»õ⁄XŸJKà€ôHúöY[ôH[ùûH\àÿ‹ôY[à
+»Hô]»Z[ã[[ô›XYŸCBãÀ»€€òŸ\[ú›Ÿ\úÀàH»ù]€à‹[ú»]⁄]H›\úô[ùÿ‹ôY[â‹»‹X»^[ôYÉBò€€ú›S‘–‘ëQSî»H√Bà»Yà	⁄[öX⁄[…ÀX€€éà	¸'„Ë	ÀXô[à	“[∞ÎX⁄[…À\ò\Œà√Bà	‘›XHö\Ë€»Ÿ\ò[»pÍú»HHYŸ[ôHH⁄ôNà€€ù\»]YHô[òŸ[K[Xúô]\À[ö]ô\úË\ö[‹»H][ú»H\›HH€€\ò\Àà[H[Xúô]HÿZHH[H]X[ô»õÿÍàX\òÿH8†'ôZ]¯†'KâÀBàHKBà»Yà	⁄[ú›[[‹…ÀX€€éà	¸'ÈÓâÀXô[à	“[ú›[[‹…À\ò\Œà√Bà	’Y»]YHõÿÍà€€\òHòHõŸ^ö\à8†%ò\ö[öK›õ‹À⁄ÿ€€]H8†%H[X∞Í[H[Xò[YŸ[ú»H][ú»õ€ù‹»Hô]ô[ôH
+õ€Xõ€KpÈ€Àÿ\ù0Ë€ﬁö[ö KàÿY\›ôHÿYH[H€€HH[öYYHH€€\òHH»ôpÈ€ÀâÀBà	“[ôõ‹õYH[X∞Í[HH]X[ùYYH[öX⁄X[H»\›‹]YHpÎ[ö[[Àà€€\ò\»][Y[ù[H»ÿ[Œ»HõŸpÈË€»[õ›YHòH€€X[ôHH\»\ô\»H[ú›[[»[Z[ùY[Kàô[ô\»∞Ë€»Y^[Hô\‹ŸH\›‹]YKâÀBàHKBà»Yà	‹ôXŸZ]\…ÀX€€éà	¸'‰ÂâÀXô[à	‘ôXŸZ]\…À\ò\Œà√Bà	–\]ZHöXÿHHöX⁄H0ÍX€öXÿH€€\]Nà[ô‹ôYY[ù\À⁄[ú›[[‹Àô[ô[Y[ùÀ[\‹À[Xò[YŸ[KX\ôŸ[HH»õŸ]»ô[ôY»ô[X⁄[€òYÀâÀBà	”»›\›»€€XH[ô‹ôYY[ù\ÀË\À[Xò[YŸ[HH›\›‹»ö^‹»õ‹‹ò⁄[€òZ\ÀàHpË€»HÿúòH\\ôXŸH€€[»[ôXÿY‹ã⁄\»ÿ[0Ë\ö[‹»H∞ÏÀ[Xõ‹ôH]ô[H\›\àõ‹»›\›‹»ö^‹Àà[Hö[ò[òŸZ\õÀ\ŸH»⁄[][Y‹à\òH\›\àô[ô[Y[ùÀ›\›»HX‹õ»Ÿ[H[\ò\àHôXŸZ]H‹öY⁄[ò[âÀBàHKBà»Yà	‹õŸ]‹…ÀX€€éà	¸'„†âÀXô[à	–ÿ]0Ë[Ÿ€…À\ò\Œà√Bà	‚HH\›H⁄[\\»»]YH\\ôXŸHò\»€€X[ô\»Hô[ô\Œàõ€YK[öYYH›H\€»Hò[‹àHô[ôKâÀBà	–H€€\‹⁄pÈË€»H‹»Ë[›[‹»öXÿ[H[HôXŸZ]\Àà[»ô[X⁄[€ò\à[XHôXŸZ]HH[HõŸ]À»›\›»ÿ[›[Y»\‹ÿHHŸ\ùö\àHôYô\∞Íõò⁄XH\òHHô[ùXö[YYH\‹ŸHõŸ]ÀâÀBàHKBà»Yà	ÿ€Y[ù\…ÀX€€éà	¸'‰iIÀXô[à	–€Y[ù\…À\ò\Œà√Bà	‘Ÿ]\»€Y[ù\»8†%õ€YK[Yõ€ôHH[ô\ôpÈ€Àà€€[»HXZ[‹öXH0ÍHôX€‹úô[ùKÿY\›ò\à[XHô^àY⁄[^òH[∞Èÿ\à‹»YY‹»H[€ù\àHöX⁄H
+\›0Ï‹öX€»H€€\ò\ HHÿYH[KâÀBà	–[»Xúö\à[H€Y[ùKõÿÍà∞Íà»\›0Ï‹öX€»[Nà›[€€\òYÀ›[Y€Àÿ[»[ô[ùK\»€€\ò\»H‹»Yÿ[Y[ù‹Ààõ»ö[HH[HõÿÍàŸ\òH\»öX⁄\»[Hà
+»‹àõ€KòH[\ö[Z\àH\ú]Z]ò\äNàŸ\»\»ô[ô\ÀÏ»\»[HXô\ù»
+€€Hÿ[ H›HÏ»\»Yÿ\»8†%Ÿ[\ôH€€H[XH∞Í]öXHòH€€ôô\ö\à[ù\ÀâÀBàHKBà»Yà	‹ôX€‹…ÀX€€éà	¸'‰¨	ÀXô[à	‘ôpÈ€‹…À\ò\Œà√Bà	‘\òHÿYHõŸ]À[‹›òH»›\›»H[ô‹ôYY[ù\ÀË\À›\›‹»ö^‹»õ‹‹ò⁄[€òZ\»H[Xò[YŸ[KàHpË€»HÿúòH0ÍH\[ò\»[ôXÿY‹é»ÿ[0Ë\ö[‹»∞ËH[ùò[Hõ‹»›\›‹»ö^‹Àà»ôpÈ€»›YŸ\öY»€€ú⁄Y\òH[X∞Í[H^\»HYÿ[Y[ùÀ€€Z\‹Ë€»HX\ôŸ[H\ŸZòYKâÀBà	‘ŸH\\ôXŸ\à8†'Ÿ[HôpÈ€¯†'K0ÍH‹ú]YHò[HÿY\›ò\à»ôpÈ€»H[›[H[ú›[[»\ÿYÀâÀBàHKBà»Yà	Ÿ[ò€€Y[ô\…ÀX€€éà	¸'‰‚…ÀXô[à	—[ò€€Y[ô\…À\ò\Œà√Bà	”‹»YY‹»€€H]HH[ùôYÿKàù\‹]YH»€Y[ùH[»õ€YK\ÿ€€HH]HH∞ËHù\ÿÿ[ô»‹»õŸ]‹»8†%»›[ÿZHÿ[›[YÀàŸH[ò€€Y[ôHH[H€Y[ùHÿY\›òY»[ùòHòHöX⁄H[KYÿH›H[ô[ùKâÀBà	–H\›H€€YpÈÿH[‹›ò[ô»Ÿ\»\»]\Àà‹ô[ôH‹à\ôŸ[ù\Àô]\òYK[›ÿõﬁH›Hõ€YH»€Y[ùN»ö[ôH‹à€Y[ùKõŸ]À[ùôYÿHH⁄]XpÈË€ÀàX\ú]YH8´d\òH\›Xÿ\à\ôÍõò⁄X\»H8†'[ùôYÿ\∏†'H]X[ô»ÿZ\ãâÀBà	’[Hõ›õ»YY»\òH»Y\€[»€Y[ùHÿY\›òY»HHY\€XH]H[ùòHòH[ò€€Y[ôHZ[ôH∞Ë€»[ùôY›YKà‹»õŸ]‹Àúô]K\ÿ€€ù»HÿúŸ\ùòpÈÌY\»Ë€»€€XY‹»Ÿ[H\ô\àYÿ[Y[ù‹»∞ËH[∞ÈÿY‹ÀàŸHH[ò€€Y[ôH[ù\ö[‹à∞ËHõ⁄H[ùôY›YK€€YpÈÿH›]õ»YYÀâÀBà	—[H8†'öX⁄\»»Xx†'K\ÿ€€H[XH]HHX\ú]YH‹»€Y[ù\»›Zò\»[ò€€Y[ô\»]Y\à[\ö[Z\ãàH∞Í]öXHŸ\òH»Y\€[»à€€\X›»H»öX⁄\»‹àõ€K€€H»ò[‹àH»ÿ[»‹»YY‹»\‹ÿH]KâÀBàHKBà»Yà	ÿ€€X[ôIÀX€€éà	¸'‰ÁIÀXô[à	–€€X[ôH»XIÀ\ò\Œà√Bà	–H]X[ùYYH[ò€€Y[ôYH0ÍHÿ[›[YH]]€X]Xÿ[Y[ùHH\ù\à‹»YY‹»H]KàõŸpÈË€»]ù[ÿHH\›‹]YH∞ËH^\›[ùHË€»[ôõ‹õXY‹»Ÿ\\òY[Y[ùKà[HõŸ^öY‹»⁄ôK[õ›H\[ò\»»]YHõÿÍàô^à⁄ôKàX\ú]YH8ß$»]X[ô»\õZ[ò\ãâÀBà	’õÿÍàŸHYX⁄[€ò\àõŸ]‹»]ù[€‹»Y\€[»Ÿ[H[ò€€Y[ôKà»\‹€∞Î]ô[\òHô[ôH€€ú⁄Y\òH»\›‹]YH∞ËH^\›[ùKHõŸpÈË€»ôY⁄\›òYHH‹»YY‹»»XKà»›\›»HõŸpÈË€»€€ùH\[ò\»»]YHõ⁄HõŸ^öY»⁄ôKâÀBàHKBà»Yà	ŸöXY…ÀX€€éà	¸'‰¨…ÀXô[à	–HôXŸXô\âÀ\ò\Œà√Bà	‘]Y[HZ[ôH[Hò[‹àHYÿ\à\»[ò€€Y[ô\»8†%»›[HôXŸXô\àHÿYH[ô0Íõò⁄XKà‹]YHù[XH\òHôY⁄\›ò\à[HYÿ[Y[ù»
+›[›H\ò⁄X[
+N»»ÿ[»0ÍHôXÿ[›[Y»€ﬁö[öÀâÀBà	‘\òH€‹úöY⁄\à[HYÿ[Y[ù»[∞ÈÿY»\úòYÀ\ŸH»\›‹õõ»
+8°™JHòH[ò€€Y[ôH8†%[Hÿ[òŸ[HŸ[H\Yÿ\à»\›0Ï‹öX€ÀâÀBàHKBà»Yà	›ô[ô\…ÀX€€éà	¸'Ê‰âÀXô[à	’ô[ôY‹…À\ò\Œà√Bà	”[‹›òH\»[ò€€Y[ô\»[ùôY›Y\»[H]HH[ùôYÿHH\»ô[ô\»∞Ë\Y\»[H]HHô[ôKà[ùôY›YHHY€»Ë€»[ôõ‹õXpÈÌY\»[ô\[ô[ù\Œà[XHô[ôHŸH€€ù[ùX\àHôXŸXô\ãâÀBà	”X\ú]YH[H›HXZ\»õŸ]‹»\òHö[ò\àHY⁄]H»õ€YH»€Y[ùH\òH\ÿ€€0Íã[Àà»ö[õ»Ÿ‹»[ò€ZHô[ô\»ôXŸXöY\»H[ô[ù\Àà\⁄\›0Íõò⁄X\»öXÿ[H[H[XHö\Ë€»Ÿ\\òYKâÀBàHKBà»Yà	Ÿö[ò[òŸZ\õ…ÀX€€éà	…	ÀXô[à	—ö[ò[òŸZ\õ…À\ò\Œà√Bà	–Ÿ[ùò[^òH»[öZ\õ»]YH[ùõ›HHÿZ]NàYÿ[Y[ù‹»Hô[ô\À›]ò\»ôXŸZ]\À\‹\ÿ\»ö^\À\‹\ÿ\»ò\öpË]ôZ\»H›\›‹ÀâÀBà	”»€€ùõ€HHYÿ[Y[ù‹»0ÍH€€Y[ùHö[ò[òŸZ\õ»HX[ùX[8†%Ÿ[HTà€ŸK€ÿúò[∞ÈÿH]]€pË]XÿH›H[ö‹»HYÿ[Y[ùÀâÀBàHKBà»Yà	Ÿù[ò⁄[€ò\ö[‹…ÀX€€éà	¸'È‰x†#|'„l…ÀXô[à	—ù[ò⁄[€∞Ë\ö[‹…À\ò\Œà√Bà	–ÿY\›ôHõ€YKù[∞ÈË€À[Yõ€ôHH[ö]ô\úË\ö[»\»\‹€ÿ\»]YHòXò[[H€€HõÿÍãàù[ò⁄[€∞Ë\ö[‹»]]õ‹»]YHò^ô[H[ö]ô\úË\ö[»⁄ôH\\ôXŸ[HòHYŸ[ôH»[∞ÎX⁄[ÀâÀBàHKBà»Yà	Ÿö[ãYÿ›[Y[ù‹…ÀX€€éà	¸'ÈÔâÀXô[à	‘ôX⁄Xõ»»‹∞Èÿ[Y[ù…À\ò\Œà√Bà	—Ÿ\ôH[H‹∞Èÿ[Y[ù»›HôX⁄Xõ»∞Ë€»ö\ÿÿ[[HàM€€HŸ€»HY‹»H[\ô\ÿK€Y[ùK][úÀò[‹ô\»H€€ôpÈË€»HYÿ[Y[ùÀâÀBà	’õÿÍàŸH\ÿ€€\à[H€Y[ùHÿY\›òY»›H[ôõ‹õX\à»õ€YHH[XH\‹€ÿH\[ò\»\òH\]Y[Hÿ›[Y[ùÀàòYH0ÍH[∞ÈÿY»õ»ÿZ^H]]€X]Xÿ[Y[ùKâÀBàHKBà»Yà	‹\ô\…ÀX€€éà	¸'Â‰{Ó#…ÀXô[à	‘\ô\…À\ò\Œà√Bà	”»]YHŸH\ô]HH∞Ë€»ö\õ›Hô[ôNà[XHX\‹ÿH]YH]H\úòYÀ[HõŸ]»]YH∞Ë€»ô[ô]K[XH[Xò[YŸ[H[öYöXÿYKà\òH[ú›[[»›HõŸ]À»ò[‹à∞ËHô[Hÿ[›[Y»[H]X[ùYYKâÀBà	”»ò[‹àöXÿHõ»ô[]0Ï‹ö[»Ÿ\ô[ò⁄X[HõŸpÈË€Àà[H∞Ë€»‹öXH[XHŸY›[ôHÿpÎYHHÿZ^H]X[ô»H€€\òH»[ú›[[»∞ËHõ⁄HYÿKâÀBàHKBà»Yà	‹ô[]‹ö[‹…ÀX€€éà	¸'‰‚âÀXô[à	‘ô[]0Ï‹ö[‹…À\ò\Œà√Bà	‘Ÿ]Hò[[∞È€»‹àpÍúŒàò]\ò[Y[ùÀ›\›‹À^\ÀX‹õ»HX\ôŸ[K€€H‹∞ËYöX€»H»ô\›[Y»‹àõŸ]Àà0ËHòH^‹ù\ãâÀBàHKBà»Yà	‹⁄[][Y‹âÀX€€éà	¯¶•ªÓ#…ÀXô[à	‘⁄[][Y‹âÀ\ò\Œà√Bà	—òpÈÿH€€ù\»H8†'HŸx†)∏†'Kà\ÿ€€H[XHôXŸZ]HHôZòH»]YHX€€ùXŸH€€H»›\›»HHX\ôŸ[HŸHõÿÍàö^ô\à[H›HXZ[‹à8†%‹»[ô‹ôYY[ù\»‹ô\ÿŸ[Hù[ùÀX\»HpË€»HÿúòH€‹›[XH›Xö\à›X€À[ù0Ë€»»›\›»‹à[öYYHÿZKâÀBà	–€€\\ôHHX\ôŸ[HH»X‹õ»H[HôpÈ€»ö^ÀàZùYHHX⁄Y\àŸHX[ù0Í[KY\H›H\òH[HõŸ]»»ÿ\ô0Ë\[ÀâÀBàHKBà»Yà	ÿZù\›\…ÀX€€éà	¯¶¶{Ó#…ÀXô[à	–Zù\›\…À\ò\Œà√Bà	”‹»ò[‹ô\»X[ùXZ\»ÿ[õ‹»∞ËH[ùò[HòHôX⁄YöXÿpÈË€Àà€€\\ôK[‹»€€H\»\›[X]]ò\»‹»0Óõ[[‹»Y\Ÿ\»€€\]‹Œ»[\»Ï»›Xú›]Y[HŸ]\»ò[‹ô\»]X[ô»õÿÍà\ÿ€€\àY›0ËK[\ÀâÀBà	–\]ZH[X∞Í[HöXÿ[H»\›0Ï‹öX€»\»õ›YöXÿpÈÌY\ÀH\›HH€€\ò\ÀH^Z\òK»òX⁄›\HH[\‹ùpÈË€ÀŸ^‹ùpÈË€ÀàõÿÍàŸH‹öX\à[Xúô]\»]Y‹»HX‹ô\ÿŸ[ù\à][ú»]úô\»0Ë\›KâÀBàHKBóN√Bò€€ú›S–””ê—T»H√Bà»Nà	‘‹à]YH[HõŸ]»öXÿH8†'Ÿ[HôpÈ€¯†'O…ÀNà	‘]X[ô»[›[H[ú›[[»]YH[H\ÿHZ[ôH∞Ë€»[HôpÈ€»ÿY\›òYÀàÿY\›ôH»ôpÈ€»[H[ú›[[‹»H»ôpÈ€»»õŸ]»\\ôXŸH€ﬁö[öÀâ»KBà»Nà	—\›[X]]òHôX[YYIÀNà	”»\\ÿH\›[X]]ò\»
+\»ôXŸZ]\ HòH›YŸ\ö\àôpÈ€‹ÀH‹»Y‹»ôXZ\»
+ô[ô\»H»]YHõÿÍàõŸ^ö]HòH€€X[ôJHòH[‹›ò\àHô\ôYHõ‹»ô[]0Ï‹ö[‹Àâ»KBà»Nà	”X\ôŸ[K^K€€Z\‹Ë€»H[\‹›…ÀNà	”»ôpÈ€»›YŸ\öY»€ÿúôH[ú›[[‹ÀË\À[Xò[YŸ[HH›\›‹»ö^‹»õ‹‹ò⁄[€òZ\Àà\⁄\»ô\Ÿ\ùòK€ÿúôH»ôpÈ€»Hô[ôKHX\ôŸ[H\ŸZòYKH^HHYÿ[Y[ùÀH€€Z\‹Ë€»H]ô[ùX[[\‹›»\òŸ[ùX[à»T»»QRH∞ËH\›0ËHõ‹»›\›‹»ö^‹Àâ»KBà»Nà	”Y]\»Y‹»\›0Ë€»ŸY›\õ‹œ…ÀNà	—öXÿ[Hÿ[õ‹»õ»Ÿ]H\\ô[Àà€€ôX›H»õ‹õﬁ[HZù\›\»òH\àòX⁄›\HŸ\à\ÿ\à[HXZ\»H[HYÿ\ãâ»KBóN√BÉBãÀ»8• 8• ”H
+»õ‹õX][\ú»8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€à[
+YÀ]ú»HﬂK⁄[ô[àH◊JH√Bà€€ú›õŸHHÿ›[Y[ùò‹ôX]Q[[Y[ù
+Y N√Bàõ‹à
+€€ú›⁄ÀóHŸàÿöôX›ô[ùöY\ ]ú JH√BàYà
+»OOH	ÿ€\‹… HõŸKò€\‹”ò[YHHé√Bà[ŸHYà
+»OOH	›^	 HõŸKù^€€ù[ùHé√Bà[ŸHYà
+»OOH	›ò[YI HõŸKùò[YHHé√Bà[ŸHYà
+Àú›\ù’⁄]
+	€€â H	âà\[ŸààOOH	Ÿù[ò›[€â HõŸKòY]ô[ù\›[ô\äÀú€XŸJäKäN√Bà[ŸHYà
+àOOHò[ŸH	âààOHù[
+HõŸKúŸ]]öXù]JÀäN√BàCBàõ‹à
+€€ú›»Ÿà◊Kò€€òÿ]
+⁄[ô[äJH√BàYà
+»OHù[»OOHò[ŸJH€€ù[ùYN√BàõŸKò\[ô
+ÀõõŸU\H»»àÿ›[Y[ùò‹ôX]U^õŸJ›ö[ô  JJN√BàCBàô]\õàõŸN√BüCBÉBò€€ú›úõH
+äHOà	‘â	»
+»
+ù[Xô\ääH
+Kù—ö^Y
+äKúô\XŸJ	ÀâÀ	À	 N√Bò€€ú››H
+úòX HOà
+ù[Xô\äúòX H
+H
+àL√Bò€€ú›õ]ù[HH
+äHOà›ö[ô X]úõ›[ô
+
+ù[Xô\ääH
+H
+àL
+H»L
+Kúô\XŸJ	ÀâÀ	À	 N»À»\»à€€[XHX⁄[X[Bò€€ú›››àH
+úòX HOà	”X]úõ›[ô
+
+ù[Xô\äúòX H
+H
+àL
+_IX√Bò€€ú›õ›“\€»H
+
+HOàô]»]J
+Kù“T”‘›ö[ô 
+N√Bò€€ú›]ZYH
+
+HOà‹û\Àúò[ô€UURQ
+
+N√Bò€€ú›õ]]HH
+\€ HOà»ûH»ô]\õàô]»]J\€ Kù”ÿÿ[Q]T›ö[ô 	‹Pîâ N»Hÿ]⁄»ô]\õà\€Œ»HN√Bò€€ú›õ]]U[YHH
+\€ HOà»ûH»ô]\õàô]»]J\€ Kù”ÿÿ[T›ö[ô 	‹PîâÀ»]T›[Nà	‹⁄‹ù	À[YT›[Nà	‹⁄‹ù	»JN»Hÿ]⁄»ô]\õà\€Œ»HN√Bã äà\úŸHHù[Xô\à]X^H\ŸHH€€[XHX⁄[X[‹à›\úô[òﬁHﬁ[Xõ€Œ»	…»»[ùò[Y8°§àù[à
+ã√Bôù[ò›[€à\úŸSù[J H√BàYà
+»OHù[
+Hô]\õàù[√Bà€€ú››àH›ö[ô  Kúô\XŸJ÷◊óãWKŸÀ	… Kúô\XŸJ	À	À	Àâ N»À»›ö\îâã‹XŸ\À]ÀÉBàYà
+›àOOH	… Hô]\õàù[√Bà€€ú›àHù[Xô\ä›äN√Bàô]\õàù[Xô\ãö\—ö[ö]JäH»ààù[√BüCBò€€ú›õ][€ô^R[ú]H
+äHOà
+ù[Xô\ääH
+Kù—ö^Y
+äKúô\XŸJ	ÀâÀ	À	 N√BÉBã äàH›\úô[òﬁH[ú]
+âôYö^õ‹õX]»»àX⁄[X[»€àõ\äKàôXY]»ò[YHöXHö[ú]ùò[YXà
+ã√Bôù[ò›[€à[€ô^QöY[
+ò[YK\›Y
+H√Bà€€ú›[ú]H[
+	⁄[ú]	À»€\‹Œà	‹K[[€ô^KZ[ú]	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àããä\›Y»»	Ÿ]K]\›Y	Œà\›YHàﬂJHJN√Bà[ú]ùò[YHHò[YHOHù[»õ][€ô^R[ú]
+ò[YJHà	…Œ√Bà[ú]òY]ô[ù\›[ô\ä	ÿõ\âÀ
+
+HOà»€€ú›àH\úŸSù[J[ú]ùò[YJN»Yà
+àOHù[
+H[ú]ùò[YHHõ][€ô^R[ú]
+äN»JN√Bà€€ú›‹ò\H[
+	Ÿ]âÀ»€\‹Œà	‹K[[€ô^I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[[€ô^K\û	À^à	‘â	»JK[ú]JN√Bà‹ò\ö[ú]H[ú]√Bàô]\õà‹ò\√BüCBò€€ú›õ‹õHH
+ HOà›ö[ô »	… Kõõ‹õX[^ôJ	”ëë	 Kúô\XŸJ÷Û sk◊KŸÀ	… Kù”›Ÿ\êÿ\ŸJ
+Kùö[J
+N√BãÀ»òX⁄›ÿ\ô€€\]XõNàõŸX›»‹ôX]YôYõ‹ôH\»öY[^\›Y\ôH]òZ[XõHõ‹àÿ[KÉBò€€ú›õŸX›\–X›]ôHH
+õŸX›
+HOàH\õŸX›	âàõŸX›òX›]ôHOOHò[ŸN√Bò€€ú›Ÿ^R[ú]H
+
+HOà»€€ú›Hô]»]J
+N»ô]\õà	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KI‘›ö[ô ôŸ]]J
+JKúY›\ù
+ã	Ã	 _X»N√Bò€€ú››\úô[ù[€ùH
+
+HOà»€€ú›Hô]»]J
+N»ô]\õà	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _X»N√Bò€€ú›[€ùXô[H
+[JHOà»€€ú›ﬁKWHH›ö[ô [JKú‹]
+	ÀI N»ô]\õà	€_K… H	… Kú€XŸJä_X»N√Bò€€ú›]S€õHH
+\€ HOà›ö[ô \€»	… Kú€XŸJL
+N√Bò€€ú›[ë]Tò[ôŸHH
+\€À›\ù[ô
+HOà
+\›\ù]S€õJ\€ HèH›\ù
+H	âà
+Y[ô]S€õJ\€ HH[ô
+N√BÉBôù[ò›[€à\ö[ŸöY[ ›\ù[ô€ê⁄[ôŸKôYö^
+H√Bà€€ú›úõ€HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôYö^K\›\ù\Nà	Ÿ]IÀò[YNà›\ù	…»JN√Bà€€ú›»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôYö^KY[ô\Nà	Ÿ]IÀò[YNà[ô	…»JN√Bàúõ€KòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà€ê⁄[ôŸJ»›\ùàúõ€Kùò[YHù[[ôàÀùò[YHù[JJN√BàÀòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà€ê⁄[ôŸJ»›\ùàúõ€Kùò[YHù[[ôàÀùò[YHù[JJN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\\ö[Ÿ	»KŸöY[
+	—]H[öX⁄X[	Àúõ€JK[
+	‹‹[âÀ»€\‹Œà	‹K\\ö[ŸX\úõ›…À^à	ÿ]0ÍI»JKöY[
+	—]Hö[ò[	À WJN√BüCBÉBãÀ»^HùX⁄Ÿ][ô»õ‹àH‹\òpÈË€»Ÿ‹»
+õ‹õòY\À’ô[ô\ H8†%ÿÿ[Y^HŸ^H
+»HúöY[ôHXY\ãÉBò€€ú›^RŸ^HH
+\€ HOà»€€ú›Hô]»]J\€ N»ô]\õà	ŸôŸ]ù[YX\ä
+_KIŸôŸ][€ù
+
+_KIŸôŸ]]J
+_X»N√Bôù[ò›[€à^SXô[
+\€ H√Bà€€ú›õ›»Hô]»]J
+N√Bà€€ú›Y\›Hô]»]Jõ› N»Y\›úŸ]]Jõ›ÀôŸ]]J
+HHJN√Bà€€ú›»H^RŸ^J\€ N√BàYà
+»OOH^RŸ^Jõ› JHô]\õà	“⁄ôIŒ√BàYà
+»OOH^RŸ^JY\›
+JHô]\õà	”€ù[IŒ√Bàô]\õàõ]]J\€ N√BüCBã äàHôXY[€õH]ô[ùŸ»
+ô]Ÿ\›ö\ú›
+K⁄]H›XùH]HXY\à⁄[ô]ô\àH^H⁄[ôŸ\Àà
+ã√Bôù[ò›[€àŸ”\›
+][\Àõ›—õäH√Bà€€ú›⁄[ô[àH◊N√Bà]\›Hù[√Bàõ‹à
+€€ú›]Ÿà][\ H√Bà€€ú›»H^RŸ^J]ò]
+N√BàYà
+»OOH\›
+H»⁄[ô[ãú\⁄
+[
+	€IÀ»€\‹Œà	‹KY^Y‹õ›\	À^à^SXô[
+]ò]
+HJJN»\›HŒ»CBà⁄[ô[ãú\⁄
+õ›—õä]
+JN√BàCBàô]\õà[
+	›[	À»€\‹Œà	‹K[\›	»K⁄[ô[äN√BüCBãÀ»ÿÿ[ñVVVKSSHàŸà[à]ô[ù8†%õ‹àH‹\òpÈË€»[€ùÿ€‹H
+X]⁄\»H[ú]\O[[€ùàò[YJKÉBò€€ú›[€ùŸàH
+\€ HOà»€€ú›Hô]»]J\€ N»ô]\õà	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _X»N√Bã äà]ôKõÿ›\À\ô\Ÿ\ùö[ô»^ö[\à›ô\àHŸ”\›[8†%[€»Y\»H^HXY\à⁄[à]»õ›‹»[YKà
+ã√Bôù[ò›[€àŸ‘ŸX\ò⁄[ú]
+XŸZ€\ã[\›Y
+H√Bà€€ú›[úH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\ãããä\›Y»»	Ÿ]K]\›Y	Œà\›YHàﬂJHJN√Bà[úòY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›HHõ‹õJ[úùò[YJN√Bàõ‹à
+€€ú›⁄[Ÿà[ò⁄[ô[äH√BàYà
+X⁄[ò€\‹”\›ò€€ùZ[ú 	‹K[\›Z][I JH€€ù[ùYN√Bà€€ú›^HH⁄[ôŸ]]öXù]J	Ÿ]K\ŸX\ò⁄	 Hœ»⁄[ù^€€ù[ù√Bà⁄[ú›[Kô\‹^HH
+\Hõ‹õJ^JKö[ò€Y\ JJH»	…»à	€õ€ôIŒ√BàCBàÀ»ôX€€ò⁄[H^HXY\úŒàHXY\à⁄›‹»€õHYàHö\⁄XõHõ›»õ€›‹»]
+ôYõ‹ôHHô^XY\äKÉBà]XY\àHù[»]ŸY[àHò[ŸN√Bà€€ú›õ\⁄H
+
+HOà»Yà
+XY\äHXY\ãú›[Kô\‹^HHŸY[à»	…»à	€õ€ôIŒ»N√Bàõ‹à
+€€ú›⁄[Ÿà[ò⁄[ô[äH√BàYà
+⁄[ò€\‹”\›ò€€ùZ[ú 	‹KY^Y‹õ›\	 JH»õ\⁄
+
+N»XY\àH⁄[»ŸY[àHò[ŸN»CBà[ŸHYà
+⁄[ò€\‹”\›ò€€ùZ[ú 	‹K[\›Z][I H	âà⁄[ú›[Kô\‹^HOOH	€õ€ôI HŸY[àHùYN√BàCBàõ\⁄
+
+N√BàJN√Bàô]\õà[ú√BüCBã äàHŸX\ò⁄
+»[€ù\ÿ€‹H€€ùõ€õ›»⁄\ôYûHH€»‹\òpÈË€»Ÿ‹Àà
+ã√Bôù[ò›[€àŸ—ö[\ú ›[»ŸX\ò⁄XŸZ€\ãŸX\ò⁄\›Y[€ù\›YJH√Bà€€ú›[€ùH›ùöY]ÀõŸ”[€ù	…Œ√Bà€€ú›[€ù[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà[€ù\›Y\Nà	€[€ù	Àò[YNà[€ùJN√Bà[€ù[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà›òX›[€úÀúŸ]Ÿ”[€ù
+[€ù[ú]ùò[YHù[
+JN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õHK[ŸŸö[\ú…»K√BàŸ‘ŸX\ò⁄[ú]
+ŸX\ò⁄XŸZ€\ã[ŸX\ò⁄\›Y
+KBà[€ù[ú]BàJN√BüCBÉBò€€ú›’ë”î»H	⁄ãÀ›››ÀùÃÀõ‹ôÀÃå‹›ô…Œ√Bôù[ò›[€à›ô—[
+YÀ]ú»HﬂK⁄[ô[àH◊JH√Bà€€ú›õŸHHÿ›[Y[ùò‹ôX]Q[[Y[ùî ’ë”îÀY N√Bàõ‹à
+€€ú›⁄ÀóHŸàÿöôX›ô[ùöY\ ]ú JHYà
+àOHù[
+HõŸKúŸ]]öXù]JÀ›ö[ô äJN√Bàõ‹à
+€€ú›»Ÿà◊Kò€€òÿ]
+⁄[ô[äJHYà
+»OHù[
+HõŸKò\[ô
+ÀõõŸU\H»»àÿ›[Y[ùò‹ôX]U^õŸJ›ö[ô  JJN√Bàô]\õàõŸN√BüCBÉBã äÉBà
+àHŸX\ò⁄õﬁ]]ôKYö[\ú»H€€ùZ[ô\â‹»\ôX›⁄[ô[àûHZ\à]K\ŸX\ò⁄]öXù]CBà
+à
+\ôH”HŸŸ€H8†%õ»ôK\ô[ô\ã€»\[ô»ô]ô\à‹Ÿ\»õÿ›\ KàŸ]]K\ŸX\ò⁄€àXX⁄õ›ÀÉBà
+ã√Bôù[ò›[€àŸX\ò⁄[ú]
+XŸZ€\ã€€ùZ[ô\ã\›Y
+H√Bà€€ú›[úH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\ãããä\›Y»»	Ÿ]K]\›Y	Œà\›YHàﬂJHJN√Bà[úòY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›HHõ‹õJ[úùò[YJN√Bàõ‹à
+€€ú›⁄[Ÿà€€ùZ[ô\ãò⁄[ô[äH√Bà€€ú›^HH⁄[ôŸ]]öXù]J	Ÿ]K\ŸX\ò⁄	 Hœ»⁄[ù^€€ù[ù√Bà⁄[ú›[Kô\‹^HH
+\Hõ‹õJ^JKö[ò€Y\ JJH»	…»à	€õ€ôIŒ√BàCBàJN√Bàô]\õà[ú√BüCBÉBãÀ»8• 8• ⁄[8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBã äÉBà
+à\ò[H“S[[Y[ùHõ€›Bà
+à\ò[Hﬁ»›‹ôNà[\‹ù
+	Àã‹›‹ôKöú… KîZ[€›‹ôKöY]Œà»Xéà›ö[ôÀù\ﬁNàõ€€X[ã›]\Œà‹›ö[ôÀ[öŸYàõ€€X[àKX›[€úŒàÿöôX›_H›Bà
+ã√Bô^‹ùù[ò›[€àô[ô\ê\
+õ€››
+H√Bà€€ú›[ô[»H√Bà[öX⁄[Œà[öX⁄[‘[ô[Bà[ú›[[‹Œà[ú›[[‹‘[ô[ôXŸZ]\ŒàôXŸZ]\‘[ô[õŸ]‹ŒàõŸ]‹‘[ô[€Y[ù\Œà€Y[ù\‘[ô[õ‹õôXŸY‹ô\Œàõ‹õôXŸY‹ô\‘[ô[ù[ò⁄[€ò\ö[‹Œàù[ò⁄[€ò\ö[‹‘[ô[BàôX€‹ŒàôX€‹‘[ô[ô[ô\Œàô[ô\‘[ô[Bà[ò€€Y[ô\Œà[ò€€Y[ô\‘[ô[€€X[ôNà€€X[ôT\ö[Ÿ[ô[öXYŒàöXY‘[ô[ö[ò[òŸZ\õŒàö[ò[òŸZ\õ‘[ô[\‹\ÿ\Œàö[ò[òŸZ\õ‘[ô[\ô\Œà\ô\‘[ô[Bà	Ÿö[ãZ[öX⁄[…Œàö[ò[òŸR€YT[ô[	Ÿö[ãY\⁄õÿ\ô	Œàö[ò[òŸQ\⁄õÿ\ô[ô[	Ÿö[ã\ôXŸXô\âŒàö[ò[òŸTôXŸZ]òXõT[ô[	Ÿö[ãYöX⁄IŒàö[ò[òŸP€Y[ù›][Y[ù[ô[	Ÿö[ã\Yÿ\âŒàö[ò[òŸT^XXõT[ô[Bà	Ÿö[ãYõ^…Œàö[ò[òŸPÿ\⁄õ›‘[ô[	Ÿö[ãYÿ›[Y[ù‹…Œàö[ò[òŸP€€[Y\ò⁄X[ÿ›[Y[ù‘[ô[	Ÿö[ãX€€\ò\…Œàö[ò[òŸT\ò⁄\Ÿ\‘[ô[	Ÿö[ã\[õ…Œàö[ò[òŸP⁄\ù[ô[	Ÿö[ã\ô[]‹ö[‹…Œàö[ò[òŸTô\‹ù‘[ô[Bàô[]‹ö[‹Œàô[]‹ö[‹‘[ô[⁄[][Y‹éà⁄[][Y‹î[ô[Zù\›\ŒàZù\›\‘[ô[BàN√Bà€€ú›ŸX›[€àH—P’S”ó”—ñÿ›ùöY]ÀùXóH—P’S”î÷ÃN√Bà€€ú›XàH—P’S”ó”—ñÿ›ùöY]ÀùXóHOOHŸX›[€à»›ùöY]ÀùXààŸX›[€ãúÿ‹ôY[ú÷ÃVÃN√BÉBà€€ú›€€ù[ùH◊N√BàYà
+›ùöY]Àù\]TôXYJH√Bà€€ù[ùú\⁄
+[
+	Ÿ]âÀ»€\‹Œà	‹K]\]IÀ	Ÿ]K]\›Y	Œà	›\]KXò[õô\â»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à	¯ß*õ›òHô\úË€»\‹€∞Î]ô[	»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	›\]KX\IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀò\U\]J
+HK	–]X[^ò\â KBàJJN√BàCBàYà
+ŸX›[€ãúÿ‹ôY[úÀõ[ô›àH	âàŸX›[€ãöYOOH	Ÿö[ò[òŸZ\õ… H√Bà€€ù[ùú\⁄
+[
+	Ÿ]âÀ»€\‹Œà	‹K[[Ÿ[Xò\âÀ	ÿ\öXK[Xô[	ŒàpÏŸ[‹»H	‹ŸX›[€ãõXô[XKŸX›[€ãúÿ‹ôY[úÀõX\
+
+‹⁄YXô[JHOÉBà[
+	ÿù]€âÀ»€\‹Œà	‹K[[Ÿ[Xùâ»
+»
+⁄YOOHXà»	»X›]ôI»à	… K	Ÿ]K\ÿ‹ôY[âŒà⁄Y€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä⁄Y
+HKXô[
+JJJN√BàCBà€€ù[ùú\⁄
+
+[ô[÷›XóH[öX⁄[‘[ô[
+J›
+JN√BÉBà€€ú›⁄[H√Bà[
+	⁄XY\âÀ»€\‹Œà	‹KZXY\â»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXúò[ôKY‹õ›…»K√Bà[
+	⁄[Y…À»€\‹Œà	‹KXúò[ô[Ÿ€…À‹òŒà	Àãÿúò[ô[Ÿ€Àúô…À[à	‘]Z]]\»»Z[€	»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KXúò[ôX€‹I»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	—Ÿ\›0Ë€»H€€ôôZ]\öXI»JKBà[
+	⁄IÀﬂKŸ[
+	‹‹[âÀ»^à	‘]Z]]\»»Z[€	»JK[
+	‹‹[âÀ»€\‹Œà	‹KXô]IÀ]Nà	—[H]õ€pÈË€…À^à	ÿô]I»JWJKBà[
+	‹	À»€\‹Œà	‹K\›XâÀ^à	”‹ôÿ[ö^òpÈË€»⁄[\\ÀàX⁄\ÌY\»Y[‹ô\Àâ»JKBàJKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KZ[X\ôXI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KZ[XùâÀ	Ÿ]K]\›Y	Œà	⁄[[‹[âÀ]Nà	–ZùYIÀ	ÿ\öXK[Xô[	Œà	–ZùYIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	⁄[	»JHK	œ… KBà[
+	‹‹[âÀ»€\‹Œà	‹K]ô\ú⁄[€âÀ]Nàô\úË€»	–T’ëTî“S”üX	Ÿ]K]\›Y	Œà	ÿ\]ô\ú⁄[€âÀ^àâ–T’ëTî“S”üXJKBàJKBàJKBà[
+	€XZ[âÀ»€\‹Œà	‹K[XZ[â»K€€ù[ù
+KBà[
+	€ò]âÀ»€\‹Œà	‹KXõ›€[ò]â»K—P’S”îÀõX\
+
+ŸX HOÉBà[
+	ÿù]€âÀ»€\‹Œà	‹K[ò]òùâ»
+»
+ŸX»OOHŸX›[€à»	»X›]ôI»à	… K	Ÿ]K\ŸX›[€âŒàŸXÀöY€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]XäŸXÀúÿ‹ôY[ú÷ÃVÃJHK√Bà[
+	‹‹[âÀ»€\‹Œà	‹K[ò]öX€…À^àŸXÀöX€€àJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[ò]õõ	À^àŸXÀõXô[JKBàJJJKBàN√Bà€€ú›^\›[ô–òX⁄Ÿõ‹Hõ€›ú]Y\ûTŸ[X›‹ä	Œúÿ€‹HàúKXòX⁄Ÿõ‹	 N√BàYà
+›ùöY]Àõ[Ÿ[	âà^\›[ô–òX⁄Ÿõ‹ÀúZ[€[Ÿ[OOH›ùöY]Àõ[Ÿ[
+H√BàÀ»]HX^Hﬁ[ò»⁄[HHõ‹õH\»‹[ãàŸY\Hÿ[YHX[Ÿ»õŸH€»]»öY[»[ôõÿ›\»›\ùö]ôKÉBà€€ú›€⁄[HÀããúõ€›ò⁄[ô[óKôö[\ä
+⁄[
+HOà⁄[OOH^\›[ô–òX⁄Ÿõ‹
+N√Bà^\›[ô–òX⁄Ÿõ‹òôYõ‹ôJããú⁄[
+N√Bàõ‹à
+€€ú›⁄[Ÿà€⁄[
+H⁄[úô[[›ôJ
+N√BàH[ŸHõ€›úô\XŸP⁄[ô[äããú⁄[ããä›ùöY]Àõ[Ÿ[»€[Ÿ[›ô\õ^J›
+WHà◊JJN√BüCBÉBã äÉBà
+àﬁ[ò»”ìHH[Ÿ[›ô\õ^H8†%‹[ãÿ€‹ŸHH⁄Y]⁄]›]ôXùZ[[ô»H[ô[
+[ô]»[ôôY√Bà
+àŸàõ›‹ H[ô\õôX]àöY»\ôà⁄[à€àH[‹›úô\]Y[ù[ù\òX›[€à
+\Hõ›»8°§àY]⁄Y]
+K[ôBà
+à]ô\Ÿ\ùô\»H\›	‹»ÿ‹õ€‹⁄][€ãàù[ôK\ô[ô\ú»
+€à]H]]][€ú H€»õ›Y⁄ô[ô\ê\ÉBà
+ã√Bô^‹ùù[ò›[€àô[ô\ì[Ÿ[
+õ€››
+H√Bà€€ú›^\›[ô»Hõ€›ú]Y\ûTŸ[X›‹ä	ÀúKXòX⁄Ÿõ‹	 N√BàYà
+^\›[ô H^\›[ôÀúô[[›ôJ
+N√BàYà
+›ùöY]Àõ[Ÿ[
+Hõ€›ò\[ô
+[Ÿ[›ô\õ^J›
+JN√BüCBÉBãÀ»8• 8• [Ÿ[»õ›€H⁄Y]8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBò€€ú›S—S»HﬂN»À»⁄[ô8°§à
+›[Ÿ[
+H8°§à⁄Y]õŸH[[Y[ùàôY⁄\›\ôY[€ô‹⁄YHXX⁄ÿ‹ôY[ãÉBÉBôù[ò›[€à[Ÿ[›ô\õ^J›
+H√Bà€€ú›HH›ùöY]Àõ[Ÿ[√Bà€€ú›ùZ[HS—S÷€Kö⁄[ôN√Bà€€ú›õŸHHùZ[»ùZ[
+›JHà[
+	Ÿ]â N√Bà€€ú›òX⁄Ÿõ‹H[
+	Ÿ]âÀ»€\‹Œà	‹KXòX⁄Ÿõ‹	»JN√BàòX⁄Ÿõ‹úZ[€[Ÿ[HN√BàòX⁄Ÿõ‹òY]ô[ù\›[ô\ä	ÿ€X⁄…À
+JHOà»Yà
+Kù\ôŸ]OOHòX⁄Ÿõ‹
+H›òX›[€úÀò€‹ŸS[Ÿ[
+
+N»JN√BàòX⁄Ÿõ‹ò\[ô
+[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]	Àõ€Nà	ŸX[Ÿ…»KõŸJJN√Bàô]\õàòX⁄Ÿõ‹√BüCBÉBã äà›[ô\ô⁄Y]ÿÿYôõ€à]KõŸHõ›‹ÀHÿ[ò\ã–ÿ[òŸ[\àõ€›\ã‹[€ò[[ôŸ\àX›[€ãà
+ã√Bôù[ò›[€à⁄Y]
+»]Kõ›‹À€îÿ]ôKÿ]ôU\›Yÿ]ôSXô[[ôŸ\àJH√Bà€€ú›[ôŸ\ú»HY[ôŸ\à»◊Hà
+\úò^Kö\–\úò^J[ôŸ\äH»[ôŸ\ààŸ[ôŸ\óJN√Bàô]\õà√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]Y‹òXâ»JKBà[
+	⁄âÀ»€\‹Œà	‹K\⁄Y]]]IÀ^à]HJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XõŸI»Kõ›‹ KBà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XX›[€ú…»K√Bà€îÿ]ôH	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHKY‹õ›…À	Ÿ]K]\›Y	Œàÿ]ôU\›Y€ò€X⁄Œà€îÿ]ôHKÿ]ôSXô[	‘ÿ[ò\â KBàKôö[\äõ€€X[äJKBàããô[ôŸ\úÀõX\
+
+
+HOà[
+	ÿù]€âÀ»€\‹ŒàKXùàKY⁄‹›K\⁄Y]Y[ôŸ\à	Ÿò€\‹”ò[YH	‹KXòY	ﬂX	Ÿ]K]\›Y	Œàù\›Y€ò€X⁄Œàõ€ê€X⁄»KõXô[
+JKBàKôö[\äõ€€X[äN√BüCBÉBôù[ò›[€àöY[
+Xô[€€ùõ€
+H√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»KŸ[
+	€Xô[	À»^àXô[JK€€ùõ€JN√BüCBÉBôù[ò›[€à›]ÿ\ô
+Xô[ò[YK€ôHH	‹€Ÿù	 H√Bàô]\õà[
+	Ÿ]âÀ»€\‹ŒàK\›]K\›]I›€ô_XKŸ[
+	‹‹[âÀ»^àXô[JK[
+	‹›õ€ô…À»^àò[YHJWJN√BüCBÉBã äàH€€[XK\Ÿ\\ò]YY‹»[ú]àùò[YJ
+X8°§àH€X[ãKY\Xÿ]Y›ö[ô÷◊Kà
+ã√Bôù[ò›[€àY‹“[ú]
+Y‹À\›Y
+H√Bà€€ú›[úH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà\›Y\Nà	›^	ÀXŸZ€\éà	Ÿ]\]Y]\»Ÿ\\òY\»‹à∞Î\ô›[H
+^éàô\›KôYÿ[õ IÀò[YNà
+Y‹»◊JKöõ⁄[ä	À	 HJN√Bàô]\õà√Bà[à[úBàò[YNà
+
+HOàÀããõô]»Ÿ]
+[úùò[YKú‹]
+	À	 KõX\
+
+
+HOàùö[J
+JKôö[\äõ€€X[äJWKBàN√BüCBÉBã äà€X[⁄\»ô[ô\ö[ô»HôX€‹ô	‹»Y‹»
+‹àõ›[ô Kà
+ã√Bôù[ò›[€àY–⁄\ Y‹ H√BàYà
+]Y‹»]Y‹Àõ[ô›
+Hô]\õàù[√Bàô]\õà[
+	‹‹[âÀ»€\‹Œà	‹K]Y‹…»KY‹ÀõX\
+
+
+HOà[
+	‹‹[âÀ»€\‹Œà	‹K]Y…À^àJJJN√BüCBÉBôù[ò›[€à€Y[ùXô[
+€Y[ù
+H√Bàô]\õà€Y[ùÀò€ŸH»	ÿ€Y[ùò€Ÿ_H0≠»	ÿ€Y[ùõò[Y_Xà
+€Y[ùÀõò[YH	–€Y[ùI N√BüCBÉBôù[ò›[€à€Y[ùŸX\ò⁄^
+€Y[ù
+H√Bàô]\õàÿ€Y[ùÀõò[YK€Y[ùÀò€ŸK€Y[ùÀú€ôKããä€Y[ùÀùY‹»◊JWKôö[\äõ€€X[äKöõ⁄[ä	»	 N√BüCBÉBìS—SÀò€€ôö\õHH
+›JHOà√Bà[
+	⁄âÀ»€\‹Œà	‹K\⁄Y]]]IÀ^àKù]H	–€€ôö\õX\â»JKBà[
+	‹	À»€\‹Œà	‹K\⁄Y][\Ÿ…À^àKõY\‹ÿYŸHJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XX›[€ú…»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›KY‹õ›…À€ò€X⁄Œà
+
+HOà›òX›[€úÀò€‹ŸS[Ÿ[
+
+HK	–ÿ[òŸ[\â KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY[ôŸ\ãXùàKY‹õ›…À	Ÿ]K]\›Y	Œà	ÿ€€ôö\õK^Y\…À€ò€X⁄Œà
+
+HOàKõ€ñY\ 
+HKKûY\”Xô[	—^€Z\â KBàJKBóN√BÉBã äà‹[àH€€ôö\õX][€à⁄Y]ôYõ‹ôHH\›ùX›]ôH]]][€ãà
+ã√Bôù[ò›[€à€€ôö\õTô[[›ôJ›Xô[õäH√Bà›òX›[€úÀõ‹[ì[Ÿ[
+√Bà⁄[ôà	ÿ€€ôö\õIÀ]Nà	‘ô[[›ô\è…ÀY\‹ÿYŸNàô[[›ô\à	€Xô[O»»ôY⁄\›õ»öXÿ\∞ËHòH^Z\òH‹àÃX\»HŸ\∞ËHŸ\àô\›]\òY»[HZù\›\ÀòBàY\”Xô[à	‘ô[[›ô\âÀ€ñY\Œà
+
+HOà›òX›[€úÀõ]]]JõäKBàJN√BüCBÉBôù[ò›[€à€€ôö\õQ\⁄\›[ò⁄XJ›[ò H√Bà›òX›[€úÀõ‹[ì[Ÿ[
+√Bà⁄[ôà	ÿ€€ôö\õIÀ]Nà	”X\òÿ\à€€[»\⁄\›0Íõò⁄XO…ÀBàY\‹ÿYŸNà	–H[ò€€Y[ôH€€ù[ùX\∞ËHõ»\›0Ï‹öX€Àà‹»õŸ]‹»ÿZ\∞Ë€»»ô]ö\›»H€€X[ôHH»]YH∞ËHõ⁄HõŸ^öY»öXÿ\∞ËH\‹€∞Î]ô[\òHô[ôKâÀBàY\”Xô[à	–€€ôö\õX\à\⁄\›0Íõò⁄XIÀBà€ñY\Œà
+
+HOà›òX›[€úÀõ]]]J
+ HOàÀõX\ö—[ò€€Y[ôQ\⁄\›[ò⁄XJ[òÀöYõ›“\€ 
+JJKBàJN√BüCBÉBãÀ»\›‹õõ»8†%\[ô[€õH]ô[ù»ÿ[â›ôHY]YŸ[]Y€»H€‹úôX›[€à\»HëUëTî–S]ô[ù]BãÀ»ÿ[òŸ[»H‹öY⁄[ò[
+⁄X⁄›^\»[àH\›‹ûJKà\ŸY€àH‹\òpÈË€»Ÿ‹ÀÉBôù[ò›[€à€€ôö\õQ\›‹õõ ›⁄[ôY
+H√Bà›òX›[€úÀõ‹[ì[Ÿ[
+√Bà⁄[ôà	ÿ€€ôö\õIÀ]Nà	—\›‹õò\è…ÀY\‹ÿYŸNà	–H[ùòYHŸ\∞ËHÿ[òŸ[YH8†%€€ù[ùXHõ»\›0Ï‹öX€ÀX\»∞Ë€»€€ùHXZ\»õ‹»›Z\ÀâÀBàY\”Xô[à	—\›‹õò\âÀ€ñY\Œà
+
+HOà›òX›[€úÀõ]]]J
+ HOàÀòYô]ô\úÿ[
+»Yà]ZY
+
+K]àõ›“\€ 
+K⁄[ôôYíYàYJJKBàJN√BüCBã äà\ã\õ›»\›‹õõ»€€ùõ€à[àô\›‹õòY»àòYŸHYà[ôXYHô]ô\úŸY[ŸH[à[ô»ù]€ãà
+ã√Bôù[ò›[€à\›‹õõ–€€ùõ€
+›⁄[ôY
+H√BàYà
+›ú›‹ôKö\‘ô]ô\úŸY
+⁄[ôY
+JHô]\õà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	Ÿ\›‹õòY…»JN√Bàô]\õà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	—\›‹õò\âÀ	Ÿ]K]\›Y	Œà	Ÿ\›‹õò\âÀ€ò€X⁄Œà
+JHOà»Kú›‹õ‹Yÿ][€ä
+N»€€ôö\õQ\›‹õõ ›⁄[ôY
+N»HK	¯°™I N√BüCBÉBãÀ»ùZ[Z[à[8†%‹[ú»⁄]H›\úô[ùÿ‹ôY[â‹»‹X»^[ôY»]ô\û][ô»[ŸH\»úõ›‹ÿXõKÉBìS—SÀö[H
+›
+HOà√Bà€€ú›\ôHH›ùöY]ÀùXé√Bà€€ú›‹X»H
+ HOà[
+	Ÿ]Z[…À»€\‹Œà	‹KZ[Y]	ÀããäÀöYOOH\ôH»»‹[éà	€‹[â»HàﬂJHK√Bà[
+	‹›[[X\ûIÀﬂKŸ[
+	‹‹[âÀ»^à	‹ÀöX€€üH	‹ÀõXô[XJKÀöYOOH\ôH	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	›õÿÍà\›0ËH\]ZI»JWKôö[\äõ€€X[äJKBàããúÀú\ò\ÀõX\
+
+
+HOà[
+	‹	À»€\‹Œà	‹KZ[\	À^àJJKBàJN√Bà€€ú›€€òŸ\H
+ HOà[
+	Ÿ]Z[…À»€\‹Œà	‹KZ[Y]	»K√Bà[
+	‹›[[X\ûIÀ»^àÀúHJKBà[
+	‹	À»€\‹Œà	‹KZ[\	À^àÀòHJKBàJN√Bàô]\õà√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]Y‹òXâ»JKBà[
+	⁄âÀ»€\‹Œà	‹K\⁄Y]]]IÀ^à	–ZùYI»JKBà[
+	‹	À»€\‹Œà	‹K\⁄Y][\Ÿ…À^à	”»Z[€ô\‹€ôH∞Íú»\ô›[ù\Œà]X[ù»ÿYH€⁄\ÿH›\›HòHò^ô\ã]X[ù»€ÿúò\ãHŸHõÿÍà\›0ËHX‹ò[ôÀâ»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–\»[\…»JKBàããíS‘–‘ëQSîÀõX\
+‹X KBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—0ÓùöY\»€€][ú…»JKBàããíS–””ê—TÀõX\
+€€òŸ\
+KBà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XX›[€ú…»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHKY‹õ›…À	Ÿ]K]\›Y	Œà	⁄[X€‹ŸIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀò€‹ŸS[Ÿ[
+
+HK	—[ù[ôI KBàJKBàN√BüN√BÉBãÀ»8• 8• [∞ÎX⁄[»
+\⁄õÿ\ô»€ÿ⁄‹]
+H8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBò€€ú›ö\ù^SX]⁄\»H
+ö\ù^K]HHŸ^R[ú]
+
+JHOà›ö[ô ö\ù^H	… Kú€XŸJKL
+HOOH›ö[ô ]JKú€XŸJKL
+N√Bôù[ò›[€àö\ù^\’Ÿ^J›‹ôK]HHŸ^R[ú]
+
+JH√Bàô]\õà√Bàããú›‹ôKú›]Kò€Y[ùÀôö[\ä
+\ú€€äHOàö\ù^SX]⁄\ \ú€€ãòö\ù^K]JJKõX\
+
+\ú€€äHOà
+»ããú\ú€€ã\Nà	–€Y[ùI»JJKBàããú›‹ôKú›]Kô[\ﬁYY\Àôö[\ä
+\ú€€äHOà\\ú€€ãö[òX›]ôH	âàö\ù^SX]⁄\ \ú€€ãòö\ù^K]JJKõX\
+
+\ú€€äHOà
+»ããú\ú€€ã\Nà	—ù[ò⁄[€∞Ë\ö[…»JJKBàããú›‹ôKú›]Kú›\Y\úÀôö[\ä
+\ú€€äHOà\\ú€€ãò\ò⁄]ôY	âàö\ù^SX]⁄\ \ú€€ãòö\ù^K]JJKõX\
+
+\ú€€äHOà
+»ããú\ú€€ã\Nà	—õ‹õôXŸY‹â»JJKBàKú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJJJN√BüCBÉBôù[ò›[€à€‹ö–€ÿ⁄‘Ÿ\‹⁄[€ú ›‹ôJH√Bà€€ú›]ô[ù»HÀããä›‹ôKú›]Kù€‹ö’[YQ]ô[ù»◊JWKú€‹ù
+
+KäHOà›ö[ô Kò]
+Kõÿÿ[P€€\\ôJ›ö[ô ãò]
+JJN√Bà€€ú››\ù»Hô]»X\
+
+N»€€ú›Ÿ\‹⁄[€ú»H◊N√Bàõ‹à
+€€ú›]ô[ùŸà]ô[ù H√BàYà
+]ô[ùö⁄[ôOOH	‹›\ù	 H›\ùÀúŸ]
+]ô[ùöY]ô[ù
+N√Bà[ŸHYà
+]ô[ùö⁄[ôOOH	Ÿ[ô	»	âà›\ùÀö\ ]ô[ùú›\ùY
+JH√Bà€€ú››\ùH›\ùÀôŸ]
+]ô[ùú›\ùY
+N»›\ùÀô[]J]ô[ùú›\ùY
+N√Bà€€ú›Z[ù]\»HX]õX^
+
+]Kú\úŸJ]ô[ùò]
+HH]Kú\úŸJ›\ùò]
+JH»å
+N√BàYà
+ù[Xô\ãö\—ö[ö]JZ[ù]\ JHŸ\‹⁄[€úÀú\⁄
+»›\ù[ôà]ô[ùZ[ù]\»JN√BàCBàCBàô]\õà»Ÿ\‹⁄[€úÀX›]ôNàÀããú›\ùÀùò[Y\ 
+WKò]
+LJHù[N√BüCBÉBôù[ò›[€à€‹ö–€ÿ⁄–ÿ\ô
+›
+H√Bà€€ú›»Ÿ\‹⁄[€úÀX›]ôHHH€‹ö–€ÿ⁄‘Ÿ\‹⁄[€ú ›ú›‹ôJN√Bà€€ú›Ÿ^HHŸ^R[ú]
+
+N√Bà€€ú›Ÿ^SZ[ù]\»HŸ\‹⁄[€úÀôö[\ä
+Ÿ\‹⁄[€äHOà]S€õJŸ\‹⁄[€ãú›\ùò]
+HOOHŸ^JKúôYXŸJ
+›[KŸ\‹⁄[€äHOà›[H
+»Ÿ\‹⁄[€ãõZ[ù]\À
+N√Bà€€ú›X›[€àHX›]ôCBà»
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKòY€‹ö’[YQ]ô[ù
+»Yà]ZY
+
+K]àõ›“\€ 
+K⁄[ôà	Ÿ[ô	À›\ùYàX›]ôKöYJJCBàà
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKòY€‹ö’[YQ]ô[ù
+»Yà]ZY
+
+K]àõ›“\€ 
+K⁄[ôà	‹›\ù	»JJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	›€‹öÀX€ÿ⁄…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	“‹∞Ë\ö[»HòXò[…»JK[
+	ÿù]€âÀ»€\‹ŒàKXùà	ÿX›]ôH»	…»à	‹K\ö[X\ûIﬂHK\€X	Ÿ]K]\›Y	Œà	›€‹öÀX€ÿ⁄ÀXX›[€âÀ€ò€X⁄ŒàX›[€àKX›]ôH»	—[òŸ\úò\à]]öYY\…»à	“[öX⁄X\à]]öYY\… WJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^àX›]ôH»[öX⁄XY»[H	Ÿõ]]U[YJX›]ôKò]
+_Kà[òŸ\úôH[»\õZ[ò\à\»]]öYY\»»XKòà	‘ôY⁄\›ôH»[∞ÎX⁄[»H»ö[H\»]]öYY\Àà\‹ŸH[\»0ÍH[XHôYô\∞Íõò⁄XHH∞Ë€»[\òH]]€X]Xÿ[Y[ùH»›\›»\»ôXŸZ]\Àâ»JKBà[
+	‹	À»€\‹Œà	‹K[]]Y	À^à[\»[òŸ\úòY»⁄ôNà	Ÿõ]ù[JŸ^SZ[ù]\»»å
+_HJKBàJN√BüCBÉBôù[ò›[€à[öX⁄[‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›[€ùH›\úô[ù[€ù
+
+N√Bà€€ú››[HH[€ù›[[X\ûJ›‹ôK[€ù
+N√Bà€€ú›ﬁYX\ã[€ùù[Xô\óHH[€ùú‹]
+	ÀI KõX\
+ù[Xô\äN√Bà€€ú›^XXõS[€ùH\›]\ ›‹ôK√Bà\ôX›[€éà	‹Yÿ\âÀ›\ùà	€[€ùKLXBà[ôà	€[€ùKI‘›ö[ô ô]»]JYX\ã[€ùù[Xô\ã
+KôŸ]]J
+JKúY›\ù
+ã	Ã	 _XBà›]\Œà	ÿXô\ù…ÀBàJKúôYXŸJ
+›[õ› HOà›[
+»õ›Àòò[[òŸK
+N√Bà€€ú›Ÿ[TôX€»H›‹ôKú›]Kö[ô‹ôYY[ùÀôö[\ä
+JHOà›‹ôKò›\úô[ùöXŸJKöY
+HOHù[
+Kõ[ô›√Bà€€ú›ò^ö[»H\›‹ôKú›]Kö[ô‹ôYY[ùÀõ[ô›	âà\›‹ôKú›]KúôX⁄\\Àõ[ô›	âà\›‹ôKú›]KúõŸX›Àõ[ô›√Bà€€ú›Ÿ^HHŸ^R[ú]
+
+N√Bà€€ú›^XXõUŸ^HH\›]\ ›‹ôK»\ôX›[€éà	‹Yÿ\âÀ›\ùàŸ^K[ôàŸ^K›]\Œà	ÿXô\ù…»JCBàôö[\ä
+õ› HOà\õ›Àù]Kòÿ[òŸ[Y]	âàõ›Àòò[[òŸHàåJN√Bà€€ú›^XXõUŸ^U›[H^XXõUŸ^KúôYXŸJ
+›[õ› HOà›[
+»õ›Àòò[[òŸK
+N√Bà€€ú›‹[î^XXõ\’Ÿ^HH
+
+HOà√Bà›òX›[€úÀúŸ]ö[ò[òŸUöY] √Bàö[î^T\ö[Ÿà	ÿ›\›€IÀö[î^T›\ùàŸ^Kö[î^Q[ôàŸ^Kö[î›]\Œà	ÿXô\ù…ÀBàö[î\ùRYà	…Àö[ï]Pÿ]Y€‹ûNà	…Àö[ìY]Ÿà	…ÀBàJN√Bà›òX›[€úÀúŸ]Xä	Ÿö[ã\Yÿ\â N√BàN√Bà€€ú›õ›YöXÿ][€ú»H›‹ôKú›]Kõõ›YöXÿ][€úÀôö[\ä
+][JHOà][Kô]HOOHŸ^H	âàZ][Kô€ôJKú€‹ù
+
+KäHOàõ‹õJKù]JKõÿÿ[P€€\\ôJõ‹õJãù]JJJN√Bà€€ú›ö\ù^\»Hö\ù^\’Ÿ^J›‹ôKŸ^JN√Bà€€ú››‘›ÿ⁄»H[ùô[ù‹ûT›[[X\ûJ›‹ôJKôö[\ä
+õ› HOàõ›Àõ›»	âà\õ›Àö[ô‹ôYY[ùú⁄‹[ô“Y[äN√Bà€€ú›X[ùX[⁄‹[ô»H›‹ôKú›]Kú⁄‹[ô“][\Àôö[\ä
+][JHOàZ][Kô€ôJN√Bà€€ú›\—Z[Sõ›XŸ\»Hõ›YöXÿ][€úÀõ[ô›ö\ù^\Àõ[ô››‘›ÿ⁄Àõ[ô›X[ùX[⁄‹[ôÀõ[ô›√BÉBàô]\õà[
+	‹ŸX›[€âÀﬂK√Bà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ôKZ€YKXYŸ[ôI»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–YŸ[ôHö[ò[òŸZ\òI»JKBà[
+	⁄âÀ»^à⁄ôH8†%	Ÿõ]]J	›Ÿ^_ULéåå
+_XJKBàJKBàJKBà[
+	ÿù]€âÀ»€\‹ŒàKXYŸ[ôK\^XXõI‹^XXõUŸ^U›[àåH»	»KXYŸ[ôK\^XXõKYYI»à	…ﬂX\Nà	ÿù]€âÀ	Ÿ]K]\›Y	Œà	⁄€YK\^XXõK]Ÿ^IÀ€ò€X⁄Œà‹[î^XXõ\’Ÿ^HK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	‹›õ€ô…À»^à^XXõUŸ^U›[àåH»	‘ÿ[»HYÿ\à⁄ôI»à	”ô[ö[XH€€ùHô[òŸH⁄ôI»JKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à^XXõUŸ^Kõ[ô›»	‹^XXõUŸ^Kõ[ô›H	‹^XXõUŸ^Kõ[ô›OOHH»	ÿ€€ùH[HXô\ù…»à	ÿ€€ù\»[HXô\ù…ﬂXà	’‹]YH\òH€€ú›[\à»€€ù\»HYÿ\â»JKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KXYŸ[ôK]ò[YI»K√Bà[
+	‹›õ€ô…À»^àúõ
+^XXõUŸ^U›[
+HJKBà[
+	‹‹[âÀ»^à	’ô\à€€ù\»8†.â»JKBàJKBàJKBàJKBà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	⁄€YK[õ›YöXÿ][€ú…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–YŸ[ôH»XI»JK[
+	⁄âÀ»^à	”õ›YöXÿpÈÌY\…»JWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä	ÿZù\›\… HK	–€€ú›[\à\›0Ï‹öX€… KBàJKBàZ\—Z[Sõ›XŸ\»	âà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XHõ›YöXÿpÈË€»\òH⁄ôKâ»JKBàããõõ›YöXÿ][€úÀõX\
+
+][JHOà[
+	Ÿ]âÀ»€\‹Œà	‹K[\›Z][IÀ	Ÿ]K]\›Y	Œà	⁄€YK[õ›YöXÿ][€â»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^à][Kù]HJK][Kõõ›\»	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à][Kõõ›\»JWKôö[\äõ€€X[äJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ãY€ôIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ùõ›YöXÿ][€ä»ããö][K€ôNàùYK€ôP]àõ›“\€ 
+HJJHK	—ôZ]… KBàJJKBàããòö\ù^\ÀõX\
+
+\ú€€äHOà[
+	Ÿ]âÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à<'„†à[ö]ô\úË\ö[Œà	‹\ú€€ãõò[Y_XJK[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à\ú€€ãù\HJWJJKBà›‘›ÿ⁄Àõ[ô›à	âà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»K√Bà[
+	‹›õ€ô…À»^à	”\›HH€€\ò\»0≠»\›‹]YHpÎ[ö[[…»JKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K›‘›ÿ⁄ÀõX\
+
+õ› HOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^àõ›Àö[ô‹ôYY[ùõò[YHJK[
+	‹›õ€ô…À»€\‹Œà	‹KXòY	À^à	Ÿõ]ù[Jõ›Àò›\úô[ù
+_H	‹õ›Àö[ô‹ôYY[ùú›ÿ⁄’[ö]XJWJJJKBàJKBàX[ùX[⁄‹[ôÀõ[ô›à	âà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»K√Bà[
+	‹›õ€ô…À»^à	“][ú»[ò€pÎY‹»òH\›HH€€\ò\…»JKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»KX[ùX[⁄‹[ôÀõX\
+
+][JHOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à][Kõò[YHJK[
+	‹›õ€ô…À»^àŸõ]ù[J][Kú]JK][Kù[ö]Kôö[\äõ€€X[äKöõ⁄[ä	»	 HJWJJJKBàJKBàKôö[\äõ€€X[äJKBà€‹ö–€ÿ⁄–ÿ\ô
+›
+KBà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à\›HpÍú»8†%	€[€ùXô[
+[€ù
+_XJKBàJKBà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[
+	›âÀﬂKŸ[
+	›	À»^à	‘ôXŸXöY…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›[KúôXŸXöY HJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–HôXŸXô\â»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›[KòTôXŸXô\äHJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	‘Y€‹…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›[Kô\‹\ÿ\ HJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–HYÿ\â»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+^XXõS[€ù
+HJWJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	‘ÿ[»HÿZ^I»JK[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+›[Kúÿ[–ÿZ^HèH»	…»à	»KXòY	 K^àúõ
+›[Kúÿ[–ÿZ^JHJWJKBàJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	⁄€YK\ô[	À€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä	‹ô[]‹ö[‹… HK	’ô\àô[]0Ï‹ö[»€€\]»8°§â KBàJKBàŸ[TôX€»à	âà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	‹	À»€\‹Œà	‹K\›]\»KXòY	»KŸ[
+	‹›õ€ô…À»^à8¶®	‹Ÿ[TôX€ﬂH[ú›[[  HŸ[HôpÈ€ÿJK	»8†%õŸ]‹»]YH‹»\ÿ[HöXÿ[HŸ[HôpÈ€Àâ◊JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä	⁄[ú›[[‹… HK	“\à\òH[ú›[[‹… KBàJKBà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–pÈÌY\»∞Ë\Y\…»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	⁄€YKY[ò€€Y[ôIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä	Ÿ[ò€€Y[ô\… HK	”õ›òH[ò€€Y[ôI KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	⁄€YKX€€X[ôIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]Xä	ÿ€€X[ôI HK	–€€X[ôH»XI KBàJKBàò^ö[»	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–€€YXŸHÿY\›ò[ô»Ÿ]\»[ú›[[‹»HôXŸZ]\»[HÿY\›õÀâ»JKBàJKBàJN√BüCBÉBãÀ»8• 8• [ú›[[‹»8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€à[ú›[[‹‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›Ÿ[TôX€»H›‹ôKú›]Kö[ô‹ôYY[ùÀôö[\ä
+JHOà›‹ôKò›\úô[ùöXŸJKöY
+HOHù[
+Kõ[ô›√Bà€€ú›\›H[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»K›‹ôKú›]Kö[ô‹ôYY[ùÀú€XŸJ
+Kú€‹ù
+
+KäHOàKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹PîâÀ»Ÿ[ú⁄]]ö]Nà	ÿò\ŸI»JJKõX\
+
+[ô HOà[ú›[[‘õ› ›[ô JJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	“[ú›[[‹…»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	⁄[úÀ[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	⁄[ú›[[ÀXY	»JHK	 »õ›õ… KBàJKBàŸ[TôX€»à	âà[
+	‹	À»€\‹Œà	‹K\›]\»KXòY	»KBàŸ[
+	‹›õ€ô…À»^à	‹Ÿ[TôX€ﬂH[ú›[[  HŸ[HôpÈ€ÿJK	»8†%õŸ]‹»]YH‹»\ÿ[HöXÿ[HŸ[HôpÈ€Àâ◊JKBà›‹ôKú›]Kö[ô‹ôYY[ùÀõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H[ú›[[Àà‹]YH[H8†'
+»õ›õ¯†'H\òH€€YpÈÿ\ãâ»JCBàà[
+	Ÿ]âÀﬂKŸ[
+	‹	À»€\‹Œà	‹KZ[ùK]\	À^à	’‹]YH[H[H][H\òHY]\ãâ»JKŸX\ò⁄[ú]
+	–ù\ÿÿ\à[ú›[[¯†)âÀ\›	⁄[úÀ\ŸX\ò⁄	 K\›JKBàJN√BüCBÉBãÀ»€X[ãÿÿ[õòXõHõ›»8†%H⁄€Hõ›»‹[ú»HY]⁄Y]ÉBôù[ò›[€à[ú›[[‘õ› ›[ô H√Bà€€ú›»›‹ôHHH›√Bà€€ú›öXŸHH›‹ôKò›\úô[ùöXŸJ[ôÀöY
+N√Bà€€ú›\›]H›‹ôKõ\›öXŸP]
+[ôÀöY
+N√Bà€€ú›[ùô[ù‹ûHH[ô‹ôYY[ù[ùô[ù‹ûJ›‹ôK[ôÀöY
+N√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K\ŸX\ò⁄	Œà	⁄[ôÀõò[Y_H	⁄[ôÀõ\››\Y\à	…ﬂH	 [ôÀùY‹»◊JKöõ⁄[ä	»	 _X€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	⁄[ú›[[ÀYY]	ÀYà[ôÀöYJHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀﬂK[
+	‹›õ€ô…À»^à[ôÀõò[YHJJKBàöXŸHOHù[Bà»[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	⁄[ôÀú›ÿ⁄’[ö]H0≠»	ÿúõ
+öXŸJ_K…⁄[ôÀú›ÿ⁄’[ö]I€\›]»0≠»	Ÿõ]]J\›]
+_Xà	…ﬂI⁄[ôÀõ\››\Y\à»0≠»	⁄[ôÀõ\››\Y\üXà	…ﬂXJCBàà[
+	‹‹[âÀﬂKŸ[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	⁄[ôÀú›ÿ⁄’[ö]H0≠»JK[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHKXòY	À^à	‹Ÿ[HôpÈ€…»JWJKBà[ùô[ù‹ûH	âà[
+	‹‹[âÀ»€\‹Œà[ùô[ù‹ûKõ›»»	‹KXòYŸHKXòY	»à	‹K[]]Y	À^à\›‹]YNà	Ÿõ]ù[J[ùô[ù‹ûKò›\úô[ù
+_H	⁄[ôÀú›ÿ⁄’[ö]I⁄[ùô[ù‹ûKõZ[ö[][Hà»0≠»pÎ[ö[[»	Ÿõ]ù[J[ùô[ù‹ûKõZ[ö[][J_Xà	…ﬂXJKBàY–⁄\ [ôÀùY‹ KBàKôö[\äõ€€X[äJKBà[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàJN√BüCBÉBìS—S÷…⁄[ú›[[ÀXY	◊HH
+›
+HOà[ú›[[‘⁄Y]
+›ù[
+N√BìS—S÷…⁄[ú›[[ÀYY]	◊HH
+›JHOà[ú›[[‘⁄Y]
+››ú›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…ÀKöY
+Hù[
+N√BÉBôù[ò›[€à[ú›[[‘⁄Y]
+›[ô H√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	⁄[úÀ[ò[YIÀ\Nà	›^	ÀXŸZ€\éà	”õ€YH
+^éàò\ö[öHHöY€ IÀò[YNà[ô»»[ôÀõò[YHà	…»JN√Bà€€ú›[ö]H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	⁄[úÀ][ö]	»KBà’–“◊’SíUÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàK^àKããä[ô»	âàHOOH[ôÀú›ÿ⁄’[ö]»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›öXŸHH[€ô^QöY[
+[ô»»›ú›‹ôKò›\úô[ùöXŸJ[ôÀöY
+Hàù[	⁄[úÀ\öXŸI N√Bà€€ú››\Y\àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	⁄[úÀ\›\Y\âÀ\Nà	›^	ÀXŸZ€\éà	Ÿõ‹õôXŸY‹àH0Óõ[XH€€\òIÀò[YNà[ô»»
+[ôÀõ\››\Y\à	… Hà	…»JN√Bà€€ú››ÿ⁄‘]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	⁄[úÀ\›ÿ⁄…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	Ã	Àò[YNà[ô»	âà[ôÀú›ÿ⁄‘]HOHù[»›ö[ô [ôÀú›ÿ⁄‘]JKúô\XŸJ	ÀâÀ	À	 Hà	…»JN√Bà€€ú›Z[î›ÿ⁄‘]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	⁄[úÀ[Z[ã\›ÿ⁄…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	Ã	Àò[YNà[ô»	âà[ôÀõZ[î›ÿ⁄‘]HOHù[»›ö[ô [ôÀõZ[î›ÿ⁄‘]JKúô\XŸJ	ÀâÀ	À	 Hà	…»JN√Bà€€ú›Y‹»HY‹“[ú]
+[ô»	âà[ôÀùY‹À	⁄[úÀ]Y‹… N√BÉBàù[ò›[€àÿ]ôJ
+H√Bà€€ú›õHHò[YKùò[YKùö[J
+N√BàYà
+[õJH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà€€ú›H\úŸSù[JöXŸKö[ú]ùò[YJN√Bà€€ú››\H›\Y\ãùò[YKùö[J
+N√Bà€€ú›»HY‹Àùò[YJ
+N√Bà€€ú›YH[ô»»[ôÀöYà]ZY
+
+N√BàYà
+[ô»	âà]⁄[ô›Àò€€ôö\õJÿ[ò\à[\òpÈÌY\»õ»[ú›[[»	⁄[ôÀõò[Y_Oÿ
+JHô]\õé√Bà›òX›[€úÀõ]]]J
+ HOà√BàÀù\Ÿ\ù[ô‹ôYY[ù
+»ããä[ô»ﬂJKYò[YNàõK›ÿ⁄’[ö]à[ö]ùò[YK\››\Y\éà›\[ôYö[ôYY‹ŒàÀõ[ô›»»à[ôYö[ôYBà›ÿ⁄‘]NàX]õX^
+\úŸSù[J›ÿ⁄‘]Kùò[YJH
+KZ[î›ÿ⁄‘]NàX]õX^
+\úŸSù[JZ[î›ÿ⁄‘]Kùò[YJH
+K⁄‹[ô“Y[éàò[ŸHJN√Bà€€ú››\àH[ô»»Àò›\úô[ùöXŸJY
+Hàù[√BàYà
+OHù[	âàOOH›\äHÀòYöXŸP⁄[ôŸJ»Yà]ZY
+
+K]àõ›“\€ 
+K[ô‹ôYY[ùYàYöXŸNàJN√BàJN√BàCBÉBà€€ú›\›‹ûHH[ô»»›ú›‹ôKúöXŸR\›‹ûJ[ôÀöY
+Hà◊N√Bà€€ú›õ›‹»H√BàöY[
+	”õ€YIÀò[YJKBàöY[
+	’[öYYHH€€\òIÀ[ö]
+KBàöY[
+	‘ôpÈ€»
+‹à	»
+»
+[ô»»[ôÀú›ÿ⁄’[ö]à	›[öYYI H
+»	 IÀöXŸJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	‘]X[ùYYH[öX⁄X[ÿò\ŸH[H\›‹]YIÀ›ÿ⁄‘]JKöY[
+	—\›‹]YHpÎ[ö[[»\õZ]Y…ÀZ[î›ÿ⁄‘]JWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»ÿ[»]X[€€XH\»€€\ò\»H\ÿ€€ùH\[ò\»HõŸpÈË€»ôY⁄\›òYHH\»\ô\»H[ú›[[‹Ààô[ô\»∞Ë€»[\ò[H»\›‹]YKâ»JKBàöY[
+	—õ‹õôXŸY‹à
+‹⁄[€ò[
+IÀ›\Y\äKBàöY[
+	—]\]Y]\»
+‹⁄[€ò[
+IÀY‹Àô[
+KBà\›‹ûKõ[ô›àH	âà[
+	Ÿ]Z[…À»€\‹Œà	‹KZ\›‹ûI»K√Bà[
+	‹›[[X\ûIÀ»^à\›0Ï‹öX€»HôpÈ€‹»
+	⁄\›‹ûKõ[ô›JXJKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K\›‹ûKõX\
+
+
+HOÉBà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	Ÿõ]]Jò]
+_H8†%	ÿúõ
+úöXŸJ_XJWJJJKBàJKBàKôö[\äõ€€X[äN√BÉBàô]\õà⁄Y]
+√Bà]Nà[ô»»	—Y]\à[ú›[[…»à	”õ›õ»[ú›[[…ÀBàõ›‹ÀBà€îÿ]ôNàÿ]ôKBàÿ]ôU\›Yà	⁄[úÀ\ÿ]ôIÀBà[ôŸ\éà[ô»»»Xô[à	¸'Â‰H^€Z\à[ú›[[…À\›Yà	⁄[úÀY[]IÀ€ê€X⁄Œà
+
+HOà€€ôö\õTô[[›ôJ›»[ú›[[»â⁄[ôÀõò[Y_Hò
+ HOàÀúô[[›ôR[ô‹ôYY[ù
+[ôÀöY
+JHHàù[BàJN√BüCBÉBãÀ»8• 8• ôXŸZ]\»8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€àôXŸZ]\‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›\›H[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»K›‹ôKú›]KúôX⁄\\ÀõX\
+
+äHOàôXŸZ]Tõ› ›äJJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘ôXŸZ]\…»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	‹ôXÀ[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹ôXŸZ]KXY	»JHK	 »õ›õ… KBàJKBà›‹ôKú›]KúôX⁄\\Àõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XHôXŸZ]Kà‹]YH[H8†'
+»õ›õ¯†'H\òH€€YpÈÿ\ãâ»JCBàà[
+	Ÿ]âÀﬂKŸ[
+	‹	À»€\‹Œà	‹KZ[ùK]\	À^à	’‹]YH[H[XHôXŸZ]H\òHY]\à»ô[ô[Y[ùÀ‹»[\‹»H‹»][úÀâ»JKŸX\ò⁄[ú]
+	–ù\ÿÿ\àôXŸZ]x†)âÀ\›	‹ôXÀ\ŸX\ò⁄	 K\›JKBàJN√BüCBÉBãÀ»€X[ãÿÿ[õòXõHõ›»8†%H⁄€Hõ›»‹[ú»HY]⁄Y]ÉBôù[ò›[€àôXŸZ]Tõ› ›ôX⁄\JH√Bà€€ú›»›‹ôHHH›√Bà€€ú›àHôX⁄\Kò€€\€ô[ùÀõ[ô›√Bà€€ú›Ÿ[TôX€»H[úöXŸY[îôX⁄\J›‹ôKôX⁄\KöY
+Kõ[ô›à√Bà€€ú›[öŸYH[öŸYõŸX›õ‹îôX⁄\J›‹ôKôX⁄\KöY
+N√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K\ŸX\ò⁄	Œà	‹ôX⁄\Kõò[Y_H	 ôX⁄\KùY‹»◊JKöõ⁄[ä	»	 _X€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹ôXŸZ]KYY]	ÀYàôX⁄\KöYJHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀﬂK[
+	‹›õ€ô…À»^àôX⁄\Kõò[YHJJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	‹ôX⁄\KûZY[õ€Z[ò[H	‹ôX⁄\KûZY[[ö]H0≠»	‹ôX⁄\KúõŸX›[€ìZ[ù]\»œ»
+
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+J_[Z[àHõŸpÈË€»0≠»	€üH	€àOOHH»	⁄][I»à	⁄][ú…ﬂXJKBà[öŸY	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àõŸ]Œà	€[öŸYõò[Y_H0≠»ô[ôH	ÿúõ
+[öŸYúÿ[TöXŸH
+_XJKBàŸ[TôX€»	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHKXòY	À^à	‹Ÿ[HôpÈ€…»JKBàY–⁄\ ôX⁄\KùY‹ KBàKôö[\äõ€€X[äJKBà[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàJN√BüCBÉBìS—S÷…‹ôXŸZ]KXY	◊HH
+›
+HOàôXŸZ]T⁄Y]
+›ù[
+N√BìS—S÷…‹ôXŸZ]KYY]	◊HH
+›JHOàôXŸZ]T⁄Y]
+››ú›‹ôKôŸ]
+	‹ôX⁄\\…ÀKöY
+Hù[
+N√BÉBôù[ò›[€àôXŸZ]T⁄Y]
+›ôX⁄\JH√Bà€€ú›»›‹ôHHH›√Bà€€ú›òYùYHôX⁄\OÀöY]ZY
+
+N√BàÀ»ÿÿ[òYùŸàH€€\€ô[ù\›8†%€€[Z]Y]€ZXÿ[H€àÿ[ò\à
+€»Hô]»ôX⁄\H[ô]√BàÀ»][\»\ôH‹ôX]Y[à€ôH]]][€ã[ôÿ[òŸ[\à\ÿÿ\ô»]ô\û][ô KÉBà€€ú›€€\»HôX⁄\H»ôX⁄\Kò€€\€ô[ùÀõX\
+
+ HOà
+»ôYéà»ããòÀúôYàK]NàÀú]K[ö]àÀù[ö]JJHà◊N√BÉBà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀ[ò[YIÀ\Nà	›^	ÀXŸZ€\éà	”õ€YH
+^éàX\‹ÿHò\ŸHHõ€ IÀò[YNàôX⁄\H»ôX⁄\Kõò[YHà	…»JN√Bà€€ú›ZY[]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀ^ZY[	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‘ô[ôâÀò[YNàôX⁄\H»›ö[ô ôX⁄\KûZY[õ€Z[ò[
+Kúô\XŸJ	ÀâÀ	À	 Hà	…»JN√Bà€€ú›ZY[[ö]H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀ^][ö]	»KBà’–“◊’SíUÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàK^àKããäôX⁄\H	âàHOOHôX⁄\KûZY[[ö]»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›X›]ôHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀXX›]ôIÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…ÀXŸZ€\éà	€Z[à]]õ‹…Àò[YNàôX⁄\H»›ö[ô ôX⁄\KòX›]ôSZ[ù]\ Hà	…»JN√Bà€€ú›õŸX›[€àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀ\õŸX›[€âÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…ÀXŸZ€\éà	€Z[àõŸpÈË€…Àò[YNàôX⁄\H»›ö[ô ôX⁄\KúõŸX›[€ìZ[ù]\»œ»
+
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+JJHà	…»JN√Bà€€ú››ô[àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀ[›ô[âÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…ÀXŸZ€\éà	€Z[àõ‹õõ…Àò[YNàôX⁄\H»›ö[ô ôX⁄\Kõ›ô[ìZ[ù]\ Hà	…»JN√Bà€€ú›õ›\»H[
+	›^\ôXIÀ»€\‹Œà	‹KZ[ú]K]^\ôXIÀ	Ÿ]K]\›Y	Œà	‹ôXÀ[õ›\…Àõ›‹Œà	Ã…ÀXŸZ€\éà	”ÿúŸ\ùòpÈË€»»[Ÿ»Hô\\õ»
+‹⁄[€ò[
+I»JN√Bàõ›\Àùò[YHHôX⁄\H»
+ôX⁄\Kõõ›\»	… Hà	…Œ√Bà€€ú›ŸZY⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀ]ŸZY⁄	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‹\€»»›IÀò[YNàôX⁄\H	âàôX⁄\KùŸZY⁄›[OHù[»›ö[ô ôX⁄\KùŸZY⁄›[
+Kúô\XŸJ	ÀâÀ	À	 Hà	…»JN√Bà€€ú›ŸZY⁄[ö]H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀ]›[ö]	»KBà…Ÿ…À	⁄Ÿ…◊KõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàK^àKããäôX⁄\H	âàHOOHôX⁄\KùŸZY⁄[ö]»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›Y‹»HY‹“[ú]
+ôX⁄\H	âàôX⁄\KùY‹À	‹ôXÀ]Y‹… N√Bà€€ú››\úô[ù[öŸYHôX⁄\H»[öŸYõŸX›õ‹îôX⁄\J›‹ôKôX⁄\KöY
+Hàù[√Bà€€ú›[ö]X[X⁄ÿY⁄[ô»H›\úô[ù[öŸY»›\úô[ù[öŸYúX⁄ÿY⁄[ô–€‹›àôX⁄\OÀúX⁄ÿY⁄[ô–€‹›√Bà€€ú›[ö]X[X⁄ÿY⁄[ô—\ÿ»H›\úô[ù[öŸY»›\úô[ù[öŸYúX⁄ÿY⁄[ô—\ÿ»àôX⁄\OÀúX⁄ÿY⁄[ô—\ÿŒ√Bà€€ú›[ö]X[X\ô⁄[àH›\úô[ù[öŸY	âà›\úô[ù[öŸYù\ôŸ]X\ô⁄[î›OHù[»›\úô[ù[öŸYù\ôŸ]X\ô⁄[î›àôX⁄\OÀù\ôŸ]X\ô⁄[î›√Bà€€ú›X⁄ÿY⁄[ô»H[€ô^QöY[
+[ö]X[X⁄ÿY⁄[ô»	‹ôXÀ\Ÿ… N√Bà€€ú›X⁄ÿY⁄[ô—\ÿ»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀ\ŸŸ\ÿ…À\Nà	›^	ÀXŸZ€\éà	—^éàÿZ^[öKõ€Z\òH›HÿX€…Àò[YNà[ö]X[X⁄ÿY⁄[ô—\ÿ»	…»JN√Bà€€ú›X\ô⁄[àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀ[X\ô⁄[âÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éàY∞Ë€»	‹›
+›‹ôKôŸ]€€ôöY 
+Kù\ôŸ]X\ô⁄[î›
+_Xò[YNà[ö]X[X\ô⁄[àOHù[»›ö[ô ›
+[ö]X[X\ô⁄[äJKúô\XŸJ	ÀâÀ	À	 Hà	…»JN√Bà€€ú›ò]R[ú]H
+Ÿ^K\›Yò[òX⁄ HOà√Bà€€ú›ÿ]ôYH›\úô[ù[öŸYÀñ⁄Ÿ^WHœ»ôX⁄\OÀñ⁄Ÿ^WN√Bàô]\õà[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà\›Y\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éàY∞Ë€»	‹›
+ò[òX⁄ _IXò[YNàÿ]ôYOHù[»›ö[ô ›
+ÿ]ôY
+JKúô\XŸJ	ÀâÀ	À	 Hà	…»JN√BàN√Bà€€ú›^[Y[ùôYHHò]R[ú]
+	‹^[Y[ùôYT›	À	‹ôXÀ\^[Y[ùYôYIÀ›‹ôKôŸ]€€ôöY 
+Kú^[Y[ùôYT›
+N√Bà€€ú›€€[Z\‹⁄[€àHò]R[ú]
+	ÿ€€[Z\‹⁄[€î›	À	‹ôXÀX€€[Z\‹⁄[€âÀ›‹ôKôŸ]€€ôöY 
+Kò€€[Z\‹⁄[€î›
+N√Bà€€ú›ÿ[\’^Hò]R[ú]
+	‹ÿ[\’^›	À	‹ôXÀ\ÿ[\À]^	À›‹ôKôŸ]€€ôöY 
+Kúÿ[\’^›
+N√Bàÿ[\’^úXŸZ€\àH	ÃHŸ[H[\‹›»\òŸ[ùX[	Œ√BàÀ»€€\€ô[ùY]‹à
+[ú›[[‹»
+»›\àôX⁄\\Àô]ô\à]Ÿ[äKÉBà€€ú›‹[€ú»H√Bàããú›‹ôKú›]Kö[ô‹ôYY[ùÀú€XŸJ
+Kú€‹ù
+
+KäHOàKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹PîâÀ»Ÿ[ú⁄]]ö]Nà	ÿò\ŸI»JJKõX\
+
+JHOà
+»⁄[ôà	⁄[ô‹ôYY[ù	ÀYàKöYXô[à[ú›[[Œà	⁄Kõò[Y_X[ö]àKú›ÿ⁄’[ö]JJKBàããú›‹ôKú›]KúôX⁄\\Àôö[\ä
+äHOà\ôX⁄\HãöYOOHôX⁄\KöY
+Kú€‹ù
+
+KäHOàKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹PîâÀ»Ÿ[ú⁄]]ö]Nà	ÿò\ŸI»JJKõX\
+
+äHOà
+»⁄[ôà	‹ôX⁄\IÀYàãöYXô[àôXŸZ]Nà	‹ãõò[Y_X[ö]àãûZY[[ö]JJKBàN√Bà€€ú›ôYîŸ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀX€€\ôYâ»K‹[€úÀõX\
+
+ÀJHOà[
+	€‹[€âÀ»ò[YNà›ö[ô JK^àÀõXô[JJJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ôXÀX€€\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‹]	»JN√Bà€€ú›[ö]H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹ôXÀX€€\[ö]	»JN√Bàù[ò›[€àö[[ö] 
+H√Bà€€ú›»H‹[€ú÷”ù[Xô\äôYîŸ[ùò[YJWH‹[€ú÷ÃN√Bà[ö]úô\XŸP⁄[ô[äããù[ö]“[ë[Y[ú⁄[€ä»»Àù[ö]à	›[â KõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàK^àHJJJN√BàCBàö[[ö] 
+N√BàôYîŸ[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀö[[ö] N√BÉBà€€ú›][\”\›H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»JN√Bà€€ú›ô\›[H[
+	Ÿ]âÀ»	Ÿ]K]\›Y	Œà	‹ôXÀ\ô\›[	»JN√Bà€€ú›ôYYòX⁄»H[
+	‹	À»€\‹Œà	‹KZ[ù	À	Ÿ]K]\›Y	Œà	‹ôXÀXÿ][ŸÀYôYYòX⁄…»JN√Bàù[ò›[€àòYùôX⁄\J
+H√Bà€€ú›X\ô⁄[ï^HX\ô⁄[ãùò[YKùö[J
+N√Bà€€ú›\òŸ[ùYŸHH
+[ú]
+HOà[ú]ùò[YKùö[J
+HOOH	…»»[ôYö[ôYà
+\úŸSù[J[ú]ùò[YJH
+H»L√Bàô]\õà√BàããäôX⁄\H»ô\õY[ùZ[ù]\ŒàJKYàòYùYò[YNàò[YKùò[YKùö[J
+KBàZY[õ€Z[ò[à\úŸSù[JZY[]Kùò[YJHZY[[ö]àZY[[ö]ùò[YKBàX›]ôSZ[ù]\Œà\úŸSù[JX›]ôKùò[YJHBàõŸX›[€ìZ[ù]\Œà\úŸSù[JõŸX›[€ãùò[YJHBà›ô[ìZ[ù]\Œà\úŸSù[J›ô[ãùò[YJHBà€€\€ô[ùŒà€€\ÀBàX⁄ÿY⁄[ô–€‹›à\úŸSù[JX⁄ÿY⁄[ôÀö[ú]ùò[YJHBàX⁄ÿY⁄[ô—\ÿŒàX⁄ÿY⁄[ô—\ÿÀùò[YKùö[J
+H[ôYö[ôYBà\ôŸ]X\ô⁄[î›àX\ô⁄[ï^OOH	…»»[ôYö[ôYà
+\úŸSù[JX\ô⁄[ï^
+H
+H»LBà^[Y[ùôYT›à\òŸ[ùYŸJ^[Y[ùôYJK€€[Z\‹⁄[€î›à\òŸ[ùYŸJ€€[Z\‹⁄[€äKÿ[\’^›à\òŸ[ùYŸJÿ[\’^
+KBàN√BàCBàù[ò›[€àô[ô\îô\›[
+
+H»ô\›[úô\XŸP⁄[ô[äôX⁄\TõŸö]Xö[]Pÿ\ô
+›‹ôKòYùôX⁄\J
+K›\úô[ù[öŸY
+JN»CBàù[ò›[€àô[ô\í][\ 
+H√Bà][\”\›úô\XŸP⁄[ô[äããä€€\Àõ[ô›Bà»€€\ÀõX\
+
+ÀY
+HOà
+»ÀYJJKú€‹ù
+
+KäHOàôYìò[YJ›‹ôKKòÀúôYäKõÿÿ[P€€\\ôJôYìò[YJ›‹ôKãòÀúôYäK	‹PîâÀ»Ÿ[ú⁄]]ö]Nà	ÿò\ŸI»JJKõX\
+
+»ÀYJHOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à	ÿÀú]_H	ÿÀù[ö]H8†%	‹ôYìò[YJ›‹ôKÀúôYä_XJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	‘ô[[›ô\à][IÀ€ò€X⁄Œà
+
+HOà»€€\Àú‹XŸJYJN»ô[ô\í][\ 
+N»HK	¯ß%I KBàJJCBààŸ[
+	€IÀ»€\‹Œà	‹KY[\HK\€IÀ^à	‘Ÿ[H][ú»Z[ôKâ»JWJJN√Bàô[ô\îô\›[
+
+N√BàCBàô[ô\í][\ 
+N√BÉBàù[ò›[€àY€€\€ô[ù
+
+H√Bà€€ú›HH\úŸSù[J]Kùò[YJN√Bà€€ú›»H‹[€ú÷”ù[Xô\äôYîŸ[ùò[YJWN√BàYà
+[»JHà
+JH»]Kôõÿ›\ 
+N»ô]\õé»CBà€€\Àú\⁄
+»ôYéà»⁄[ôàÀö⁄[ôYàÀöYK]NàK[ö]à[ö]ùò[YHJN√Bà]Kùò[YHH	…Œ√Bàô[ô\í][\ 
+N√BàCBÉBàù[ò›[€àÿ]ôJ\›[ò][€àH	‹ôX⁄\I H√Bà€€ú›õHHò[YKùò[YKùö[J
+N√Bà€€ú›HH\úŸSù[JZY[]Kùò[YJN√BàYà
+[õHJHà
+JH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà€€ú›ÿú»Hõ›\Àùò[YKùö[J
+N√Bà€€ú›»H\úŸSù[JŸZY⁄ùò[YJN√Bà€€ú›»HY‹Àùò[YJ
+N√Bà€€ú›ÿ]ôYôX⁄\HH√BàããôòYùôX⁄\J
+Kõ›\Œàÿú»[ôYö[ôYBàŸZY⁄›[à»OHù[»[ôYö[ôYàÀŸZY⁄[ö]à»OHù[»[ôYö[ôYàŸZY⁄[ö]ùò[YKBàY‹ŒàÀõ[ô›»»à[ôYö[ôYBàN√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›ô\]Y\›YX\ô⁄[àHÿ]ôYôX⁄\Kù\ôŸ]X\ô⁄[î›œ»€€ôöYÀù\ôŸ]X\ô⁄[î›√Bà€€ú›ò]QöY[»H÷€X\ô⁄[ã	€X\ôŸ[I◊K‹^[Y[ùôYK	›^HHYÿ[Y[ù…◊Kÿ€€[Z\‹⁄[€ã	ÿ€€Z\‹Ë€…◊K‹ÿ[\’^	⁄[\‹›»€ÿúôHHô[ôI◊WN√Bà€€ú›[ùò[YHò]QöY[Àôö[ô
+
+⁄[ú]JHOà[ú]ùò[YKùö[J
+HOOH	…»	âà
+\úŸSù[J[ú]ùò[YJHOHù[\úŸSù[J[ú]ùò[YJH\úŸSù[J[ú]ùò[YJHèHL
+JN√BàYà
+[ùò[Y
+H√BàôYYòX⁄Àù^€€ù[ùH[ôõ‹õYH	⁄[ùò[YÃW_H[ùôH	HHY[õ‹»HL	Kò√Bà[ùò[YÃKôõÿ›\ 
+N√Bàô]\õé√BàCBà€€ú›ò]\»HYôôX›]ôTÿ[\‘ò]\ ÿ]ôYôX⁄\K€€ôöY N√BàYà
+ô\]Y\›YX\ô⁄[à
+»ò]\Àù›[èHJH√BàôYYòX⁄Àù^€€ù[ùH	”X\ôŸ[K^HHYÿ[Y[ùÀ€€Z\‹Ë€»H[\‹›»€ÿúôHHô[ôHôX⁄\ÿ[H€€X\àY[õ‹»HL	KâŒ√BàX\ô⁄[ãôõÿ›\ 
+N√Bàô]\õé√BàCBà]›YŸŸ\›YöXŸN√BàYà
+\›[ò][€àOOH	ÿÿ][Ÿ… H√Bà€€ú›X]⁄\»H›‹ôKú›]KúõŸX›Àôö[\ä
+
+HOàõ‹õJõò[YJHOOHõ‹õJõJJN√BàYà
+X›\úô[ù[öŸY	âàX]⁄\Àõ[ô›àJH√BàôYYòX⁄Àù^€€ù[ùH	“0ËHXZ\»H[HõŸ]»€€H\‹ŸHõ€YHõ»ÿ]0Ë[Ÿ€ÀàZù\›H‹»õ€Y\»\XÿY‹»[ù\»H[ò€Z\àHôXŸZ]KâŒ√Bàô]\õé√BàCBàYà
+X›\úô[ù[öŸY	âàX]⁄\Àõ[ô›OOHH	âà
+X]⁄\÷ÃKò€€\€ô[ù»◊JKú€€YJ
+ HOàÀö⁄[ôOOH	‹ôX⁄\I»	âàÀöYOOHòYùY
+JH√BàôYYòX⁄Àù^€€ù[ùH	—\‹ŸHõ€YH∞ËH\›0ËHYÿY»H›]òHôXŸZ]KàZù\›H»õ€YH»õŸ]»[ù\»H[ò€Z\ãâŒ√Bàô]\õé√BàCBàûH»›YŸŸ\›YöXŸHHôX⁄\TöX⁄[ô ›‹ôKÿ]ôYôX⁄\K›\úô[ù[öŸY
+Kú›YŸŸ\›Y»CBàÿ]⁄
+JH»ôYYòX⁄Àù^€€ù[ùH€€ôö\òH‹»›\›‹»[ù\»H[ò€Z\àõ»ÿ]0Ë[Ÿ€Œà	ŸúöY[ôQ\úõ‹äJ_X»ô]\õé»CBàCBàYà
+ôX⁄\H	âà]⁄[ô›Àò€€ôö\õJÿ[ò\à[\òpÈÌY\»òHôXŸZ]H	‹ôX⁄\Kõò[Y_Oÿ
+JHô]\õé√Bà›òX›[€úÀõ]]]J
+ HOà√BàÀù\Ÿ\ùôX⁄\Jÿ]ôYôX⁄\JN√BàYà
+\›[ò][€àOOH	ÿÿ][Ÿ… H√Bà€€ú›X]⁄\»HÀú›]KúõŸX›Àôö[\ä
+
+HOàõ‹õJõò[YJHOOHõ‹õJõJJN√Bà€€ú›[öŸYH›\úô[ù[öŸY
+X]⁄\Àõ[ô›OOHH»X]⁄\÷ÃHàù[
+N√Bà€€ú›€€\€ô[ùH»⁄[ôà	‹ôX⁄\IÀYàòYùY]Nà[öŸY»ÿ[T]R[îôX⁄\U[ö]
+[öŸYÿ]ôYôX⁄\JHàHN√BàÀù\Ÿ\ùõŸX›
+√Bàããä[öŸYﬂJKYà[öŸYÀöY]ZY
+
+Kò[YNàõKBà€€\€ô[ùŒà[öŸY»Àããä[öŸYò€€\€ô[ù»◊JKôö[\ä
+ HOàJÀö⁄[ôOOH	‹ôX⁄\I»	âàÀöYOOHòYùY
+JK€€\€ô[ùHàÿ€€\€ô[ùKBàÿ[T]Nà[öŸYÀúÿ[T]HKÿ[U[ö]à[öŸYÀúÿ[U[ö]ÿ]ôYôX⁄\KûZY[[ö]Bàÿ[TöXŸNà[öŸYÀúÿ[TöXŸHOHù[»[öŸYúÿ[TöXŸHà›YŸŸ\›YöXŸKBàÿ[R⁄[ôà[öŸYÀúÿ[R⁄[ô	€õ‹õX[	ÀX›]ôNà[öŸYÀòX›]ôHOOHò[ŸKBàX⁄ÿY⁄[ô–€‹›àÿ]ôYôX⁄\KúX⁄ÿY⁄[ô–€‹›X⁄ÿY⁄[ô—\ÿŒàÿ]ôYôX⁄\KúX⁄ÿY⁄[ô—\ÿÀBà\ôŸ]X\ô⁄[î›àÿ]ôYôX⁄\Kù\ôŸ]X\ô⁄[î›Bà^[Y[ùôYT›àÿ]ôYôX⁄\Kú^[Y[ùôYT›€€[Z\‹⁄[€î›àÿ]ôYôX⁄\Kò€€[Z\‹⁄[€î›ÿ[\’^›àÿ]ôYôX⁄\Kúÿ[\’^›BàJN√BàH[ŸHYà
+›\úô[ù[öŸY
+H√BàÀù\Ÿ\ùõŸX›
+»ããò›\úô[ù[öŸYX⁄ÿY⁄[ô–€‹›àÿ]ôYôX⁄\KúX⁄ÿY⁄[ô–€‹›X⁄ÿY⁄[ô—\ÿŒàÿ]ôYôX⁄\KúX⁄ÿY⁄[ô—\ÿÀ\ôŸ]X\ô⁄[î›àÿ]ôYôX⁄\Kù\ôŸ]X\ô⁄[î›^[Y[ùôYT›àÿ]ôYôX⁄\Kú^[Y[ùôYT›€€[Z\‹⁄[€î›àÿ]ôYôX⁄\Kò€€[Z\‹⁄[€î›ÿ[\’^›àÿ]ôYôX⁄\Kúÿ[\’^›JN√BàCBàJN√BàYà
+\›[ò][€àOOH	‹⁄[][]‹â H»›ùöY]Àú⁄[TôX⁄\RYHòYùY»›òX›[€úÀúŸ]Xä	‹⁄[][Y‹â N»CBàYà
+\›[ò][€àOOH	ÿÿ][Ÿ… H›òX›[€úÀúŸ]Xä	‹õŸ]‹… N√BàCBÉBà€€ú›õ›‹»H√BàöY[
+	”õ€YIÀò[YJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	‘ô[ôI»JKZY[]KZY[[ö]JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	’[\»›[HõŸpÈË€»
+Z[äI»JKõŸX›[€óJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”Z[ù]‹»]]õ‹…»JKX›]ôK[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”Z[ù]‹»Hõ‹õõ…»JK›ô[óJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’[\»›[à»[∞ÎX⁄[»HôXŸZ]H]0ÍHöXÿ\àõ€ùK[ò€Z[ô»ô\\õ»H[Xò[YŸ[H\›H›N»\›öXùZH‹»›\›‹»ö^‹ÀàZ[ù]‹»]]õ‹Œà[\»[H]YH[›pÍ[HòXò[H\ô][Y[ùHô[K[ò€\⁄]ôH\òH[Xò[\ãàZ[ù]‹»Hõ‹õõŒà\[ò\»»\€»»õ‹õõÀ\òHÿ[›[\à»Ë\Àà\‹ÿ\»]\\»Ÿ[HŸH€ÿúô\‹é»∞Ë€»€€YH]]€X]Xÿ[Y[ùH]]õ‹»
+»õ‹õõ»\òHôY[ò⁄\à»›[àHpË€»HÿúòH0ÍH[ôXÿY‹àH∞Ë€»\XÿHÿ[0Ë\ö[‹»‹»›\›‹»ö^‹Àâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	‘\€»»›H
+‹⁄[€ò[
+I»JKŸZY⁄ŸZY⁄[ö]JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘\€»›[]YHHôXŸZ]Hô[ôH8†%ZùYHH€›\à‹àŸ»ù[XHô[ôHH›HXZ[‹ãâ»JKBàöY[
+	”ÿúŸ\ùòpÈË€»
+[Ÿ»Hô\\õ IÀõ›\ KBàöY[
+	—]\]Y]\»
+‹⁄[€ò[
+IÀY‹Àô[
+KBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	“[ô‹ôYY[ù\»H[ú›[[‹…»JKBà][\”\›Bà‹[€úÀõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–ÿY\›ôH[ú›[[‹»ö[YZ\õ»\òH[€ù\àHôXŸZ]Kâ»JCBàà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K‹ôYîŸ[]K[ö]Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	‹ôXÀX€€\Y	À€ò€X⁄ŒàY€€\€ô[ùK	 »][I WJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—[Xò[YŸ[HHô[ùXö[YYI»JKBàöY[
+	–›\›»H[Xò[YŸ[H‹àõŸ]…ÀX⁄ÿY⁄[ô KBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ŸHH[Xò[YŸ[H∞ËHõ⁄HYX⁄[€òYH€€[»[ú›[[»X⁄[XKŸ]H›\›»ô[H»ôpÈ€»H€€\òKà\ŸH\›Hÿ[\»\[ò\»\òH[Xò[YŸ[ú»›H€€\[Y[ù‹»]YHZ[ôH∞Ë€»\›Zò[HòH\›K\òH∞Ë€»€€ù\àX\»ô^ô\Àâ»JKBàöY[
+	—\ÿ‹öpÈË€»H[Xò[YŸ[IÀX⁄ÿY⁄[ô—\ÿ KBà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»KŸ[
+	€Xô[	À»^à	”X\ôŸ[H\ŸZòYH\òH\›HôXŸZ]H
+	JI»JK[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K€X\ô⁄[ã[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	›ò^ö[»HX\ôŸ[HY∞Ë€»‹»Zù\›\…»JWJWJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘\òŸ[ùXZ\»€ÿúôHHô[ôI»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–ÿ[\‹»ò^ö[‹»\ÿ[H‹»ò[‹ô\»HZù\›\ÀàôY[ò⁄H]X[ô»\›HôXŸZ]H∞Ë€»]ô\àH€ÿúò[∞ÈÿKà\›\»\òŸ[ùXZ\»Ë€»\ÿ€€ùY‹»»ôpÈ€»Hô[ôKù[ù»€€HHX\ôŸ[H\ŸZòYKâ»JKBàöY[
+	’^HHYÿ[Y[ùÀÿ\ù0Ë€»›H]Yõ‹õXH
+	JIÀ^[Y[ùôYJKBàöY[
+	–€€Z\‹Ë€»Hô[ôH
+	JIÀ€€[Z\‹⁄[€äKBàöY[
+	“[\‹›»õ‹‹ò⁄[€ò[€ÿúôHHô[ôH
+	JIÀÿ[\’^
+KBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	“[ôõ‹õYH[\‹›»\òŸ[ùX[\[ò\»]X[ô»[ò⁄Y\à€ÿúôH»ò]\ò[Y[ù»\›Hô[ôKà»T»»QRH∞ËH\›0ËH[ò€pÎY»õ‹»›\›‹»ö^‹»HZù\›\»H∞Ë€»]ôHŸ\à[∞ÈÿY»õ›ò[Y[ùH\]ZKâ»JKBàô\›[Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	‹ôXÀ[‹[ã\⁄[][]‹âÀ€ò€X⁄Œà
+
+HOàÿ]ôJ	‹⁄[][]‹â HK	¯¶•àÿ[ò\àHXúö\à⁄[][Y‹â KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	‹ôXÀXYXÿ][Ÿ…À€ò€X⁄Œà
+
+HOàÿ]ôJ	ÿÿ][Ÿ… HK›\úô[ù[öŸY»	–]X[^ò\àõŸ]»õ»ÿ]0Ë[Ÿ€…»à	‘ÿ[ò\àH[ò€Z\àõŸ]»õ»ÿ]0Ë[Ÿ€… KBàôYYòX⁄ÀBàN√BÉBà€ò[YKZY[]KZY[[ö]X›]ôKõŸX›[€ã›ô[ãX⁄ÿY⁄[ôÀö[ú]X⁄ÿY⁄[ô—\ÿÀX\ô⁄[ã^[Y[ùôYK€€[Z\‹⁄[€ãÿ[\’^Kôõ‹ëXX⁄
+
+€€ùõ€
+HOà√Bà€€ùõ€òY]ô[ù\›[ô\ä	⁄[ú]	Àô[ô\îô\›[
+N√Bà€€ùõ€òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀô[ô\îô\›[
+N√BàJN√Bàô[ô\îô\›[
+
+N√BÉBàô]\õà⁄Y]
+√Bà]NàôX⁄\H»	—Y]\àôXŸZ]I»à	”õ›òHôXŸZ]IÀBàõ›‹ÀBà€îÿ]ôNà
+
+HOàÿ]ôJ
+KBàÿ]ôU\›Yà	‹ôXÀ\ÿ]ôIÀBà[ôŸ\éàôX⁄\H»»Xô[à	¸'Â‰H^€Z\àôXŸZ]IÀ\›Yà	‹ôXÀY[]IÀ€ê€X⁄Œà
+
+HOà€€ôö\õTô[[›ôJ›HôXŸZ]Hâ‹ôX⁄\Kõò[Y_Hò
+ HOàÀúô[[›ôTôX⁄\JôX⁄\KöY
+JHHàù[BàJN√BüCBÉBôù[ò›[€àôYìò[YJ›‹ôKôYäH√Bà€€ú›€€HôYãö⁄[ôOOH	⁄[ô‹ôYY[ù	»»	⁄[ô‹ôYY[ù…»à	‹ôX⁄\\…Œ√Bàô]\õà›‹ôKôŸ]
+€€ôYãöY
+OÀõò[YH	 ô[[›öY IŒ√BüCBÉBã äàò[Y\»Ÿà[ô‹ôYY[ù»[àHôX⁄\I‹»€€\€ô[ùQ»]]ôHõ»›\úô[ùöXŸH
+ﬁX€KY›X\ôY
+Kà
+ã√Bôù[ò›[€à[úöXŸY[îôX⁄\J›‹ôKôX⁄\RYŸY[àHô]»Ÿ]
+
+JH√Bà€€ú›àH›‹ôKôŸ]
+	‹ôX⁄\\…ÀôX⁄\RY
+N√BàYà
+\àŸY[ãö\ ôX⁄\RY
+JHô]\õà◊N√BàŸY[ãòY
+ôX⁄\RY
+N√Bà€€ú››]Hô]»Ÿ]
+
+N√Bàõ‹à
+€€ú›»Ÿàãò€€\€ô[ù H√BàYà
+ÀúôYãö⁄[ôOOH	⁄[ô‹ôYY[ù	 H√Bà€€ú›[ô»H›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…ÀÀúôYãöY
+N√BàYà
+[ô»	âà›‹ôKò›\úô[ùöXŸJ[ôÀöY
+HOHù[
+H›]òY
+[ôÀõò[YJN√BàH[ŸH√Bàõ‹à
+€€ú›àŸà[úöXŸY[îôX⁄\J›‹ôKÀúôYãöYŸY[äJH›]òY
+äN√BàCBàCBàô]\õàÀããõ›]N√BüCBÉBãÀ»8• 8• õŸ]‹»8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€àõŸ]‹‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›\›H[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»K›‹ôKú›]KúõŸX›ÀõX\
+
+
+HOàõŸ]‘õ› ›
+JJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘õŸ]‹…»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	‹õŸ[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹õŸ]ÀXY	»JHK	 »õ›õ… KBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”X[ù[öH\]ZHŸ»»Ÿ]Hÿ]0Ë[Ÿ€ÀàÿY\›ôHŸ\›\»H⁄]»€€[»[Xò[YŸ[úŒ»\ÿ€€H‹»õŸ]‹»[ù\õõ‹»[HÿYHYYÀà€€Y[ùHõŸ]‹»]]õ‹»\\ôXŸ[H[Hõ›ò\»ô[ô\À[ò€€Y[ô\»H€€X[ô\Àâ»JKBà›‹ôKú›]KúõŸX›Àõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[HõŸ]»Z[ôKâ»JCBàà[
+	Ÿ]âÀﬂKŸ[
+	‹	À»€\‹Œà	‹KZ[ùK]\	À^à	’‹]YH[H[HõŸ]»\òHY]\àõ€YK[öYYK‹\€»Hò[‹àHô[ôKâ»JKŸX\ò⁄[ú]
+	–ù\ÿÿ\àõŸ]¯†)âÀ\›	‹õŸ\ŸX\ò⁄	 K\›JKBàJN√BüCBÉBãÀ»€X[ãÿÿ[õòXõHõ›»8†%H⁄€Hõ›»‹[ú»HY]⁄Y]ÉBôù[ò›[€àõŸ]‘õ› ›õŸX›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›Ÿ[TôX€»H[úöXŸY[îõŸX›
+›‹ôKõŸX›öY
+Kõ[ô›à√Bà€€ú›X›]ôHHõŸX›\–X›]ôJõŸX›
+N√Bà€€ú›ÿ]ôYÿ[TöXŸHHõŸX›úÿ[TöXŸHOHù[	âàõŸX›úÿ[TöXŸHOOH	…»	âàù[Xô\ãö\—ö[ö]Jù[Xô\äõŸX›úÿ[TöXŸJJH	âàù[Xô\äõŸX›úÿ[TöXŸJHèH√Bà€€ú›ŸŸ€HH
+]äHOà√Bà]ãú›‹õ‹Yÿ][€ä
+N√Bà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ùõŸX›
+»ããúõŸX›X›]ôNàXX›]ôHJJN√BàN√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][I»
+»
+X›]ôH»	…»à	»K\ô]ô\úŸY	 K	Ÿ]K\ŸX\ò⁄	Œà	‹õŸX›õò[Y_H	 õŸX›ùY‹»◊JKöõ⁄[ä	»	 _H	ÿX›]ôH»	ÿ]]õ…»à	⁄[ò]]õ…ﬂX€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹õŸ]ÀYY]	ÀYàõŸX›öYJHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY[òÀ]]I»KŸ[
+	‹›õ€ô…À»^àõŸX›õò[YHJK\–ù[ôTõŸX›
+õŸX›
+H	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHK]\ô…À^àù[ôR⁄[ôXô[
+õŸX›
+HJK[
+	‹‹[âÀ»€\‹ŒàX›]ôH»	‹KXòYŸHK[⁄…»à	‹KXòYŸIÀ^àX›]ôH»	ÿ]]õ…»à	⁄[ò]]õ…»JWKôö[\äõ€€X[äJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	Ÿõ]ù[JõŸX›úÿ[T]HJ_H	‹õŸX›úÿ[U[ö]	›[âﬂH0≠»	‹ÿ]ôYÿ[TöXŸH»	›ô[ôI»à	‹›YŸ\öY…ﬂH	ÿúõ
+Ÿ[[ô‘öXŸJ›‹ôKõŸX›öY
+J_XJKBàŸ[TôX€»	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHKXòY	À^à	‹Ÿ[HôpÈ€…»JKBàY–⁄\ õŸX›ùY‹ KBàKôö[\äõ€€X[äJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	‹õŸ]ŸŸ€KXX›]ôIÀ]NàX›]ôH»	‘ô]\ò\à\»õ›ò\»ô[ô\…»à	—\‹€öXö[^ò\à\òHô[ôIÀ€ò€X⁄ŒàŸŸ€HKX›]ôH»	—\ÿ]]ò\â»à	–]]ò\â KBà[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàJN√BüCBÉBìS—S÷…‹õŸ]ÀXY	◊HH
+›
+HOàõŸ]‘⁄Y]
+›ù[
+N√BìS—S÷…‹õŸ]ÀYY]	◊HH
+›JHOàõŸ]‘⁄Y]
+››ú›‹ôKôŸ]
+	‹õŸX›…ÀKöY
+Hù[
+N√BÉBôù[ò›[€àõŸ]‘⁄Y]
+›õŸX›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹õŸ[ò[YIÀ\Nà	›^	ÀXŸZ€\éà	”õ€YH
+^éàõ€»LÀŸ\›HHò][
+IÀò[YNàõŸX›»õŸX›õò[YHà	…»JN√Bà€€ú›ÿ[T]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹õŸ\ÿ[K\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	ÃH›HL	Àò[YNàõŸX›»›ö[ô õŸX›úÿ[T]HJKúô\XŸJ	ÀâÀ	À	 Hà	ÃI»JN√Bà€€ú›ÿ[U[ö]H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹õŸ\ÿ[K][ö]	»K’–“◊’SíUÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàK^àKããä
+õŸX›Àúÿ[U[ö]	›[â HOOHH»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›ÿ[TöXŸHH[€ô^QöY[
+õŸX›»Ÿ[[ô‘öXŸJ›‹ôKõŸX›öY
+Hàù[	‹õŸ\ÿ[K\öXŸI N√Bà€€ú›ÿ[R⁄[ôH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹õŸ\ÿ[KZ⁄[ô	»K√Bà…€õ‹õX[	À	‘õŸ]»€€][I◊K…ÿŸ\›IÀ	–Ÿ\›I◊K…⁄⁄]	À	“⁄]	◊K…ÿ€€Xõ…À	–€€Xõ…◊KBàKõX\
+
+›ò[YKXô[JHOà[
+	€‹[€âÀ»ò[YK^àXô[ããäõŸX›ÿ[R⁄[ô
+õŸX›
+HOOHò[YH»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›X›]ôP⁄»H[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	À	Ÿ]K]\›Y	Œà	‹õŸXX›]ôI»JN√BàX›]ôP⁄Àò⁄X⁄ŸYHõŸX›»õŸX›\–X›]ôJõŸX›
+HàùYN√Bà€€ú›[öŸYôX⁄\HHõŸX›»›‹ôKú›]KúôX⁄\\Àôö[ô
+
+äHOà
+õŸX›ò€€\€ô[ù»◊JKú€€YJ
+ HOàÀö⁄[ôOOH	‹ôX⁄\I»	âàÀöYOOHãöY
+JHàù[√Bà€€ú›X⁄ÿY⁄[ô“][\»HõŸX›»
+õŸX›ò€€\€ô[ù»◊JKôö[\ä
+ HOàÀö⁄[ôOOH	⁄[ô‹ôYY[ù	 KõX\
+
+ HOà
+»YàÀöY]Nàù[Xô\äÀú]JHJJHà◊N√Bà€€ú›X⁄ÿY⁄[ô–õﬁH[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»JN√Bà€€ú›X⁄ÿY⁄[ô”\›H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»JN√Bà€€ú›X⁄ÿY⁄[ô“[ô‹ôYY[ùH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹õŸXù[ôKZ[ú›[[…»K›‹ôKú›]Kö[ô‹ôYY[ùÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^à	⁄Kõò[Y_H
+	⁄Kú›ÿ⁄’[ö]JXJJJN√Bà€€ú›X⁄ÿY⁄[ô‘]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹õŸXù[ôKZ[ú›[[À\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‘]â»JN√Bà€€ú›ô[ô\îX⁄ÿY⁄[ô»H
+
+HOàX⁄ÿY⁄[ô”\›úô\XŸP⁄[ô[äããäX⁄ÿY⁄[ô“][\Àõ[ô›»X⁄ÿY⁄[ô“][\ÀõX\
+
+][K[ô^
+HOà√Bà€€ú›[ô‹ôYY[ùH›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…À][KöY
+N√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à	Ÿõ]ù[J][Kú]J_H	⁄[ô‹ôYY[ùÀú›ÿ⁄’[ö]	›[âﬂH0≠»	⁄[ô‹ôYY[ùÀõò[YH	 [ú›[[»ô[[›öY IﬂXJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà»X⁄ÿY⁄[ô“][\Àú‹XŸJ[ô^JN»ô[ô\îX⁄ÿY⁄[ô 
+N»HK	¯ß%I WJN√BàJHàŸ[
+	€IÀ»€\‹Œà	‹KY[\HK\€IÀ^à	”ô[ö[XH[Xò[YŸ[H›H][Hö[ò›[YÀâ»JWJJN√Bà€€ú›YX⁄ÿY⁄[ô»H
+
+HOà»€€ú›HH\úŸSù[JX⁄ÿY⁄[ô‘]Kùò[YJN»Yà
+\X⁄ÿY⁄[ô“[ô‹ôYY[ùùò[YHJHà
+JH»X⁄ÿY⁄[ô‘]Kôõÿ›\ 
+N»ô]\õé»H€€ú››\úô[ùHX⁄ÿY⁄[ô“][\Àôö[ô
+
+][JHOà][KöYOOHX⁄ÿY⁄[ô“[ô‹ôYY[ùùò[YJN»Yà
+›\úô[ù
+H›\úô[ùú]H
+œHN»[ŸHX⁄ÿY⁄[ô“][\Àú\⁄
+»YàX⁄ÿY⁄[ô“[ô‹ôYY[ùùò[YK]NàHJN»X⁄ÿY⁄[ô‘]Kùò[YHH	…Œ»ô[ô\îX⁄ÿY⁄[ô 
+N»N√BàX⁄ÿY⁄[ô–õﬁò\[ô
+[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”‹⁄[€ò[à[ôõ‹õYHŸ\›KÿZ^KpÈ€Àÿ\ù0Ë€»›H›]õ»[ú›[[»∞Î\⁄X€»€€ú›[ZY»[HÿYH€€öù[ùÀà»\›‹]YHòZ^H]X[ô»H[€ùYŸ[Hõ‹àôY⁄\›òYHòH€€X[ôKâ»JKX⁄ÿY⁄[ô”\››‹ôKú›]Kö[ô‹ôYY[ùÀõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K‹X⁄ÿY⁄[ô“[ô‹ôYY[ùX⁄ÿY⁄[ô‘]K[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	‹õŸXù[ôKZ[ú›[[ÀXY	À€ò€X⁄ŒàYX⁄ÿY⁄[ô»K	 »][I WJHà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–ÿY\›ôH\»[Xò[YŸ[ú»[H[ú›[[‹»\òHö[ò›[0ËK[\»\]ZKâ»JJN√Bàô[ô\îX⁄ÿY⁄[ô 
+N√Bà€€ú›ôX€€ò⁄[R⁄[ôH
+
+HOà»X⁄ÿY⁄[ô–õﬁú›[Kô\‹^HHÿ[R⁄[ôùò[YHOOH	€õ‹õX[	»»	…»à	€õ€ôIŒ»N√Bàÿ[R⁄[ôòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀôX€€ò⁄[R⁄[ô
+N»ôX€€ò⁄[R⁄[ô
+
+N√BÉBàù[ò›[€àÿ]ôJ
+H√Bà€€ú›õHHò[YKùò[YKùö[J
+N√Bà€€ú›HH\úŸSù[Jÿ[T]Kùò[YJN√Bà€€ú›öXŸHH\úŸSù[Jÿ[TöXŸKö[ú]ùò[YJN√BàYà
+[õHJHà
+HöXŸHOHù[öXŸH
+H»
+õH»ÿ[T]Hàò[YJKôõÿ›\ 
+N»ô]\õé»CBà€€ú›€€\€ô[ù»Hÿ[R⁄[ôùò[YHOOH	€õ‹õX[	√Bà»
+õŸX›»
+\–ù[ôTõŸX›
+õŸX›
+H»
+õŸX›ò€€\€ô[ù»◊JKôö[\ä
+€€\€ô[ù
+HOà€€\€ô[ùö⁄[ôOOH	‹ôX⁄\I Hà
+õŸX›ò€€\€ô[ù»◊JJHà◊JCBààX⁄ÿY⁄[ô“][\ÀõX\
+
+][JHOà
+»⁄[ôà	⁄[ô‹ôYY[ù	ÀYà][KöY]Nà][Kú]HJJN√BàYà
+õŸX›	âà]⁄[ô›Àò€€ôö\õJÿ[ò\à[\òpÈÌY\»õ»õŸ]»	‹õŸX›õò[Y_Oÿ
+JHô]\õé√Bà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ùõŸX›
+√BàããäõŸX›ﬂJKYàõŸX›»õŸX›öYà]ZY
+
+Kò[YNàõKBà€€\€ô[ùÀX⁄ÿY⁄[ô–€‹›àõŸX›ÀúX⁄ÿY⁄[ô–€‹›Bàÿ[T]NàKÿ[U[ö]àÿ[U[ö]ùò[YKÿ[TöXŸNàöXŸKÿ[R⁄[ôàÿ[R⁄[ôùò[YKX›]ôNàX›]ôP⁄Àò⁄X⁄ŸYBàJJN√BàCBÉBà€€ú›õ›‹»H√BàöY[
+	”õ€YIÀò[YJKBàöY[
+	’\»\òHô[ôHH\⁄õÿ\ô	Àÿ[R⁄[ô
+KBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’\ŸHŸ\›K⁄]›H€€Xõ»\òHY[ùYöXÿ\àH[Xò[YŸ[Hô[ôYKà‹»õŸ]‹»[ù\õõ‹»Ë€»\ÿ€€Y‹»\òHÿYH€Y[ùHõ»YYÀâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	’[öYYH›H\€»ô[ôY…»JKÿ[T]Kÿ[U[ö]JKBàöY[
+	’ò[‹àHô[ôIÀÿ[TöXŸJKBàõŸX›	âà
+õŸX›úÿ[TöXŸHOHù[õŸX›úÿ[TöXŸHOOH	… H	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\›Hò[‹àõ⁄H›YŸ\öY»]]€X]Xÿ[Y[ùKàZù\›HŸHôXŸ\‹Ë\ö[»Hÿ[ôH»õŸ]»\òHYö[öK[»€€[»ôpÈ€»Hô[ôHò]XÿYÀâ»JKBàX⁄ÿY⁄[ô–õﬁBà[
+	€Xô[	À»€\‹Œà	‹KX⁄X⁄…»KÿX›]ôP⁄À[
+	‹‹[âÀ»^à	–]]õ»\òHô[ôI»JWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ŸH\ÿ]]òYÀ\õX[ôXŸHÿY\›òY»HYÿY»0ËôXŸZ]KX\»∞Ë€»\\ôXŸH[Hõ›ò\»ô[ô\À[ò€€Y[ô\À€€X[ô\»]ù[ÿ\»›H\›[X]]ò\Àâ»JKBà[öŸYôX⁄\CBà»[
+	‹	À»€\‹Œà	‹KXÿ[›]	À^àöX⁄H0ÍX€öXÿHô[X⁄[€òYNà	€[öŸYôX⁄\Kõò[Y_Kà[\ôH[ô‹ôYY[ù\À[Xò[YŸ[HHX\ôŸ[Hõ»ÿY\›õ»HôXŸZ]\ÀòJCBàà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘\òHõŸ]‹»€€][úÀHöX⁄H0ÍX€öXÿHöXÿH[HôXŸZ]\Àà\òHŸ\›\»H⁄]ÀÿY\›ôH\]ZHH[Xò[YŸ[HHŸ]\»X]\öXZ\Œ»»›\›»‹»õŸ]‹»[ù\õõ‹»Ÿ\∞ËH€€XY»€€ôõ‹õYHÿYHYYÀâ»JKBàN√BÉBàô]\õà⁄Y]
+√Bà]NàõŸX›»	—Y]\àõŸ]…»à	”õ›õ»õŸ]…ÀBàõ›‹ÀBà€îÿ]ôNàÿ]ôKBàÿ]ôU\›Yà	‹õŸ\ÿ]ôIÀBà[ôŸ\éàõŸX›»»Xô[à	¸'Â‰H^€Z\àõŸ]…À\›Yà	‹õŸY[]IÀ€ê€X⁄Œà
+
+HOà€€ôö\õTô[[›ôJ›»õŸ]»â‹õŸX›õò[Y_Hò
+ HOàÀúô[[›ôTõŸX›
+õŸX›öY
+JHHàù[BàJN√BüCBÉBôù[ò›[€àõŸX›€€\Xô[
+›‹ôK H√BàYà
+Àö⁄[ôOOH	‹ôX⁄\I H»€€ú›àH›‹ôKôŸ]
+	‹ôX⁄\\…ÀÀöY
+N»ô]\õà	ÿÀú]_H	‹èÀûZY[[ö]	…ﬂHH	‹èÀõò[YH	 ô[[›öY IﬂX»CBàYà
+Àö⁄[ôOOH	‹õŸX›	 H»€€ú›H›‹ôKôŸ]
+	‹õŸX›…ÀÀöY
+N»ô]\õà	ÿÀú]_H0Â»	‹Àõò[YH	 ô[[›öY IﬂX»CBà€€ú›HH›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…ÀÀöY
+N»ô]\õà	ÿÀú]_H	⁄OÀú›ÿ⁄’[ö]	…ﬂHH	⁄OÀõò[YH	 ô[[›öY IﬂX√BüCBÉBã äà[ô‹ôYY[ùò[Y\»⁄]õ»öXŸHôXX⁄XõHõ›Y⁄HõŸX›	‹»€€\€ô[ùQ»
+ﬁX€KY›X\ôY
+Kà
+ã√Bôù[ò›[€à[úöXŸY[îõŸX›
+›‹ôKõŸX›YŸY[îHô]»Ÿ]
+
+JH√Bà€€ú›H›‹ôKôŸ]
+	‹õŸX›…ÀõŸX›Y
+N√BàYà
+\ŸY[îö\ õŸX›Y
+JHô]\õà◊N√BàŸY[îòY
+õŸX›Y
+N√Bà€€ú››]Hô]»Ÿ]
+
+N√Bàõ‹à
+€€ú›»Ÿàò€€\€ô[ù»◊JH√BàYà
+Àö⁄[ôOOH	‹ôX⁄\I Hõ‹à
+€€ú›àŸà[úöXŸY[îôX⁄\J›‹ôKÀöY
+JH›]òY
+äN√Bà[ŸHYà
+Àö⁄[ôOOH	‹õŸX›	 Hõ‹à
+€€ú›àŸà[úöXŸY[îõŸX›
+›‹ôKÀöYŸY[î
+JH›]òY
+äN√Bà[ŸHYà
+Àö⁄[ôOOH	⁄[ô‹ôYY[ù	 H»€€ú›[ô»H›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…ÀÀöY
+N»Yà
+[ô»	âà›‹ôKò›\úô[ùöXŸJ[ôÀöY
+HOHù[
+H›]òY
+[ôÀõò[YJN»CBàCBàô]\õàÀããõ›]N√BüCBÉBãÀ»8• 8• €Y[ù\»
+ô]à8†%X\›\à]N»[ò€€Y[ô\ÀŸöX⁄\»]X⁄»H€Y[ù
+H8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€à€Y[ù\‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›\›H[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»K›‹ôKú›]Kò€Y[ù√Bàú€XŸJ
+Kú€‹ù
+
+KäHOàõ‹õJ€Y[ùXô[
+JJKõÿÿ[P€€\\ôJõ‹õJ€Y[ùXô[
+äJJJCBàõX\
+
+ HOà€Y[ùTõ› › JJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	–€Y[ù\…»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	ÿ€K[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€Y[ùKXY	»JHK	 »õ›õ… KBàJKBà›‹ôKú›]Kò€Y[ùÀõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H€Y[ùKà‹]YH[H8†'
+»õ›õ¯†'H\òH€€YpÈÿ\ãâ»JCBàà[
+	Ÿ]âÀﬂKŸ[
+	‹	À»€\‹Œà	‹KZ[ùK]\	À^à	–ù\‹]YH[»õ€YKÏŸY€»›H]\]Y]Kà‹]YH[H[H€Y[ùH\òHY]\ãâ»JKŸX\ò⁄[ú]
+	–ù\ÿÿ\à‹àõ€YKÏŸY€»›H]\]Y]x†)âÀ\›	ÿ€K\ŸX\ò⁄	 K\›JKBà›‹ôKú›]Kô[ò€€Y[ô\Àõ[ô›à	âà[
+	Ÿ]âÀ»€\‹Œà	‹KYöX⁄\…»K√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—öX⁄\»\òH[\ö[Z\à
+»‹àõ€JI»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—Ÿ\òH»à€€H\»ô[ô\»HÿYH€Y[ùH8†%\ÿ€€H]XZ\»[ò€Z\ã[\ö[XHH\ú]Z]ôKâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√BàöX⁄\–ù]€ä›	¸'Â™Ÿ\…À
+
+HOàùZ[öX⁄\ ›‹ôK[ò€€Y[ô\–ûS[ŸJ›‹ôK	›Ÿ\… JK	ŸöX⁄\À]Ÿ\ÀúâÀ	ŸöX⁄\À]Ÿ\… KBàöX⁄\–ù]€ä›	¸'Â™[HXô\ù…À
+
+HOàùZ[öX⁄\ ›‹ôK[ò€€Y[ô\–ûS[ŸJ›‹ôK	ÿXô\ù… JK	ŸöX⁄\ÀY[KXXô\ùÀúâÀ	ŸöX⁄\ÀXXô\ù… KBàöX⁄\–ù]€ä›	¸'Â™Yÿ\…À
+
+HOàùZ[öX⁄\ ›‹ôK[ò€€Y[ô\–ûS[ŸJ›‹ôK	‹Yÿ\… JK	ŸöX⁄\À\Yÿ\ÀúâÀ	ŸöX⁄\À\Yÿ\… KBàJKBàJKBàKôö[\äõ€€X[äJN√BüCBÉBôù[ò›[€à€Y[ùTõ› › H√Bà€€ú›Y]HHÿÀò€ŸH	âàÏŸY€»	ÿÀò€Ÿ_XÀú€ôKÀòYô\‹◊Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 N√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K\ŸX\ò⁄	Œà€Y[ùŸX\ò⁄^
+ K€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€Y[ùKYY]	ÀYàÀöYJHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY[òÀ]]I»KŸ[
+	‹›õ€ô…À»^àÀõò[YHJKÀö[òX›]ôH	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	⁄[ò]]õ…»JWKôö[\äõ€€X[äJKBàY]H	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àY]HJKBàY–⁄\ ÀùY‹ KBàKôö[\äõ€€X[äJKBà[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàJN√BüCBÉBìS—S÷…ÿ€Y[ùKXY	◊HH
+›
+HOà€Y[ùT⁄Y]
+›ù[
+N√BìS—S÷…ÿ€Y[ùKYY]	◊HH
+›JHOà€Y[ùT⁄Y]
+››ú›‹ôKôŸ]
+	ÿ€Y[ù…ÀKöY
+Hù[
+N√BÉBãÀ»€Y[ùö[ò[ò⁄X[
+»€€[Y\ò⁄X[\›‹ûH
+ô]à»ÕäNà€€\ò\ÀŸ[ò€€Y[ô\ÀYÿ[Y[ù‹Àÿ[»[ô[ùKÉBôù[ò›[€à€Y[ùR\›‹öX€ ›‹ôK€JH√Bà€€ú›‹ô\ú»H›‹ôKú›]Kô[ò€€Y[ô\Àôö[\ä
+JHOàKò€Y[ùRYOOH€KöY
+Kú€‹ù
+
+KäHOà
+Kô[]ô\ûQ]Hãô[]ô\ûQ]H»HàLJJN√BàYà
+[‹ô\úÀõ[ô›
+Hô]\õà[
+	‹	À»€\‹Œà	‹KZ[ù	À	Ÿ]K]\›Y	Œà	ÿ€KZ\›	À^à	–Z[ôHŸ[H€€\ò\»ôY⁄\›òY\Àâ»JN√Bà€€ú›X›]ôS‹ô\ú»H‹ô\úÀôö[\ä
+JHOàYKô\⁄\›[ò⁄XP]
+N√Bà€€ú››[€€\òY»HX›]ôS‹ô\úÀúôYXŸJ
+ÀJHOà»
+»
+Kù›[
+K
+N√Bà€€ú››[Y€»HX›]ôS‹ô\úÀúôYXŸJ
+ÀJHOà»
+»^[Y[ù›]\ ›‹ôKJKúZY
+N√Bà€€ú››[\ÿ€€ùY»HX›]ôS‹ô\úÀúôYXŸJ
+ÀJHOà»
+»
+^[Y[ù›]\ ›‹ôKJKô\ÿ€›[ùY
+K
+N√Bà€€ú›ÿ[»HX›]ôS‹ô\úÀúôYXŸJ
+ÀJHOà»
+»^[Y[ù›]\ ›‹ôKJKúÿ[À
+N√Bà€€ú›^\»H◊N√Bàõ‹à
+€€ú›HŸà‹ô\ú Hõ‹à
+€€ú›»Ÿà›‹ôKú›]Kú^[Y[ù HYà
+Àô[ò€€Y[ôRYOOHKöY	âà\›‹ôKö\‘ô]ô\úŸY
+	‹^[Y[ù	ÀÀöY
+JH^\Àú\⁄
+ N√Bà^\Àú€‹ù
+
+KäHOà
+Kò]ãò]»HàLJJN√Bà€€ú››àH
+Xô[ò[YKòY
+HOà[
+	›âÀòY»»€\‹Œà	‹KZ›ã]›[	»HàﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+òY»	»KXòY	»à	… K^àò[YHJWJN√Bàô]\õà[
+	Ÿ]âÀ»	Ÿ]K]\›Y	Œà	ÿ€KZ\›	»K√Bà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà›ä	’›[€€\òY…Àúõ
+›[€€\òY JKBà›ä	’›[Y€…Àúõ
+›[Y€ JKBà›[\ÿ€€ùY»àåH	âà›ä	—\ÿ€€ù‹»òH]Z]pÈË€…Àúõ
+›[\ÿ€€ùY JKBà›ä	‘ÿ[»[ô[ùIÀúõ
+ÿ[ Kÿ[»àåJKBàKôö[\äõ€€X[äJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à€€\ò\»
+	€‹ô\úÀõ[ô›JXJKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K‹ô\úÀõX\
+
+JHOà√Bà€€ú››H^[Y[ù›]\ ›‹ôKJN√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀﬂK[
+	‹›õ€ô…À»^à[ò€€Y[ôR][\‘ô\›[[ ›‹ôKJHJJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	Ÿõ]]JKô[]ô\ûQ]J_IŸKô[ùôY›YH»	»0≠»[ùôY›YI»à	…ﬂIŸKô\⁄\›[ò⁄XP]»	»0≠»\⁄\›0Íõò⁄XI»à	…ﬂXJKBàJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[ù[IÀ^àúõ
+Kù›[
+HJKBà[
+	‹‹[âÀ»€\‹ŒàKô\⁄\›[ò⁄XP]»	‹KXòYŸHKXòY	»àKXòYŸH	‹›ò€ﬂX^àKô\⁄\›[ò⁄XP]»	Ÿ\⁄\›0Íõò⁄XI»à›õXô[JKBàJN√BàJJKBà^\Àõ[ô›à	âà[
+	⁄…À»€\‹Œà	‹KZ…À^àYÿ[Y[ù‹»
+	‹^\Àõ[ô›JXJKBà^\Àõ[ô›à	âà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K^\ÀõX\
+
+ HOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›»K[]]Y	À^à	Ÿõ]]JÀò]
+_I‹Àôõ‹õXH»0≠»	‹Àôõ‹õX_Xà	…ﬂXJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[ù[IÀ^àúõ
+Àùò[‹äHJKBàJJJKBàKôö[\äõ€€X[äJN√BüCBÉBôù[ò›[€à€Y[ùT⁄Y]
+›€JH√Bà€€ú›€ŸHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€KX€ŸIÀ\Nà	›^	ÀXŸZ€\éà	—^éàH›HÀLçIÀò[YNà€H»
+€Kò€ŸH	… Hà	…»JN√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€K[ò[YIÀ\Nà	›^	ÀXŸZ€\éà	”õ€YH»€Y[ùIÀò[YNà€H»€Kõò[YHà	…»JN√Bà€€ú›€ôHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€K\€ôIÀ\Nà	›[	À[ú][ŸNà	›[	ÀXŸZ€\éà	’[Yõ€ôIÀò[YNà€H»
+€Kú€ôH	… Hà	…»JN√Bà€€ú›Yô\‹»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€KXYô\‹…À\Nà	›^	ÀXŸZ€\éà	—[ô\ôpÈ€…Àò[YNà€H»
+€KòYô\‹»	… Hà	…»JN√Bà€€ú›ö\ù^HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€KXö\ù^IÀ\Nà	Ÿ]IÀò[YNà€H»
+€Kòö\ù^H	… Hà	…»JN√Bà€€ú›Y‹»HY‹“[ú]
+€OÀùY‹À	ÿ€K]Y‹… N√BàY‹Àô[úXŸZ€\àH	—^éà∞Ë€»ô[ô\ã∞Ë€»€€YHÿŸIŒ√BÉBàù[ò›[€àÿ]ôJ
+H√Bà€€ú›õHHò[YKùò[YKùö[J
+N√BàYà
+[õJH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà€€ú›ŸH€ŸKùò[YKùö[J
+N√Bà€€ú›\Xÿ]HHŸ	âà›ú›‹ôKú›]Kò€Y[ùÀôö[ô
+
+€Y[ù
+HOà€Y[ùöYOOH€OÀöY	âàõ‹õJ€Y[ùò€ŸJHOOHõ‹õJŸ
+JN√BàYà
+\Xÿ]JH√Bà€ŸKúŸ]›\›€Uò[Y]J\›HÏŸY€»∞ËH\ù[òŸHH	Ÿ\Xÿ]Kõò[Y_Kò
+N√Bà€ŸKúô\‹ùò[Y]J
+N√Bàô]\õé√BàCBà€ŸKúŸ]›\›€Uò[Y]J	… N√Bà€€ú›H€ôKùò[YKùö[J
+N√Bà€€ú›YHYô\‹Àùò[YKùö[J
+N√Bà€€ú›»HY‹Àùò[YJ
+N√Bà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ù€Y[ù
+»ããä€HﬂJKYà€H»€KöYà]ZY
+
+Kò[YNàõK€ŸNàŸ[ôYö[ôY€ôNà[ôYö[ôYYô\‹ŒàY[ôYö[ôYö\ù^Nàö\ù^Kùò[YH[ôYö[ôYY‹ŒàÀõ[ô›»»à[ôYö[ôYJJN√BàCBÉBà€ŸKòY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà€ŸKúŸ]›\›€Uò[Y]J	… JN√Bà€€ú›õ›‹»HŸöY[
+	–ÏŸY€»X[ùX[
+‹⁄[€ò[
+IÀ€ŸJKöY[
+	”õ€YIÀò[YJKöY[
+	—]HH[ö]ô\úË\ö[»
+‹⁄[€ò[
+IÀö\ù^JKöY[
+	’[Yõ€ôH
+‹⁄[€ò[
+IÀ€ôJKöY[
+	—[ô\ôpÈ€»
+‹⁄[€ò[
+IÀYô\‹ KöY[
+	—]\]Y]\»
+Ÿ\\òY\»‹à∞Î\ô›[JIÀY‹Àô[
+K[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’\ŸH]\]Y]\»\òH[Xúô]\»[\‹ù[ù\À€€[»8†'∞Ë€»ô[ô\∏†'H›H8†'∞Ë€»€€YHÿŸx†'Kâ»JWN√BàYà
+€JH√Bàõ›‹Àú\⁄
+[
+	⁄…À»€\‹Œà	‹KZ…À^à	“\›0Ï‹öX€…»JK€Y[ùR\›‹öX€ ›ú›‹ôK€JJN√Bàõ›‹Àú\⁄
+[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KXÿ\ôõ€›	»K√BàöX⁄\–ù]€ä›	¸'Â™Ÿ\ò\àöX⁄H
+äIÀ
+
+HOàùZ[öX⁄\ ›ú›‹ôK›ú›‹ôKú›]Kô[ò€€Y[ô\Àôö[\ä
+JHOàKò€Y[ùRYOOH€KöY
+JKöX⁄KIÿ€Kõò[Y_Kúò
+KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ÿ€KYö[ò[ò⁄X[\›][Y[ù	À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€Y[ù\›][Y[ù	À€Y[ùYà€KöYJHK	—öX⁄Hö[ò[òŸZ\òH][YI KBàJJN√BàCBàô]\õà⁄Y]
+√Bà]Nà€H»	—Y]\à€Y[ùI»à	”õ›õ»€Y[ùIÀBàõ›‹ÀBà€îÿ]ôNàÿ]ôKBàÿ]ôU\›Yà	ÿ€K\ÿ]ôIÀBà[ôŸ\éà€H»√Bà»Xô[à€Kö[òX›]ôH»	‘ôX]]ò\à€Y[ùI»à	“[ò]]ò\à€Y[ùIÀ€\‹”ò[YNà	‹K\€ŸùY[ôŸ\âÀ\›Yà	ÿ€KZ[òX›]ôIÀ€ê€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ù€Y[ù
+»ããò€K[òX›]ôNàX€Kö[òX›]ôHJJHKBà»Xô[à	¸'Â‰H^€Z\à€Y[ùIÀ\›Yà	ÿ€KY[]IÀ€ê€X⁄Œà
+
+HOà€€ôö\õTô[[›ôJ›»€Y[ùHâÿ€Kõò[Y_Hò
+ HOàÀúô[[›ôP€Y[ù
+€KöY
+JHKBàHàù[BàJN√BüCBÉBãÀ»8• 8• ôpÈ€‹»
+H^[ŸôäH8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€àù[ò⁄[€ò\ö[‹‘[ô[
+›
+H√Bà€€ú›õ›‹»H›ú›‹ôKú›]Kô[\ﬁYY\Àú€XŸJ
+Kú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJJJKõX\
+
+[\ﬁYYJHOà[
+	€IÀ√Bà€\‹ŒàK\õ›ÀZ][IŸ[\ﬁYYKö[òX›]ôH»	»K\ô]ô\úŸY	»à	…ﬂX€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿ[\ﬁYYKYY]	ÀYà[\ﬁYYKöYJKBàK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^à[\ﬁYYKõò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àŸ[\ﬁYYKúõ€K[\ﬁYYKú€ôK[\ﬁYYKòö\ù^H	âà[ö]ô\úË\ö[»	Ÿõ]]J	Ÿ[\ﬁYYKòö\ù^_ULéåå
+_XKôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 HJWJKBà[\ﬁYYKö[òX›]ôH	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	⁄[ò]]õ…»JK[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàKôö[\äõ€€X[äJJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	—ù[ò⁄[€∞Ë\ö[‹…»JK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	Ÿ[\ﬁYYK[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿ[\ﬁYYKXY	»JHK	 »õ›õ… WJKBàõ›‹Àõ[ô›»[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»Kõ›‹ Hà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[Hù[ò⁄[€∞Ë\ö[»ÿY\›òYÀâ»JKBàJN√BüCBÉBìS—S÷…Ÿ[\ﬁYYKXY	◊HH
+›
+HOà[\ﬁYYT⁄Y]
+›ù[
+N√BìS—S÷…Ÿ[\ﬁYYKYY]	◊HH
+›[Ÿ[
+HOà[\ﬁYYT⁄Y]
+››ú›‹ôKôŸ]
+	Ÿ[\ﬁYY\…À[Ÿ[öY
+Hù[
+N√Bôù[ò›[€à[\ﬁYYT⁄Y]
+›[\ﬁYYJH√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿ[\ﬁYYK[ò[YIÀ\Nà	›^	Àò[YNà[\ﬁYYOÀõò[YH	…ÀXŸZ€\éà	”õ€YI»JN√Bà€€ú›õ€HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿ[\ﬁYYK\õ€IÀ\Nà	›^	Àò[YNà[\ﬁYYOÀúõ€H	…ÀXŸZ€\éà	—ù[∞ÈË€»»ÿ\ô€…»JN√Bà€€ú›€ôHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›[	Àò[YNà[\ﬁYYOÀú€ôH	…ÀXŸZ€\éà	’[Yõ€ôI»JN√Bà€€ú›ö\ù^HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿ[\ﬁYYKXö\ù^IÀ\Nà	Ÿ]IÀò[YNà[\ﬁYYOÀòö\ù^H	…»JN√Bà€€ú›ÿ]ôHH
+
+HOà√BàYà
+[ò[YKùò[YKùö[J
+JH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ù[\ﬁYYJ»ããä[\ﬁYYHﬂJKYà[\ﬁYYOÀöY]ZY
+
+Kò[YNàò[YKùò[YKùö[J
+Kõ€Nàõ€Kùò[YKùö[J
+H[ôYö[ôY€ôNà€ôKùò[YKùö[J
+H[ôYö[ôYö\ù^Nàö\ù^Kùò[YH[ôYö[ôYJJN√BàN√Bàô]\õà⁄Y]
+»]Nà[\ﬁYYH»	—Y]\àù[ò⁄[€∞Ë\ö[…»à	”õ›õ»ù[ò⁄[€∞Ë\ö[…Àõ›‹ŒàŸöY[
+	”õ€YIÀò[YJKöY[
+	—ù[∞ÈË€»»ÿ\ô€…Àõ€JKöY[
+	—]HH[ö]ô\úË\ö[…Àö\ù^JKöY[
+	’[Yõ€ôIÀ€ôJWK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	Ÿ[\ﬁYYK\ÿ]ôIÀ[ôŸ\éà[\ﬁYYH»√Bà»Xô[à[\ﬁYYKö[òX›]ôH»	‘ôX]]ò\àù[ò⁄[€∞Ë\ö[…»à	“[ò]]ò\àù[ò⁄[€∞Ë\ö[…À€\‹”ò[YNà	‹K\€ŸùY[ôŸ\âÀ€ê€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ù[\ﬁYYJ»ããô[\ﬁYYK[òX›]ôNàY[\ﬁYYKö[òX›]ôHJJHKBà»Xô[à	¸'Â‰H^€Z\àù[ò⁄[€∞Ë\ö[…À€ê€X⁄Œà
+
+HOà€€ôö\õTô[[›ôJ›»ù[ò⁄[€∞Ë\ö[»âŸ[\ﬁYYKõò[Y_Hò
+›‹ôJHOà›‹ôKúô[[›ôQ[\ﬁYYJ[\ﬁYYKöY
+JHKBàHàù[JN√BüCBÉBôù[ò›[€àôX€‹‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›\»H›‹ôKù—[ô⁄[ôT›‹ôJ
+N√Bà€€ú›[ú»H\›[X]S[ú €€ôöY N√Bà€€ú›X›]ôTõŸX›»H›‹ôKú›]KúõŸX›Àôö[\äõŸX›\–X›]ôJN√BÉBà€€ú›ÿ\ô»HX›]ôTõŸX›ÀõX\
+
+
+HOà√Bà€€ú›ÿ]ôYÿ[TöXŸHHúÿ[TöXŸHOHù[	âàúÿ[TöXŸHOOH	…»	âàù[Xô\ãö\—ö[ö]Jù[Xô\äúÿ[TöXŸJJH	âàù[Xô\äúÿ[TöXŸJHèHBà»ù[Xô\äúÿ[TöXŸJHàù[√BàÀ»[‹›€€[[€àö[ò€€\]Hàÿ]\ŸNàH\ŸY[ô‹ôYY[ù\»õ»öXŸKàò[YH[H^X⁄]KÉBà€€ú›Z\‹⁄[ô»H[úöXŸY[îõŸX›
+›‹ôKöY
+N√BàYà
+Z\‹⁄[ôÀõ[ô›
+H√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\›XãXÿ\ô	À	Ÿ]K\ŸX\ò⁄	Œàõò[YHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõò[YHJKBà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHKXòY	À^à	‹Ÿ[HôpÈ€…»JKBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^àò[‹àHô[ôHõ»ÿY\›õŒà	‹ÿ]ôYÿ[TöXŸHOHù[»	€∞Ë€»[ôõ‹õXY…»àúõ
+ÿ]ôYÿ[TöXŸJ_KòJKBà[
+	‹	À»€\‹Œà	‹K\›]\…À^àYö[òH»ôpÈ€»Nà	€Z\‹⁄[ôÀöõ⁄[ä	À	 _KòJKBàJN√BàCBàûH√Bà€€ú›àHõŸX›úôXZŸ›€ä\ÀöY€€ôöYÀ[ú N√Bà€€ú›\ù»H√Bà…“[ô‹ôYY[ù\…Àãö[ô‹ôYY[ù◊KBà…”pË€»HÿúòH\ô]H
+[ôXÿY‹é»∞Ë€»€€XJIÀãõXõ‹óKBà…—Ë\»
+õ‹õõ IÀãôÿ\◊KBà…–›\›‹»ö^‹…Àãôö^YKBà…—[Xò[YŸ[IÀãúX⁄ÿY⁄[ô»
+»úX⁄ÿY⁄[ô–€‹›KBàN√Bà€€ú›[ö]€‹›HõŸX›[ö]€‹›
+\ÀöY€€ôöYÀ[ú N√Bà€€ú›X\ô⁄[àHYôôX›]ôSX\ô⁄[ä\ÀöY€€ôöY N√Bà€€ú››€ìX\ô⁄[àHù\ôŸ]X\ô⁄[î›OHù[√Bà€€ú›ò]\»HYôôX›]ôTÿ[\‘ò]\ €€ôöY N√Bà€€ú›öXŸHHöXŸQúõ€P€‹›
+[ö]€‹›»ããò€€ôöYÀããúò]\À\ôŸ]X\ô⁄[î›àX\ô⁄[àJN√BàÀ»õŸ]‹»\‹^\»H›YŸŸ\›YöXŸH\»HYò][⁄[àHÿ[HöXŸHÿ\»õ›ÿ]ôYÉBàÀ»\ŸH]ÿ[YH\‹^YYò[YH\ôK⁄[HY[ùYûZ[ô»]\»õ›ö\⁄[€ò[ÉBà€€ú›òX›XŸYöXŸHHÿ]ôYÿ[TöXŸHOHù[»Ÿ[[ô‘öXŸJ›‹ôKöY
+Hàÿ]ôYÿ[TöXŸN√Bà€€ú›õ›ö\⁄[€ò[Hÿ]ôYÿ[TöXŸHOHù[√Bà€€ú›ÿ[\‘ò]HHò]\Àù›[√Bà€€ú›X‹õ’[ö]HòX›XŸYöXŸHH[ö]€‹›HòX›XŸYöXŸH
+àÿ[\‘ò]N√Bà€€ú›òX›XŸYX\ô⁄[àHòX›XŸYöXŸHà»X‹õ’[ö]»òX›XŸYöXŸHàù[√Bà€€ú›X›]ôR›\ú‘\ï[ö]H€€ôöYÀùò[‹í‹òHà»ãõXõ‹à»€€ôöYÀùò[‹í‹òHà√Bà€€ú›X‹õ“‹òHHX›]ôR›\ú‘\ï[ö]à»X‹õ’[ö]»X›]ôR›\ú‘\ï[ö]àù[√Bà€€ú››\›“‹òHHX›]ôR›\ú‘\ï[ö]à»[ö]€‹›»X›]ôR›\ú‘\ï[ö]àù[√Bà€€ú››àH
+Xô[ã€ HOà[
+	›âÀ€»»»€\‹Œà€»HàﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+€»OOH	‹KZ›ã]›[	»»	…»à	… K^àúõ
+äHJWJN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\›XãXÿ\ô	À	Ÿ]K\ŸX\ò⁄	Œàõò[YHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõò[YHJKBà[
+	‹‹[âÀ»€\‹Œà	‹K\öXŸIÀ^à	‹õ›ö\⁄[€ò[»	’ò[‹à^XöY…»à	‘ò]XÿY…ﬂH	ÿúõ
+òX›XŸYöXŸJ_XJKBàJKBà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bàããú\ùÀõX\
+
+€Xô[óJHOà›äXô[äJKBà›ä	–›\›»[ö]0Ë\ö[…À[ö]€‹›	‹KZ›ã]›[	 KBà[
+	›âÀﬂKŸ[
+	›	À»^àôpÈ€»›YŸ\öY»
+X\ôŸ[H	‹›
+X\ô⁄[ä_II€›€ìX\ô⁄[à»	»∞Ï‹öXI»à	…ﬂK^H	‹›
+ò]\Àú^[Y[ùôYT›
+_IK€€Z\‹Ë€»	‹›
+ò]\Àò€€[Z\‹⁄[€î›
+_IK[\‹›»	‹›
+ò]\Àúÿ[\’^›
+_IJXJK[
+	›	À»€\‹Œà	‹K[ù[HK\›õ€ô…À^àúõ
+öXŸJHJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^àõ›ö\⁄[€ò[»	’ò[‹àHô[ôH^XöY»[HõŸ]‹…»à	‘ôpÈ€»Hô[ôHò]XÿY»
+õŸ]‹ I»JK[
+	›	À»€\‹Œà	‹K[ù[HK\›õ€ô…À^àúõ
+òX›XŸYöXŸJHJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	—Yô\ô[∞ÈÿH[ùôHò[‹àHô[ôHH›YŸ\öY…»JK[
+	›	À»€\‹ŒàK[ù[I‹òX›XŸYöXŸHöXŸHHåH»	»KXòY	»à	»K\‹⁄]]ôIﬂX^àX]òXú òX›XŸYöXŸHHöXŸJHåH»úõ
+
+Hà	‹òX›XŸYöXŸHöXŸH»	¯¢$à	»à	 »	ﬂIÿúõ
+X]òXú òX›XŸYöXŸHHöXŸJJ_XJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^àX‹õ»‹à[öYYH
+	‹õ›ö\⁄[€ò[»	›ò[‹à^XöY…»à	‹ôpÈ€»ò]XÿY…ﬂJXJK[
+	›	À»€\‹ŒàK[ù[I€X‹õ’[ö]»	»KXòY	»à	…ﬂX^àúõ
+X‹õ’[ö]
+HJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^àõ›ö\⁄[€ò[»	”X\ôŸ[H\›[XYHõ»ò[‹à^XöY…»à	”X\ôŸ[Hò]XÿYI»JK[
+	›	À»€\‹ŒàK[ù[I‹òX›XŸYX\ô⁄[àOHù[	âàòX›XŸYX\ô⁄[à»	»KXòY	»à	…ﬂX^àòX›XŸYX\ô⁄[àOHù[»	¯†%	»à	 òX›XŸYX\ô⁄[à
+àL
+Kù—ö^Y
+JKúô\XŸJ	ÀâÀ	À	 _IXJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^àX‹õ»‹à‹òHHòXò[»
+	‹õ›ö\⁄[€ò[»	›ò[‹à^XöY…»à	‹ôpÈ€»ò]XÿY…ﬂJXJK[
+	›	À»€\‹ŒàK[ù[I€X‹õ“‹òHOHù[	âàX‹õ“‹òH»	»KXòY	»à	…ﬂX^àX‹õ“‹òHOHù[»	¯†%	»àúõ
+X‹õ“‹òJHJWJKBà›\›“‹òHOHù[	âà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»‹à‹òHHòXò[…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›\›“‹òJHJWJKBàKôö[\äõ€€X[äJKBàõ›ö\⁄[€ò[	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\›Hò[‹à\\ôXŸH]]€X]Xÿ[Y[ùHõ»ÿY\›õ»‹ú]YHZ[ôH∞Ë€»0ËHôpÈ€»Hô[ôHÿ[õÀàÿ[ôH»ò[‹à[HõŸ]‹»\òHYö[öK[»€€[»ôpÈ€»ò]XÿYÀâ»JKBàJN√BàHÿ]⁄
+JH√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\›XãXÿ\ô	À	Ÿ]K\ŸX\ò⁄	Œàõò[YHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»KŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	⁄[ò€€\]…»JWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^àò[‹àHô[ôHõ»ÿY\›õŒà	‹ÿ]ôYÿ[TöXŸHOHù[»	€∞Ë€»[ôõ‹õXY…»àúõ
+ÿ]ôYÿ[TöXŸJ_KòJKBà[
+	‹	À»€\‹Œà	‹K\›]\…À^àúöY[ôQ\úõ‹äJHJKBàJN√BàCBàJN√BÉBà€€ú›ÿ\ô—[H[
+	Ÿ]âÀﬂKÿ\ô N√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	⁄âÀ»^à	‘ôpÈ€‹…»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»ò[‹àHô[ôH0ÍH»Y\€[»^XöY»[HõŸ]‹Àà]X[ô»Z[ôH∞Ë€»õ⁄Hÿ[õÀ»ÿY\›õ»[‹›òH]]€X]Xÿ[Y[ùH»ôpÈ€»›YŸ\öYŒ»‹»ô\›[Y‹»öXÿ[HY[ùYöXÿY‹»€€[»\›[X]]ò\Àà^HHYÿ[Y[ù»H€€Z\‹Ë€»[ùò[Hõ»Ë[›[Àâ»JKBàX›]ôTõŸX›Àõ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	–]]ôH[HõŸ]»\òHô\à›\›‹»HôpÈ€‹»›YŸ\öY‹Àâ»JCBàà[
+	Ÿ]âÀﬂK‹ŸX\ò⁄[ú]
+	–ù\ÿÿ\àõŸ]¯†)âÀÿ\ô—[	‹ôX€À\ŸX\ò⁄	 Kÿ\ô—[JKBàJN√BüCBÉBôù[ò›[€àúöY[ôQ\úõ‹äJH√BàYà
+H[ú›[òŸ[ŸàöXŸQ\úõ‹äHô]\õà	—Yö[òH»ôpÈ€»HŸ‹»‹»[ú›[[‹»\ÿY‹»ô\›HôXŸZ]KâŒ√BàYà
+H[ú›[òŸ[ŸàﬁX€Q\úõ‹äHô]\õà	“0ËH[H⁄X€»ò\»ôXŸZ]\»
+[XHôXŸZ]H€€ù0Í[HH⁄HY\€XJKâŒ√BàYà
+H[ú›[òŸ[ŸàZY[\úõ‹äHô]\õà	‘ô[ô[Y[ù»[ù∞Ë[Y»8†%ô\öYö\]YHHôXŸZ]KâŒ√BàYà
+H[ú›[òŸ[ŸàX\ö›\\úõ‹äHô]\õà	”X\ôŸ[H
+»^H
+»€€Z\‹Ë€»
+»[\‹›»€€X[HL	H›HXZ\»8†%Zù\›H‹»\òŸ[ùXZ\»HôXŸZ]H›H[HZù\›\ÀâŒ√BàYà
+H[ú›[òŸ[ŸàôYë\úõ‹äHô]\õà	–HôXŸZ]H\›HõŸ]»∞Ë€»õ⁄H[ò€€ùòYKâŒ√BàYà
+H[ú›[òŸ[Ÿà€€ùô\ú⁄[€ë\úõ‹äHô]\õà[öYYH[ò€€\]0Î]ô[
+	ŸKôúõ€_x°§âŸKùﬂJKà\ŸHHY\€XH[öYYH»[ú›[[Àò√Bàô]\õà›ö[ô H	âàKõY\‹ÿYŸH»KõY\‹ÿYŸHàJN√BüCBÉBãÀ»8• 8• €€X[ôH»XH
+õŸX›[€à\›»ô]à»ô]€‹ö H8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BãÀ»XX⁄õŸX›\»Hÿ\ôàî]X[ùYYHô]ö\›Hà
+ŸYYYúõ€HH^I‹»‹ô\úÀù]QUPìH[ôBãÀ»’‘ëQ8†%€»]ù[€À€X[ùX[ô]ö\›H\ú⁄\› KîõŸ^öY‹À—\›‹]YHà
+õŸXŸY[ô\[ô[ùŸÉBãÀ»ô]ö\›»8†%õ‹à›ÿ⁄À^ò\À‹à[ú[õôYù[ú KHôZ]»8ß$À[ôH[]H8ß%H€à]ù[€»][\ÀÉBãÀ»›‹ôY\à]H[àH€€X[ôHôX€‹ôà»õŸX›Yô]ö\›OÀôX[^òYÀôZ]»KàY]»\ú⁄\›BãÀ»“U’UHôK\ô[ô\à
+›òX›[€úÀú\ú⁄\›
+H€»[ú]»ŸY\õÿ›\Œ»[ôXÿ]‹ú»ôX€€\]H[àXŸKÉBôù[ò›[€à€€X[ôQ]\’⁄]õŸX› ›‹ôK›\ù[ô
+H√Bà€€ú›^\»Hô]»Ÿ]
+
+N√Bàõ‹à
+€€ú›‹ô\àŸà›‹ôKú›]Kô[ò€€Y[ô\ H√Bà€€ú›]HH]S€õJ‹ô\ãô[]ô\ûQ]JN√BàYà
+[‹ô\ãô\⁄\›[ò⁄XP]	âà]HèH›\ù	âà]HH[ô	âà‹ô\îõŸX›[€ä‹ô\äKú⁄^ôHà
+H^\ÀòY
+]JN√BàCBàõ‹à
+€€ú›€€X[ôHŸà›‹ôKú›]Kò€€X[ô\ H√Bà€€ú›]HH]S€õJ€€X[ôKô]H€€X[ôKöY
+N√BàYà
+]HèH›\ù	âà]HH[ô	âà
+€€X[ôKö][ú»◊JKõ[ô›à
+H^\ÀòY
+]JN√BàCBàô]\õàÀããô^\◊Kú€‹ù
+
+N√BüCBÉBôù[ò›[€à‹ô\ôYõŸX›[€ëõ‹ë]J›‹ôK]JH√Bà€€ú›‹ô\ôYHô]»X\
+
+N√Bàõ‹à
+€€ú›‹ô\àŸà›‹ôKú›]Kô[ò€€Y[ô\ H√BàYà
+‹ô\ãô\⁄\›[ò⁄XP]]S€õJ‹ô\ãô[]ô\ûQ]JHOOH]JH€€ù[ùYN√Bà‹ô\îõŸX›[€ä‹ô\ã‹ô\ôY
+N√BàCBàô]\õà‹ô\ôY√BüCBÉBôù[ò›[€à€€X[ôQ^TŸX›[€ä›]K[ö]€‹›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›\’Ÿ^HH]HOOHŸ^R[ú]
+
+N√Bà€€ú›‹ô\ôYH‹ô\ôYõŸX›[€ëõ‹ë]J›‹ôK]JN√Bà€€ú››‹ôYH›‹ôKôŸ]
+	ÿ€€X[ô\…À]JN√Bà€€ú›][\»Hô]»X\
+
+N√Bàõ‹à
+€€ú›][HŸà›‹ôYÀö][ú»◊JH][\ÀúŸ]
+][KúõŸX›Y√BàX[ùX[]NàX]õX^
+ù[Xô\ä][KõX[ùX[]Hœ»
+][Kúô]ö\›HOHù[»àù[Xô\ä][Kúô]ö\›JHH
+‹ô\ôYôŸ]
+][KúõŸX›Y
+H
+JJH
+KBà›ÿ⁄“[öX⁄X[àX]õX^
+ù[Xô\ä][Kú›ÿ⁄“[öX⁄X[
+H
+KôX[^òYŒàù[Xô\ä][KúôX[^òY HôZ]ŒàHZ][KôôZ]ÀBàJN√Bà]õŸX›Y»HÀããõô]»Ÿ]
+Àããõ‹ô\ôYöŸ^\ 
+Kããö][\ÀöŸ^\ 
+WJWKú€‹ù
+
+KäHOàõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀJOÀõò[YH	… Kõÿÿ[P€€\\ôJõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀäOÀõò[YH	… JJN√Bà€€ú›[ú›\ôHH
+õŸX›Y
+HOà√BàYà
+Z][\Àö\ õŸX›Y
+JH][\ÀúŸ]
+õŸX›Y»X[ùX[]Nà›ÿ⁄“[öX⁄X[àôX[^òYŒàôZ]Œàò[ŸHJN√Bàô]\õà][\ÀôŸ]
+õŸX›Y
+N√BàN√Bà€€ú›ô]ö\›SŸàH
+õŸX›Y
+HOà
+‹ô\ôYôŸ]
+õŸX›Y
+H
+H
+»
+][\ÀôŸ]
+õŸX›Y
+OÀõX[ùX[]H
+N√Bà€€ú›\ú⁄\›H
+
+HOà√Bà€€ú›][ú»HÀããö][\Àô[ùöY\ 
+WKôö[\ä
+À][WJHOà][KõX[ùX[]Hà][Kú›ÿ⁄“[öX⁄X[à][KúôX[^òY»à][KôôZ] KõX\
+
+‹õŸX›Y][WJHOà
+»õŸX›YX[ùX[]Nà][KõX[ùX[]H›ÿ⁄“[öX⁄X[à][Kú›ÿ⁄“[öX⁄X[ôX[^òYŒà][KúôX[^òY»ôZ]ŒàHZ][KôôZ]»JJN√Bà›òX›[€úÀú\ú⁄\›
+
+ HOà»Yà
+][úÀõ[ô›
+HÀù\Ÿ\ù€€X[ôJ»Yà]K]K][ú»JN»[ŸHYà
+ÀôŸ]
+	ÿ€€X[ô\…À]JJHÀúô[[›ôP€€X[ôJ]JN»JN√BàN√Bà€€ú›[ôXÿ]‹ú»H[
+	Ÿ]âÀ»€\‹Œà	‹KX€€X[ôKZ[ô	»JN√Bà€€ú›ôX€€\]HH
+
+HOà√Bà][õôYH»]õŸXŸYH»]]òZ[XõHH»]€‹›H√Bàõ‹à
+€€ú›õŸX›YŸàõŸX›Y H√Bà€€ú›^X›YHù[Xô\äô]ö\›SŸäõŸX›Y
+JH√Bà€€ú›€ôHHù[Xô\ä][\ÀôŸ]
+õŸX›Y
+OÀúôX[^òY H√Bà[õôY
+œH^X›Y»õŸXŸY
+œH€ôN»]òZ[XõH
+œHX]õX^
+
+][\ÀôŸ]
+õŸX›Y
+OÀú›ÿ⁄“[öX⁄X[
+H
+»€ôHH
+‹ô\ôYôŸ]
+õŸX›Y
+H
+JN»€‹›
+œH€ôH
+à[ö]€‹›
+õŸX›Y
+N√BàCBà[ôXÿ]‹úÀúô\XŸP⁄[ô[ä[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[
+	›âÀﬂKŸ[
+	›	À»^à	—[ò€€Y[ôY»
+»]ù[€»0≠»õŸ^öY…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	Ÿõ]ù[J[õôY
+_H0≠»	Ÿõ]ù[JõŸXŸY
+_XJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	—\‹€∞Î]ô[\òHô[ôI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà\’Ÿ^H»	ÿ€YY\‹€ö]ô[	»à€YY\‹€ö]ô[IŸ]_X^à	Ÿõ]ù[J]òZ[XõJ_H[òJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»HõŸpÈË€»ôY⁄\›òYI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà\’Ÿ^H»	ÿ€YX›\›…»à€YX›\›ÀIŸ]_X^àúõ
+€‹›
+HJWJKBàJJN√BàN√Bà€€ú›\›H[
+	Ÿ]âÀ»€\‹Œà	‹KX€Y[\›	»JN√Bà€€ú›][Pÿ\ôH
+õŸX›Y
+HOà√Bà€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…ÀõŸX›Y
+N√Bà€€ú›][HH[ú›\ôJõŸX›Y
+N√Bà€€ú›]ù[€»H[‹ô\ôYö\ õŸX›Y
+N√Bà€€ú›[õôYH[
+	‹‹[âÀ»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ô]ö\›IÀ^àõ]ù[J‹ô\ôYôŸ]
+õŸX›Y
+H
+HJN√Bà€€ú›X[ùX[H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ	Ÿ]K]\›Y	Œà	ÿ€Y[X[ùX[	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà][KõX[ùX[]H»õ]ù[J][KõX[ùX[]JHà	…À	ÿ\öXK[Xô[	Œà	‹õŸpÈË€»]ù[ÿI»JN√Bà€€ú›[ö]X[H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\›ÿ⁄ÀZ[ö]X[	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà][Kú›ÿ⁄“[öX⁄X[»õ]ù[J][Kú›ÿ⁄“[öX⁄X[
+Hà	…À	ÿ\öXK[Xô[	Œà	Ÿ\›‹]YH∞ËH^\›[ùI»JN√Bà€€ú›õŸXŸYH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ôX[^òY…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà][KúôX[^òY»»õ]ù[J][KúôX[^òY Hà	…À	ÿ\öXK[Xô[	Œà	‹õŸ^öY‹»⁄ôI»JN√Bà€€ú›€ôHH[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	À	Ÿ]K]\›Y	Œà	ÿ€YYôZ]…À	ÿ\öXK[Xô[	Œà	ŸôZ]…»JN»€ôKò⁄X⁄ŸYH][KôôZ]Œ√Bà€€ú›ò[[òŸHH[
+	‹‹[âÀ»€\‹Œà	‹K[]]YKY^ŸY	»JN√Bà€€ú›\]Pò[[òŸHH
+
+HOà√Bà€€ú›ô[XZ[ö[ô»HX]õX^
+
+ù[Xô\äô]ö\›SŸäõŸX›Y
+JH
+HH
+ù[Xô\ä][Kú›ÿ⁄“[öX⁄X[
+H
+HH
+ù[Xô\ä][KúôX[^òY H
+JN√Bà€€ú›]òZ[XõHHX]õX^
+
+ù[Xô\ä][Kú›ÿ⁄“[öX⁄X[
+H
+H
+»
+ù[Xô\ä][KúôX[^òY H
+HH
+‹ô\ôYôŸ]
+õŸX›Y
+H
+JN√Bàò[[òŸKù^€€ù[ùH‹ô[XZ[ö[ô»à»ÿ[»HõŸ^ö\éà	Ÿõ]ù[Jô[XZ[ö[ô _Xà	…À]òZ[XõHà»\‹€∞Î]ô[\òHô[ôNà	Ÿõ]ù[J]òZ[XõJ_Xà	…◊Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 N√BàN√Bà€€ú›ÿ\ôH[
+	Ÿ]âÀ»€\‹ŒàKX€YZ][I⁄][KôôZ]»»	»KY€ôI»à	…ﬂXJN√BàX[ùX[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»][KõX[ùX[]HHX]õX^
+\úŸSù[JX[ùX[ùò[YJH
+N»\]Pò[[òŸJ
+N»ôX€€\]J
+N»\ú⁄\›
+
+N»JN√Bà[ö]X[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»][Kú›ÿ⁄“[öX⁄X[HX]õX^
+\úŸSù[J[ö]X[ùò[YJH
+N»\]Pò[[òŸJ
+N»ôX€€\]J
+N»\ú⁄\›
+
+N»JN√BàõŸXŸYòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»][KúôX[^òY»HX]õX^
+\úŸSù[JõŸXŸYùò[YJH
+N»\]Pò[[òŸJ
+N»ôX€€\]J
+N»\ú⁄\›
+
+N»JN√Bà€ôKòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»][KôôZ]»H€ôKò⁄X⁄ŸY»ÿ\ôò€\‹”\›ùŸŸ€J	‹KY€ôIÀ€ôKò⁄X⁄ŸY
+N»\ú⁄\›
+
+N»JN√Bà€€ú›ô[[›ôHH]ù[€»»[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	ÿ€YY[	À]Nà	—^€Z\àH€€X[ôIÀ€ò€X⁄Œà
+
+HOà»][\Àô[]JõŸX›Y
+N»õŸX›Y»HõŸX›YÀôö[\ä
+Y
+HOàYOOHõŸX›Y
+N»ÿ\ôúô[[›ôJ
+N»ôX€€\]J
+N»\ú⁄\›
+
+N»HK	Â… Hàù[√Bàÿ\ôò\[ô
+Bà[
+	Ÿ]âÀ»€\‹Œà	‹KX€YZXY	»KŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõŸX›Àõò[YH	 õŸ]»ô[[›öY I»JK]ù[€»	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	ÿ]ù[€…»JKô[[›ôWKôö[\äõ€€X[äJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KX€YYöY[…»KŸ[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	‘]X[ùYYH[ò€€Y[ôYI»JK[õôYJK[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	‘õŸpÈË€»]ù[ÿI»JKX[ùX[JK[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	—\›‹]YH∞ËH^\›[ùI»JK[ö]X[JK[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	‘õŸ^öY‹»⁄ôI»JKõŸXŸYJK[
+	€Xô[	À»€\‹Œà	‹KX€YYôZ]…»KŸ€ôK[
+	‹‹[âÀ»^à	—ôZ]…»JWJWJKò[[òŸKBà
+N√Bà\]Pò[[òŸJ
+N√Bàô]\õàÿ\ô√BàN√Bà€€ú›ô[ô\ì\›H
+
+HOà\›úô\XŸP⁄[ô[äããäõŸX›YÀõ[ô›»õŸX›YÀõX\
+][Pÿ\ô
+HàŸ[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H][HHõŸpÈË€»ô\›H]Kâ»JWJJN√Bà€€ú›ŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À	Ÿ]K]\›Y	Œà\’Ÿ^H»	ÿ€Y\õŸŸX\ò⁄	»à€Y\õŸŸX\ò⁄IŸ]_X\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	–YX⁄[€ò\àõŸ]»]ù[€»ô\›HXx†)â»JN√Bà€€ú››YŸŸ\›[€ú»H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄K\›YŸŸ\›	À›[Nà	Ÿ\‹^Nõõ€ôI»JN√BàŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›]Y\ûHHõ‹õJŸX\ò⁄ùò[YJN√Bà€€ú›X]⁄\»H]Y\ûH»›‹ôKú›]KúõŸX›Àôö[\ä
+
+HOàõŸX›\–X›]ôJ
+H	âàõ‹õJõò[YJKö[ò€Y\ ]Y\ûJH	âàZ][\Àö\ öY
+H	âà[‹ô\ôYö\ öY
+JKú€XŸJäHà◊N√Bà›YŸŸ\›[€úÀú›[Kô\‹^HHX]⁄\Àõ[ô›»	…»à	€õ€ôIŒ√Bà›YŸŸ\›[€úÀúô\XŸP⁄[ô[äããõX]⁄\ÀõX\
+
+õŸX›
+HOà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K]\›Y	Œà\’Ÿ^H»	ÿ€Y\õŸô\›[	»à€Y\õŸô\›[IŸ]_X€ò€X⁄Œà
+
+HOà√BàYà
+\–ù[ôTõŸX›
+õŸX›
+JH»›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€€X[ôKXù[ôKXY	À]KõŸX›YàõŸX›öYJN»ô]\õé»CBà][\ÀúŸ]
+õŸX›öY»X[ùX[]NàK›ÿ⁄“[öX⁄X[àôX[^òYŒàôZ]Œàò[ŸHJN»õŸX›YÀú\⁄
+õŸX›öY
+N»õŸX›YÀú€‹ù
+
+KäHOàõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀJOÀõò[YH	… Kõÿÿ[P€€\\ôJõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀäOÀõò[YH	… JJN√BàŸX\ò⁄ùò[YHH	…Œ»›YŸŸ\›[€úÀú›[Kô\‹^HH	€õ€ôIŒ»ô[ô\ì\›
+
+N»ôX€€\]J
+N»\ú⁄\›
+
+N√BàHKŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõŸX›õò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹KXY	À^à	 …»JWJJJN√BàJN√Bà€€ú›‹X»HùZ[€€X[ôT‹X ›‹ôK]JN√Bà€€ú›‹ô\ú»H‹XÀô‹õ›\Àõ[ô›»[
+	Ÿ]Z[…À»€\‹Œà	‹KZ\›‹ûI»K√Bà[
+	‹›[[X\ûIÀ»^àô\àYY‹»Y‹ù\Y‹»‹à€Y[ùH
+	‹‹XÀô‹õ›\Àõ[ô›JXJKBàããú‹XÀô‹õ›\ÀõX\
+
+‹õ›\
+HOà[
+	Ÿ]âÀ»€\‹Œà	‹K\ô]öY]ÀY‹õ›\	»KŸ[
+	‹›õ€ô…À»^à‹õ›\ò€Y[ùò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à‹õ›\ö][\ÀõX\
+
+][JHOà	Ÿõ]ù[J][Kú]J_pÂ»	⁄][Kõò[Y_X
+Köõ⁄[ä	»0≠»	 HJK‹õ›\õõ›\»	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àÿúÀéà	Ÿ‹õ›\õõ›\ﬂXJWKôö[\äõ€€X[äJJKBàJHàù[√Bàô[ô\ì\›
+
+N»ôX€€\]J
+N√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	ÿ€Y\\ö[ŸY^I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	⁄…À»€\‹Œà	‹KZ»KY‹õ›…À^àõ]]J	Ÿ]_ULéåå
+HJK[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	‹õŸX›YÀõ[ô›H][Jú XJWJKBà\›ŸX\ò⁄›YŸŸ\›[€úÀ[ôXÿ]‹úÀ‹ô\úÀBàKôö[\äõ€€X[äJN√BüCBÉBìS—S÷…ÿ€€X[ôKXù[ôKXY	◊HH
+›[Ÿ[
+HOà€€X[ôPù[ôT⁄Y]
+›[Ÿ[
+N√BìS—S÷…ÿ€€X[ôKX]ù[€ÀXY	◊HH
+›[Ÿ[
+HOà€€X[ôP]ù[€‘⁄Y]
+›[Ÿ[
+N√Bôù[ò›[€à€€X[ôP]ù[€‘⁄Y]
+›[Ÿ[
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›õŸX›»H›‹ôKú›]KúõŸX›Àôö[\äõŸX›\–X›]ôJKú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJK	‹Pîâ JN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀZ[éà[Ÿ[ú›\ùX^à[Ÿ[ô[ôò[YNà[Ÿ[ô]K	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€ÀY]I»JN√Bà€€ú›ŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	—Y⁄]H»õ€YH»õŸ]¯†)âÀ	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€À\ŸX\ò⁄	»JN√Bà€€ú››YŸŸ\›[€ú»H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄K\›YŸŸ\›	À›[Nà	Ÿ\‹^Nõõ€ôN€X^ZZY⁄åç€›ô\ôõ›À^Nò]]…»JN√Bà€€ú›⁄‹Ÿ[àH[
+	Ÿ]âÀ»€\‹Œà	‹KX€K\X⁄Ÿ\â»JN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà	ÃIÀ	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€À\]I»JN√Bà€€ú›‹[ö[ô‘›ÿ⁄»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà	Ã	À	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€À\›ÿ⁄…»JN√Bà]õŸX›YH	…Œ√Bà€€ú›⁄€‹ŸHH
+õŸX›
+HOà√BàõŸX›YHõŸX›öY√Bà⁄‹Ÿ[ãúô\XŸP⁄[ô[ä[
+	Ÿ]âÀ»€\‹Œà	‹KX€KX⁄\	»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^àõŸX›õò[YHJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	’õÿÿ\àõŸ]…À€ò€X⁄Œà
+
+HOà»õŸX›YH	…Œ»⁄‹Ÿ[ãúô\XŸP⁄[ô[ä
+N»ŸX\ò⁄ú›[Kô\‹^HH	…Œ»ŸX\ò⁄ùò[YHH	…Œ»ŸX\ò⁄ôõÿ›\ 
+N»HK	¯ß%I KBàJJN√BàŸX\ò⁄ùò[YHH	…Œ√BàŸX\ò⁄ú›[Kô\‹^HH	€õ€ôIŒ√Bà›YŸŸ\›[€úÀú›[Kô\‹^HH	€õ€ôIŒ√BàN√BàŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›]Y\ûHHõ‹õJŸX\ò⁄ùò[YJN√Bà€€ú›X]⁄\»H]Y\ûH»õŸX›Àôö[\ä
+õŸX›
+HOàõ‹õJõŸX›õò[YJKö[ò€Y\ ]Y\ûJJKú€XŸJ
+Hà◊N√Bà›YŸŸ\›[€úÀúô\XŸP⁄[ô[äããõX]⁄\ÀõX\
+
+õŸX›
+HOà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€À\ô\›[	À€ò€X⁄Œà
+
+HOà⁄€‹ŸJõŸX›
+HKŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõŸX›õò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹KXY	À^à	 …»JWJJJN√Bà›YŸŸ\›[€úÀú›[Kô\‹^HHX]⁄\Àõ[ô›»	…»à	€õ€ôIŒ√BàJN√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…ÀõŸX›Y
+N√Bà€€ú›[[›[ùH\úŸSù[J]Kùò[YJN√BàYà
+Y]Kùò[YH]Kùò[YH[Ÿ[ú›\ù]Kùò[YHà[Ÿ[ô[ô
+H»]Kôõÿ›\ 
+N»ô]\õé»CBàYà
+\õŸX›
+H»ŸX\ò⁄ôõÿ›\ 
+N»ô]\õé»CBà€€ú››ÿ⁄»H\úŸSù[J‹[ö[ô‘›ÿ⁄Àùò[YJN√BàYà
+J[[›[ùà
+H	âàJ›ÿ⁄»à
+JH»]Kôõÿ›\ 
+N»ô]\õé»CBàYà
+›ÿ⁄»OHù[›ÿ⁄»
+H»‹[ö[ô‘›ÿ⁄Àôõÿ›\ 
+N»ô]\õé»CBàYà
+\–ù[ôTõŸX›
+õŸX›
+JH√Bà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€€X[ôKXù[ôKXY	À]Nà]Kùò[YKõŸX›Y]Nà[[›[ùJN√Bàô]\õé√BàCBà›òX›[€úÀõ]]]J
+ HOà√Bà€€ú››\úô[ùHÀôŸ]
+	ÿ€€X[ô\…À]Kùò[YJN√Bà€€ú›ûRYHô]»X\
+
+›\úô[ùÀö][ú»◊JKõX\
+
+][JHOà⁄][KúõŸX›Y»ããö][HWJJN√Bà€€ú›õ›»HûRYôŸ]
+õŸX›Y
+H»õŸX›YôX[^òYŒàôZ]Œàò[ŸHN√Bà€€ú›‹ô\ôY]HH‹ô\ôYõŸX›[€ëõ‹ë]JÀ]Kùò[YJKôŸ]
+õŸX›Y
+H√Bàõ›ÀõX[ùX[]HHX]õX^
+ù[Xô\äõ›ÀõX[ùX[]Hœ»
+õ›Àúô]ö\›HOHù[»àù[Xô\äõ›Àúô]ö\›JHH‹ô\ôY]JJH
+H
+»X]õX^
+[[›[ù
+N√Bàõ›Àú›ÿ⁄“[öX⁄X[HX]õX^
+ù[Xô\äõ›Àú›ÿ⁄“[öX⁄X[
+H
+H
+»›ÿ⁄Œ√Bà[]Hõ›Àúô]ö\›N√Bàõ›ÀôôZ]»Hò[ŸN√BàûRYúŸ]
+õŸX›Yõ› N√BàÀù\Ÿ\ù€€X[ôJ»Yà]Kùò[YK]Nà]Kùò[YK][úŒàÀããòûRYùò[Y\ 
+WHJN√BàJN√BàCBàô]\õà⁄Y]
+»]Nà	“[ò€Z\à][H]ù[€»òH€€X[ôIÀõ›‹Œà√Bà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\ÿ€€H[XH]H»\∞Î[Ÿ»H»õŸ]»HõŸ^ö\à\òH\›‹]YH›Hõ€ùH[ùôYÿKà»][H\\ôXŸ\∞ËHòH€€X[ôH\‹ŸHXKâ»JKBàöY[
+	—]HHõŸpÈË€…À]JKBàöY[
+	‘õŸ]…À[
+	Ÿ]âÀﬂK‹ŸX\ò⁄›YŸŸ\›[€úÀ⁄‹Ÿ[óJJKBàöY[
+	‘]X[ùYYH]ù[ÿHHõŸ^ö\âÀ]JKBàöY[
+	—\›‹]YH∞ËH^\›[ùIÀ‹[ö[ô‘›ÿ⁄ KBà\õŸX›Àõ[ô›	âà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	–ÿY\›ôH[HõŸ]»\òH[ò€Z\àõŸpÈË€»]ù[ÿKâ»JKBàKôö[\äõ€€X[äK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	ÿ€YX]ù[€À\ÿ]ôIÀÿ]ôSXô[à	“[ò€Z\àòH€€X[ôI»JN√BüCBôù[ò›[€à€€X[ôPù[ôT⁄Y]
+›[Ÿ[
+H√Bà€€ú›»›‹ôHHH›»€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…À[Ÿ[úõŸX›Y
+N√BàYà
+\õŸX›Z\–ù[ôTõŸX›
+õŸX›
+JHô]\õà⁄Y]
+»]Nà	–€€öù[ù»∞Ë€»[ò€€ùòY…Àõ›‹Œà◊HJN√Bà€€ú›ù[ôT]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	ÿ€YXù[ôK\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNàõ]ù[J[Ÿ[ú]HJHJN√Bà€€ú›⁄[ô[àH◊N√Bà€€ú›][\–õﬁH[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»JN√Bà€€ú›ÿ[ôY]\»H›‹ôKú›]KúõŸX›Àôö[\ä
+
+HOàõŸX›\–X›]ôJ
+H	âàZ\–ù[ôTõŸX›
+
+H	âàöYOOHõŸX›öY
+N√Bà€€ú›ô[ô\àH
+
+HOà√Bà€€ú›\›H⁄[ô[ãõX\
+
+⁄[[ô^
+HOà√Bà€€ú›H›‹ôKôŸ]
+	‹õŸX›…À⁄[úõŸX›Y
+N»€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNàõ]ù[J⁄[ú]JHJN√Bà]KòY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà»⁄[ú]HH\úŸSù[J]Kùò[YJH»JN√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»K‹]K[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^àÀõò[YH	 õŸ]»ô[[›öY I»JK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà»⁄[ô[ãú‹XŸJ[ô^JN»ô[ô\ä
+N»HK	¯ß%I WJN√BàJN√Bà€€ú›ŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À	Ÿ]K]\›Y	Œà	ÿ€YXù[ôK\õŸX›	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	—Y⁄]H»õŸ]»\òH[ò€Z\∏†)â»JN√Bà€€ú››YŸŸ\›[€ú»H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄K\›YŸŸ\›	À›[Nà	Ÿ\‹^Nõõ€ôN€X^ZZY⁄ååå€›ô\ôõ›À^Nò]]…»JN√BàŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›]Y\ûHHõ‹õJŸX\ò⁄ùò[YJN√Bà€€ú›X]⁄\»H]Y\ûH»ÿ[ôY]\Àôö[\ä
+
+HOàõ‹õJõò[YJKö[ò€Y\ ]Y\ûJJKú€XŸJ
+Hà◊N√Bà›YŸŸ\›[€úÀúô\XŸP⁄[ô[äããõX]⁄\ÀõX\
+
+
+HOà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K]\›Y	Œà	ÿ€YXù[ôK\ô\›[	À€ò€X⁄Œà
+
+HOà√Bà€€ú››\úô[ùH⁄[ô[ãôö[ô
+
+⁄[
+HOà⁄[úõŸX›YOOHöY
+N√BàYà
+›\úô[ù
+H›\úô[ùú]H
+œHN»[ŸH⁄[ô[ãú\⁄
+»õŸX›YàöY]NàHJN√Bàô[ô\ä
+N√BàHKŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹KXY	À^à	 …»JWJJJN√Bà›YŸŸ\›[€úÀú›[Kô\‹^HHX]⁄\Àõ[ô›»	…»à	€õ€ôIŒ√BàJN√Bà][\–õﬁúô\XŸP⁄[ô[ä[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K\›õ[ô›»\›àŸ[
+	€IÀ»€\‹Œà	‹KY[\HK\€IÀ^à	–YX⁄[€ôH‹»õŸ]‹»»€€öù[ùÀâ»JWJKÿ[ôY]\Àõ[ô›»[
+	Ÿ]âÀﬂK‹ŸX\ò⁄›YŸŸ\›[€ú◊JHà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”∞Ë€»0ËHõŸ]‹»€€][ú»]]õ‹»\òH[€ù\à\›H€€öù[ùÀâ»JJN√BàN√Bàô[ô\ä
+N√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›]HH\úŸSù[Jù[ôT]Kùò[YJN»Yà
+J]Hà
+HX⁄[ô[ãú€€YJ
+⁄[
+HOà⁄[ú]Hà
+JH»ù[ôT]Kôõÿ›\ 
+N»ô]\õé»CBà€€ú›ô\]Z\ôYH‹ô\îõŸX›[€ä»][úŒàﬁ»õŸX›YàõŸX›öY]Kù[ôR][\Œà⁄[ô[àWHJN√Bà€€ú›‹ô\ôYH‹ô\ôYõŸX›[€ëõ‹ë]J›‹ôK[Ÿ[ô]JN»€€ú››\úô[ùH›‹ôKôŸ]
+	ÿ€€X[ô\…À[Ÿ[ô]JN»€€ú›ûRYHô]»X\
+
+›\úô[ùÀö][ú»◊JKõX\
+
+][JHOà⁄][KúõŸX›Y»ããö][HWJJN√Bàõ‹à
+€€ú›‹õŸX›Y^òWHŸàô\]Z\ôY
+H√Bà€€ú›õ›»HûRYôŸ]
+õŸX›Y
+H»õŸX›YôX[^òYŒàôZ]Œàò[ŸHN√Bàõ›ÀõX[ùX[]HHX]õX^
+ù[Xô\äõ›ÀõX[ùX[]Hœ»
+õ›Àúô]ö\›HOHù[»àù[Xô\äõ›Àúô]ö\›JHH
+‹ô\ôYôŸ]
+õŸX›Y
+H
+JJH
+H
+»^òN√Bà[]Hõ›Àúô]ö\›N√Bàõ›ÀôôZ]»Hò[ŸN√BàûRYúŸ]
+õŸX›Yõ› N√BàCBà›òX›[€úÀõ]]]J
+ HOàÀù\Ÿ\ù€€X[ôJ»Yà[Ÿ[ô]K]Nà[Ÿ[ô]K][úŒàÀããòûRYùò[Y\ 
+WHJJN√BàCBàô]\õà⁄Y]
+»]NàYX⁄[€ò\à	ÿù[ôR⁄[ôXô[
+õŸX›
+_H0Ë€€X[ôXõ›‹ŒàŸ[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»KŸ[
+	‹›õ€ô…À»^àõŸX›õò[YHJK[
+	‹‹[âÀ»^à0≠»	Ÿõ]]J	€[Ÿ[ô]_ULéåå
+_XJWJKöY[
+]X[ùYYHH	ÿù[ôR⁄[ôXô[
+õŸX›
+Kù”›Ÿ\êÿ\ŸJ
+_\ÿù[ôT]JK[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘õŸ]‹»[ùõ»HÿYH€€öù[ù…»JK[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\ÿ€€H‹»õŸ]‹»\›H[€ùYŸ[KàH€€\‹⁄pÈË€»ŸH]Y\àHÿYHŸ\›H›H⁄]â»JK][\–õﬁ[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–\]ZHõÿÍà[ôZòH\[ò\»HõŸpÈË€Àà\òHôY⁄\›ò\à€Y[ùKôpÈ€À\ÿ€€ù»Hò[‹àHôXŸXô\ã‹öYH[XH[ò€€Y[ôKâ»JWK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	ÿ€YXù[ôK\ÿ]ôI»JN√BüCBÉBôù[ò›[€à€€X[ôT\ö[Ÿ[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›[ô⁄[ôT›‹ôHH›‹ôKù—[ô⁄[ôT›‹ôJ
+N√Bà€€ú›[ú»H\›[X]S[ú €€ôöY N√Bà€€ú›[ö]€‹›H
+õŸX›Y
+HOà»ûH»ô]\õàõŸX›[ö]€‹›
+[ô⁄[ôT›‹ôKõŸX›Y€€ôöYÀ[ú N»Hÿ]⁄»ô]\õà»HN√Bà€€ú››\ùH›ùöY]Àò€€X[ôT›\ùô\Ÿ]ò[ôŸJ	‹Ÿ[X[òI VÃN√Bà€€ú›[ôH›ùöY]Àò€€X[ôQ[ôô\Ÿ]ò[ôŸJ	‹Ÿ[X[òI VÃWN√Bà€€ú››\ù[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€Y]ŸYZÀ\›\ù	À\Nà	Ÿ]IÀò[YNà›\ùJN√Bà€€ú›[ô[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€Y]ŸYZÀY[ô	À\Nà	Ÿ]IÀò[YNà[ôJN√Bà€€ú›\]Tò[ôŸHH
+
+HOà√Bà€€ú›ô^›\ùH›\ù[ú]ùò[YH›\ù√Bà€€ú›ô^[ôH[ô[ú]ùò[YH	âà[ô[ú]ùò[YHèHô^›\ù»[ô[ú]ùò[YHàô^›\ù√Bà›òX›[€úÀúŸ]€€X[ôTò[ôŸJ»€€X[ôT›\ùàô^›\ù€€X[ôQ[ôàô^[ôJN√BàN√Bà›\ù[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ\]Tò[ôŸJN»[ô[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ\]Tò[ôŸJN√Bà€€ú›^\»H€€X[ôQ]\’⁄]õŸX› ›‹ôK›\ù[ô
+N√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	‘[ôZò[Y[ù»HôY⁄\›õ…»JK[
+	⁄âÀ»^à	–€€X[ôHHõŸpÈË€…»JWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ÿ€YX]ù[€ÀXY	À\ÿXõYà\›‹ôKú›]KúõŸX›Àú€€YJõŸX›\–X›]ôJK€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€€X[ôKX]ù[€ÀXY	À›\ù[ô]NàŸ^R[ú]
+
+HèH›\ù	âàŸ^R[ú]
+
+HH[ô»Ÿ^R[ú]
+
+Hà›\ùJHK	 »][H]ù[€… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ô]öY]…À\ÿXõYà^\Àõ[ô›OOH€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€€X[ôK\ô]öY]…À›\ù[ôJHK	’ö\›X[^ò\à»â KBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\\ö[Ÿ	»KŸöY[
+	—]H[öX⁄X[	À›\ù[ú]
+K[
+	‹‹[âÀ»€\‹Œà	‹K\\ö[ŸX\úõ›…À^à	ÿ]0ÍI»JKöY[
+	—]Hö[ò[	À[ô[ú]
+WJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–\\ôXŸ[H\[ò\»\»]\»€€HõŸ]‹»[ò€€Y[ôY‹»›HõŸpÈË€»]ù[ÿHôY⁄\›òYKàZù\›H]X[ùYY\»HôY⁄\›ôHHõŸpÈË€»\ô][Y[ùH[HÿYHXKâ»JKBàããô^\ÀõX\
+
+^JHOà€€X[ôQ^TŸX›[€ä›^K[ö]€‹›
+JKBà^\Àõ[ô›OOH	âà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	‘\∞Î[Ÿ»Ÿ[H[ò€€Y[ô\»›HõŸpÈË€»]ù[ÿHôY⁄\›òY\Àà\ŸH8†'
+»][H]ù[€¯†'H\òH[ôZò\à[XHõŸpÈË€Àâ»JKBàKôö[\äõ€€X[äJN√BüCBÉBôù[ò›[€à€€X[ôT[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›\»H›‹ôKù—[ô⁄[ôT›‹ôJ
+N√Bà€€ú›[ú»H\›[X]S[ú €€ôöY N√Bà€€ú›[ö]€‹›H
+Y
+HOà»ûH»ô]\õàõŸX›[ö]€‹›
+\ÀY€€ôöYÀ[ú N»Hÿ]⁄»ô]\õà»HN√BÉBà€€ú›]HH›ùöY]Àò€€X[ôQ]HŸ^R[ú]
+
+N√Bà€€ú›]R[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	ÿ€YY]IÀ\Nà	Ÿ]IÀò[YNà]HJN√Bà]R[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà›òX›[€úÀúŸ]€€X[ôQ]J]R[ú]ùò[YHŸ^R[ú]
+
+JJN√BÉBà€€ú›ò[ôŸT›\ùH›ùöY]Àò€€X[ôT›\ùô\Ÿ]ò[ôŸJ	‹Ÿ[X[òI VÃN√Bà€€ú›ò[ôŸQ[ôH›ùöY]Àò€€X[ôQ[ôô\Ÿ]ò[ôŸJ	‹Ÿ[X[òI VÃWN√Bà€€ú››\ù[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€Y]ŸYZÀ\›\ù	À\Nà	Ÿ]IÀò[YNàò[ôŸT›\ùJN√Bà€€ú›[ô[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿ€Y]ŸYZÀY[ô	À\Nà	Ÿ]IÀò[YNàò[ôŸQ[ôJN√Bà›\ù[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà√Bà€€ú››\ùH›\ù[ú]ùò[YHò[ôŸT›\ù√Bà€€ú›[ôH[ô[ú]ùò[YH	âà[ô[ú]ùò[YHèH›\ù»[ô[ú]ùò[YHà›\ù√Bà›òX›[€úÀúŸ]€€X[ôTò[ôŸJ»€€X[ôT›\ùà›\ù€€X[ôQ[ôà[ô€€X[ôQ]Nà›\ùJN√BàJN√Bà[ô[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà√Bà€€ú›[ôH[ô[ú]ùò[YHò[ôŸQ[ô√Bà€€ú››\ùH›\ù[ú]ùò[YH	âà›\ù[ú]ùò[YHH[ô»›\ù[ú]ùò[YHà[ô√Bà›òX›[€úÀúŸ]€€X[ôTò[ôŸJ»€€X[ôT›\ùà›\ù€€X[ôQ[ôà[ô€€X[ôQ]Nà›\ùJN√BàJN√BÉBà€€ú›ò[ôŸQ^\»H◊N√Bà€€ú››\ú€‹àHô]»]J	‹ò[ôŸT›\ùULéåå
+N√Bà€€ú›\›Hô]»]J	‹ò[ôŸQ[ôULéåå
+N√Bà⁄[H
+›\ú€‹àH\›	âàò[ôŸQ^\Àõ[ô›ÃJH√Bàò[ôŸQ^\Àú\⁄
+	ÿ›\ú€‹ãôŸ]ù[YX\ä
+_KI‘›ö[ô ›\ú€‹ãôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KI‘›ö[ô ›\ú€‹ãôŸ]]J
+JKúY›\ù
+ã	Ã	 _X
+N√Bà›\ú€‹ãúŸ]]J›\ú€‹ãôŸ]]J
+H
+»JN√BàCBà€€ú›ŸYZ–ÿ\ô»Hò[ôŸQ^\ÀõX\
+
+^JHOà√Bà€€ú›[õôYHô]»X\
+
+N√Bàõ‹à
+€€ú›‹ô\àŸà›‹ôKú›]Kô[ò€€Y[ô\ H√BàYà
+‹ô\ãô\⁄\›[ò⁄XP]]S€õJ‹ô\ãô[]ô\ûQ]JHOOH^JH€€ù[ùYN√Bàõ‹à
+€€ú›][HŸà‹ô\ãö][ú»◊JH[õôYúŸ]
+][KúõŸX›Y
+[õôYôŸ]
+][KúõŸX›Y
+H
+H
+»
+ù[Xô\ä][Kú]JH
+JN√BàCBà€€ú›€€[X[ôH›‹ôKôŸ]
+	ÿ€€X[ô\…À^JN√Bà€€ú›õŸXŸYHô]»X\
+
+€€[X[ôÀö][ú»◊JKõX\
+
+][JHOà⁄][KúõŸX›Yù[Xô\ä][KúôX[^òY HJJN√Bà€€ú›Y»HÀããõô]»Ÿ]
+Àããú[õôYöŸ^\ 
+KããúõŸXŸYöŸ^\ 
+WJWN√Bà€€ú›[ô\»HYÀú€‹ù
+
+KäHOàõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀJOÀõò[YH	… Kõÿÿ[P€€\\ôJõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀäOÀõò[YH	… JJKõX\
+
+Y
+HOà√Bà€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…ÀY
+N√Bà€€ú›^X›YH[õôYôŸ]
+Y
+H»€€ú›€ôHHõŸXŸYôŸ]
+Y
+H√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^àõŸX›Àõò[YH	 õŸ]»ô[[›öY I»JK[
+	‹›õ€ô…À»^à	Ÿõ]ù[J^X›Y
+_Hô]ö\›»0≠»	Ÿõ]ù[J€ôJ_HõŸ^öYÿJWJN√BàJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹ŒàKY]Z[Xÿ\ô	Ÿ^HOOH]H»	»KZ[ú⁄Y⁄]X[	»à	…ﬂX	Ÿ]K]\›Y	Œà	ÿ€Y]ŸYZÀY^I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^àõ]]J	Ÿ^_ULéåå
+HJKBà[
+	ÿù]€âÀ»€\‹ŒàKXùàK\€IŸ^HOOH]H»	»K\ö[X\ûI»à	…ﬂX€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]€€X[ôQ]J^JHK^HOOH]H»	—XHŸ[X⁄[€òY…»à	–Xúö\àXI KBàJKBà[ô\Àõ[ô›»[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K[ô\ Hà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	‘Ÿ[HõŸpÈË€»ô]ö\›Kâ»JKBàJN√BàJN√Bà€€ú›ŸYZ”›ô\ùöY]»H[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–ÿ[[ô0Ë\ö[»HõŸpÈË€…»JK[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘\∞Î[Ÿ»Ÿ[X⁄[€òY…»JWJWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\\ö[Ÿ	»KŸöY[
+	—]H[öX⁄X[	À›\ù[ú]
+K[
+	‹‹[âÀ»€\‹Œà	‹K\\ö[ŸX\úõ›…À^à	ÿ]0ÍI»JKöY[
+	—]Hö[ò[	À[ô[ú]
+WJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\ÿ€€H»ö[YZ\õ»H»0Óõ[[»XH€€[»[H[XHô\Ÿ\ùòHHöXYŸ[Kà»⁄\›[XHôpÓõôH\»[ò€€Y[ô\»HÿYH]HŸ[H[\ò\à‹»YY‹Àâ»JKBàããùŸYZ–ÿ\ôÀBàò[ôŸQ^\Àõ[ô›èHÃH	âà[
+	‹	À»€\‹Œà	‹KXÿ[›]	À^à	‘\òHX[ù\àHZ]\òH⁄[\\ÀHö\›X[^òpÈË€»[‹›òHõ»pË^[[»ÃHX\»‹àô^ãâ»JKBàKôö[\äõ€€X[äJN√BÉBàÀ»ô]ö\›»ŸYYYúõ€HH^I‹»‹ô\ú»
+\àõŸX›
+KÉBà€€ú›‹ô\ôYHô]»X\
+
+N√Bàõ‹à
+€€ú›HŸà›‹ôKú›]Kô[ò€€Y[ô\ H√BàYà
+Kô\⁄\›[ò⁄XP]
+Kô[]ô\ûQ]H	… Kú€XŸJL
+HOOH]JH€€ù[ùYN√Bàõ‹à
+€€ú›]Ÿà
+Kö][ú»◊JJH‹ô\ôYúŸ]
+]úõŸX›Y
+‹ô\ôYôŸ]
+]úõŸX›Y
+H
+H
+»
+ù[Xô\ä]ú]JH
+JN√BàCBàÀ»€‹ö⁄[ô»€‹HŸàH›‹ôY€€X[ôNàõŸX›Y8°§à»ô]ö\›_[ôYö[ôYôX[^òYÀôZ]»KÉBà€€ú››‹ôYH›‹ôKôŸ]
+	ÿ€€X[ô\…À]JN√Bà€€ú›][\»Hô]»X\
+
+N√Bàõ‹à
+€€ú›]Ÿà
+›‹ôYÀö][ú»◊JJH][\ÀúŸ]
+]úõŸX›Y»ô]ö\›Nà]úô]ö\›HOHù[»[ôYö[ôYàù[Xô\ä]úô]ö\›JKôX[^òYŒàù[Xô\ä]úôX[^òY HôZ]ŒàHZ]ôôZ]»JN√BÉBàÀ»‹ô\àõŸX›»8¢*à›‹ôY
+]ù[€ HõŸX›ÀûHò[YKà]]XõH€»Y‹ô[[›ôH]ù[€»ôK\ô[ô\àõ›‹ÀÉBà]Y»HÀããõô]»Ÿ]
+Àããõ‹ô\ôYöŸ^\ 
+Kããö][\ÀöŸ^\ 
+WJWCBàú€‹ù
+
+KäHOàõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀJOÀõò[YH	… Kõÿÿ[P€€\\ôJõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀäOÀõò[YH	… JJN√BÉBà€€ú›[ú›\ôHH
+Y
+HOà»]àH][\ÀôŸ]
+Y
+N»Yà
+]äH»àH»ô]ö\›Nà[ôYö[ôYôX[^òYŒàôZ]Œàò[ŸHN»][\ÀúŸ]
+YäN»Hô]\õàé»N√Bà€€ú›ô]ö\›SŸàH
+Y
+HOà»€€ú›àH][\ÀôŸ]
+Y
+N»ô]\õàà	âàãúô]ö\›HOHù[»ãúô]ö\›Hà
+‹ô\ôYôŸ]
+Y
+H
+N»N√Bà€€ú›\–]ù[€»H
+Y
+HOà[‹ô\ôYö\ Y
+N√BÉBàù[ò›[€à\ú⁄\›€€X[ôJ
+H√Bà€€ú›][ú»H◊N√Bàõ‹à
+€€ú›‹YóHŸà][\ H√BàYà
+
+ãúô]ö\›HOHù[	âàãúô]ö\›Hà
+H
+ãúôX[^òY»
+HàãôôZ] H√Bà][úÀú\⁄
+»õŸX›YàYããäãúô]ö\›HOHù[»»ô]ö\›Nàãúô]ö\›HHàﬂJKôX[^òYŒàãúôX[^òY»ôZ]ŒàH]ãôôZ]»JN√BàCBàCBà›òX›[€úÀú\ú⁄\›
+
+ HOà»Yà
+][úÀõ[ô›
+HÀù\Ÿ\ù€€X[ôJ»Yà]K]K][ú»JN»[ŸHYà
+ÀôŸ]
+	ÿ€€X[ô\…À]JJHÀúô[[›ôP€€X[ôJ]JN»JN√BàCBÉBà€€ú›[ô[H[
+	Ÿ]âÀ»€\‹Œà	‹KX€€X[ôKZ[ô	À	Ÿ]K]\›Y	Œà	ÿ€YZ[ôXÿY‹ô\…»JN√Bàù[ò›[€àôX€€\]J
+H√Bà]›\›»H›[ô]àH›[õŸH\‹€ö]ô[H√Bàõ‹à
+€€ú›YŸàY H√Bà€€ú›õŸH][\ÀôŸ]
+Y
+OÀúôX[^òY»√Bà€€ú›ô]ö\›HHô]ö\›SŸäY
+N√Bà›\›»
+œHõŸ
+à[ö]€‹›
+Y
+N√Bà›[ô]à
+œHô]ö\›N»›[õŸ
+œHõŸ√Bà\‹€ö]ô[
+œHX]õX^
+õŸHô]ö\›JN»À»õŸXŸYô^[€ôHô]ö\›H8°§àúôYH»Ÿ[BàCBà[ô[úô\XŸP⁄[ô[äBà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[
+	›âÀﬂKŸ[
+	›	À»^à	‘ô]ö\›»0≠»õŸ^öY…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	Ÿõ]ù[J›[ô]ä_H0≠»	Ÿõ]ù[J›[õŸ
+_XJWJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	—\‹€∞Î]ô[\òHô[ôI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà	ÿ€YY\‹€ö]ô[	À^à	Ÿõ]ù[J\‹€ö]ô[
+_H[òJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»HõŸpÈË€…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà	ÿ€YX›\›…À^àúõ
+›\› HJWJKBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘õŸ^öYÀŸ\›‹]YHH»]YHõÿÍàëVà
+∞Ë€»»]YHô[ô]JH8†%ò[HòH\›‹]YH›HõŸpÈË€»^òKà»]YH\‹ÿ\à»ô]ö\›»öXÿH\‹€∞Î]ô[òHô[ô\à]ù[€Àà»[öZ\õ»ôXŸXöY»H»X‹õ»öXÿ[H[HHôXŸXô\à»ô[]0Ï‹ö[‹Àâ»JKBà
+N√BàCBÉBà€€ú›\›H[
+	Ÿ]âÀ»€\‹Œà	‹KX€Y[\›	»JN√Bàù[ò›[€à][Pÿ\ô
+Y
+H√Bà€€ú›H›‹ôKôŸ]
+	‹õŸX›…ÀY
+N√Bà€€ú›àH][\ÀôŸ]
+Y
+H»ô]ö\›Nà[ôYö[ôYôX[^òYŒàôZ]Œàò[ŸHN√Bà€€ú›]ù[€»H\–]ù[€ Y
+N√Bà€€ú›ô]í[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ô]ö\›IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNàãúô]ö\›HOHù[»õ]ù[Jãúô]ö\›JHà
+‹ô\ôYôŸ]
+Y
+H»õ]ù[J‹ô\ôYôŸ]
+Y
+JHà	… K	ÿ\öXK[Xô[	Œà	‹]X[ùYYHô]ö\›I»JN√Bà€€ú›õŸ[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\]IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ôX[^òY…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNàãúôX[^òY»»õ]ù[JãúôX[^òY Hà	…À	ÿ\öXK[Xô[	Œà	‹õŸ^öY‹ÀŸ\›‹]YI»JN√Bà€€ú›⁄»H[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	À	Ÿ]K]\›Y	Œà	ÿ€YYôZ]…À	ÿ\öXK[Xô[	Œà	ŸôZ]…»JN»⁄Àò⁄X⁄ŸYHãôôZ]Œ√Bà€€ú›ÿ[»H[
+	‹‹[âÀ»€\‹Œà	‹K[]]YKY^ŸY	»JN√Bà€€ú›\ÿ[»H
+
+HOà»€€ú›õŸH][\ÀôŸ]
+Y
+OÀúôX[^òY»»€€ú›HõŸHô]ö\›SŸäY
+N»ÿ[Àù^€€ù[ùHà»\‹€∞Î]ô[\òHô[ôNà	Ÿõ]ù[J
+_Xà
+õŸà	âà»ÿ[»HõŸ^ö\éà	Ÿõ]ù[JY
+_Xà	… N»N√Bàô]í[ú]òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà»€€ú›àH\úŸSù[Jô]í[ú]ùò[YJN»[ú›\ôJY
+Kúô]ö\›HHàOHù[»[ôYö[ôYàé»\ÿ[ 
+N»ôX€€\]J
+N»\ú⁄\›€€X[ôJ
+N»JN√BàõŸ[ú]òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà»[ú›\ôJY
+KúôX[^òY»H\úŸSù[JõŸ[ú]ùò[YJH»\ÿ[ 
+N»ôX€€\]J
+N»\ú⁄\›€€X[ôJ
+N»JN√Bà€€ú›ÿ\ôH[
+	Ÿ]âÀ»€\‹Œà	‹KX€YZ][I»
+»
+ãôôZ]»»	»KY€ôI»à	… HJN√Bà⁄ÀòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»[ú›\ôJY
+KôôZ]»H⁄Àò⁄X⁄ŸY»ÿ\ôò€\‹”\›ùŸŸ€J	‹KY€ôIÀ⁄Àò⁄X⁄ŸY
+N»\ú⁄\›€€X[ôJ
+N»JN√Bà\ÿ[ 
+N√Bà€€ú›[H]ù[€»»[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	ÿ€YY[	À]Nà	—^€Z\àH€€X[ôIÀ€ò€X⁄Œà
+
+HOà»][\Àô[]JY
+N»Y»HYÀôö[\ä
+
+HOàOOHY
+N»ÿ\ôúô[[›ôJ
+N»ôX€€\]J
+N»\ú⁄\›€€X[ôJ
+N»HK	¯ß%I Hàù[√Bàÿ\ôò\[ô
+Bà[
+	Ÿ]âÀ»€\‹Œà	‹KX€YZXY	»K√Bà[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^à»õò[YHà	 õŸ]»ô[[›öY I»JKBà]ù[€»	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	ÿ]ù[€…»JKBà[BàKôö[\äõ€€X[äJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KX€YYöY[…»K√Bà[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	‘]X[ùYYHô]ö\›I»JKô]í[ú]JKBà[
+	€Xô[	À»€\‹Œà	‹KX€YYöY[	»KŸ[
+	‹‹[âÀ»^à	‘õŸ^öY‹À—\›‹]YI»JKõŸ[ú]JKBà[
+	€Xô[	À»€\‹Œà	‹KX€YYôZ]…»Kÿ⁄À[
+	‹‹[âÀ»^à	—ôZ]…»JWJKBàJKBàÿ[ÀBà
+N√Bàô]\õàÿ\ô√BàCBàù[ò›[€àô[ô\ì\›
+
+H√Bà\›úô\XŸP⁄[ô[äããäYÀõ[ô›»YÀõX\
+][Pÿ\ô
+CBààŸ[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”òYH\òH\›HXKàòpÈÿH[XH[ò€€Y[ôH€€H[ùôYÿHô\›H]K›HYX⁄[€ôH[HõŸ]»]ù[€»XòZ^Àâ»JWJJN√BàCBàô[ô\ì\›
+
+N√BàôX€€\]J
+N√BÉBàÀ»Y[à]ù[€»õŸX›
+›ÿ⁄»»õ€ùKY[ùôYÿH8†%õ›úõ€H[à‹ô\äKà\[ôY[àXŸH
+õ»ù[BàÀ»ôK\ô[ô\äK€»[à[ôö[Yõ›»›\ùö]ô\Œ»]\ú⁄\›»\»€€€à\»⁄H\\»Hô]ö\›K‹õŸ^öYÀÉBà€€ú›ŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À	Ÿ]K]\›Y	Œà	ÿ€Y\õŸŸX\ò⁄	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	–YX⁄[€ò\àõŸ]»]ù[€»
+\›‹]YKõ€ùH[ùôYÿJx†)â»JN√Bà€€ú›ô\›[»H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄K\›YŸŸ\›	À›[Nà	Ÿ\‹^Nõõ€ôI»JN√Bàù[ò›[€àô[ô\îô\›[ 
+H√Bà€€ú›HHõ‹õJŸX\ò⁄ùò[YJN√BàYà
+\JH»ô\›[Àú›[Kô\‹^HH	€õ€ôIŒ»ô\›[Àúô\XŸP⁄[ô[ä
+N»ô]\õé»CBà€€ú›X]⁄\»H›‹ôKú›]KúõŸX›Àôö[\ä
+
+HOàõŸX›\–X›]ôJ
+H	âàõ‹õJõò[YJKö[ò€Y\ JH	âàZ][\Àö\ öY
+H	âà[‹ô\ôYö\ öY
+JKú€XŸJäN√Bàô\›[Àú›[Kô\‹^HHX]⁄\Àõ[ô›»	…»à	€õ€ôIŒ√Bàô\›[Àúô\XŸP⁄[ô[äããõX]⁄\ÀõX\
+
+
+HOà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\õŸô\›[	À€ò€X⁄Œà
+
+HOà√Bà][\ÀúŸ]
+öY»ô]ö\›Nà[ôYö[ôYôX[^òYŒàôZ]Œàò[ŸHJN√BàY»HÀããõô]»Ÿ]
+ÀããúYÀöYJWKú€‹ù
+
+KäHOàõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀJOÀõò[YH	… Kõÿÿ[P€€\\ôJõ‹õJ›‹ôKôŸ]
+	‹õŸX›…ÀäOÀõò[YH	… JJN√BàŸX\ò⁄ùò[YHH	…Œ»ô[ô\îô\›[ 
+N»ô[ô\ì\›
+
+N√BàHKŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K[
+	‹›õ€ô…À»^àõò[YHJJK[
+	‹‹[âÀ»€\‹Œà	‹KXY	À^à	 …»JWJJJN√BàCBàŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	Àô[ô\îô\›[ N√BÉBàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘õŸpÈË€»Ÿ[X[ò[	»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ô]öY]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿ€€X[ôK\ô]öY]…À]HJHK	’ö\›X[^ò\à»â KBà]R[ú]BàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’ôZòHHõŸpÈË€»H∞Ë\ö[‹»X\»H[XHô^ãàXúòH[HXH\òH€€ôô\ö\à\»[ò€€Y[ô\ÀZù\›\à]X[ùYY\»HôY⁄\›ò\à»]YHõ⁄HõŸ^öYÀâ»JKBàŸYZ”›ô\ùöY]ÀBà[
+	⁄…À»€\‹Œà	‹KZ…À^à€€X[ôH»XH0≠»	Ÿõ]]J	Ÿ]_ULéåå
+_XJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–H]X[ùYYHô]ö\›Hô[H\»[ò€€Y[ô\»\›HXKàõÿÍàŸHZù\›\àH[õ›\à»]YHì—VíUH[HõŸ^öY‹À—\›‹]YK[ò€\⁄]ôHõŸ]‹»]ù[€‹Àâ»JKBà\›BàŸX\ò⁄ô\›[ÀBà[ô[BàJN√BüCBÉBãÀ»8• 8• ô[ô\»
+ÿ[H8†%ô]ô[ùYK⁄]€ò\⁄›Y€‹›õ‹àùYHX\ô⁄[äH8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€àùZ[€€X[ôT‹X ›‹ôK]JH√Bà€€ú›‹õ›\»Hô]»X\
+
+N√Bà€€ú›‹ô\ôYH‹ô\ôYõŸX›[€ëõ‹ë]J›‹ôK]JN√Bàõ‹à
+€€ú›[ò»Ÿà›‹ôKú›]Kô[ò€€Y[ô\ H√BàYà
+[òÀô\⁄\›[ò⁄XP]]S€õJ[òÀô[]ô\ûQ]JHOOH]JH€€ù[ùYN√Bà€€ú›Ÿ^HH[òÀò€Y[ùRYò[YNâ€õ‹õJ[òÀò›\›€Y\ìò[YH	‘Ÿ[H€Y[ùI _X√Bà€€ú›€Y[ùH[òÀò€Y[ùRY»›‹ôKôŸ]
+	ÿ€Y[ù…À[òÀò€Y[ùRY
+Hàù[√Bà€€ú›‹õ›\H‹õ›\ÀôŸ]
+Ÿ^JH»€Y[ùò[YNà€Y[ùÀõò[YH[òÀò›\›€Y\ìò[YH	‘Ÿ[H€Y[ùH»õ€ùH[ùôYÿIÀ€€ùX›àÿ€Y[ùÀú€ôK€Y[ùÀòYô\‹◊Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 K][\Œàô]»X\
+
+Kõ›\Œà◊HN√Bàõ‹à
+€€ú›]Ÿà[òÀö][ú»◊JH√Bà€€ú›€€\‹⁄][€àHù[ôP€€\‹⁄][€ï^
+›‹ôK]
+N√Bà€€ú›][RŸ^HH	⁄]úõŸX›Y_	ÿ€€\‹⁄][€üX√Bà€€ú››\úô[ùH‹õ›\ö][\ÀôŸ]
+][RŸ^JH»õŸX›Yà]úõŸX›Y]Nà€€\‹⁄][€àN√Bà›\úô[ùú]H
+œHù[Xô\ä]ú]JH√Bà‹õ›\ö][\ÀúŸ]
+][RŸ^K›\úô[ù
+N√BàCBàYà
+[òÀõõ›\ H‹õ›\õõ›\Àú\⁄
+[òÀõõ›\ N√Bà‹õ›\ÀúŸ]
+Ÿ^K‹õ›\
+N√BàCBà€€ú››‹ôYH›‹ôKôŸ]
+	ÿ€€X[ô\…À]JN√Bà€€ú›õŸXŸYHô]»X\
+
+›‹ôYÀö][ú»◊JKõX\
+
+]
+HOà⁄]úõŸX›Yù[Xô\ä]úôX[^òY HJJN√Bà€€ú›X[ùX[Hô]»X\
+
+›‹ôYÀö][ú»◊JKõX\
+
+]
+HOà⁄]úõŸX›YX]õX^
+ù[Xô\ä]õX[ùX[]Hœ»
+]úô]ö\›HOHù[»àù[Xô\ä]úô]ö\›JHH
+‹ô\ôYôŸ]
+]úõŸX›Y
+H
+JJH
+WJJN√Bà€€ú›õŸX›[€íY»HÀããõô]»Ÿ]
+Àããõ‹ô\ôYöŸ^\ 
+KããúõŸXŸYöŸ^\ 
+KããõX[ùX[öŸ^\ 
+WJWN√Bàô]\õà√Bà]Nàõ]]J	Ÿ]_ULéåå
+KBà‹õ›\ŒàÀããô‹õ›\Àùò[Y\ 
+WKõX\
+
+ HOà
+√Bà€Y[ùò[YNàÀò€Y[ùò[YK€€ùX›àÀò€€ùX›Bà][\ŒàÀããôÀö][\Àùò[Y\ 
+WKõX\
+
+][JHOà
+»ò[YNà	‹›‹ôKôŸ]
+	‹õŸX›…À][KúõŸX›Y
+OÀõò[YH	 õŸ]»ô[[›öY IﬂI⁄][Kò€€\‹⁄][€à»
+	⁄][Kò€€\‹⁄][€üJXà	…ﬂX]Nà][Kú]HJJKBàõ›\ŒàÀõõ›\Àöõ⁄[ä	»0≠»	 KBàJJKú€‹ù
+
+KäHOàõ‹õJKò€Y[ùò[YJKõÿÿ[P€€\\ôJõ‹õJãò€Y[ùò[YJJJKBàõŸX›[€éàõŸX›[€íYÀõX\
+
+Y
+HOà
+√BàõŸX›YàYBàò[YNà›‹ôKôŸ]
+	‹õŸX›…ÀY
+OÀõò[YH	 õŸ]»ô[[›öY IÀBàô]ö\›Nà
+‹ô\ôYôŸ]
+Y
+H
+H
+»
+X[ùX[ôŸ]
+Y
+H
+KBàõŸ^öYŒàõŸXŸYôŸ]
+Y
+HBàJJKú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJJJKBàN√BüCBÉBôù[ò›[€àùZ[€€X[ôT\ö[Ÿ‹X ›‹ôK›\ù[ô
+H√Bà€€ú›^\»H€€X[ôQ]\’⁄]õŸX› ›‹ôK›\ù[ô
+KõX\
+
+]JHOà
+»\€—]Nà]KããòùZ[€€X[ôT‹X ›‹ôK]JHJJN√Bà€€ú›€€ú€€Y]YHô]»X\
+
+N√Bàõ‹à
+€€ú›^HŸà^\ Hõ‹à
+€€ú›][HŸà^KúõŸX›[€äH√Bà€€ú›Ÿ^HH][KúõŸX›Yõ‹õJ][Kõò[YJN√Bà€€ú››\úô[ùH€€ú€€Y]YôŸ]
+Ÿ^JH»õŸX›Yà][KúõŸX›Yò[YNà][Kõò[YKô]ö\›NàõŸ^öYŒàN√Bà›\úô[ùúô]ö\›H
+œHù[Xô\ä][Kúô]ö\›JH√Bà›\úô[ùúõŸ^öY»
+œHù[Xô\ä][KúõŸ^öY H√Bà€€ú€€Y]YúŸ]
+Ÿ^K›\úô[ù
+N√BàCBàô]\õà√Bà›\ù[ôBà\ö[Ÿà›\ùOOH[ô»õ]]J	‹›\ùULéåå
+Hà	Ÿõ]]J	‹›\ùULéåå
+_HH	Ÿõ]]J	Ÿ[ôULéåå
+_XBàŸ[ô\ò]Y]àô]»[ùë]U[YQõ‹õX]
+	‹PîâÀ»]T›[Nà	‹⁄‹ù	À[YT›[Nà	‹⁄‹ù	»JKôõ‹õX]
+ô]»]J
+JKBàõŸX›[€éàÀããò€€ú€€Y]Yùò[Y\ 
+WKú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJJJKBàN√BüCBÉBôù[ò›[€àŸ[[ô‘öXŸJ›‹ôKõŸX›Y
+H√Bà€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…ÀõŸX›Y
+N√BàYà
+õŸX›	âàù[Xô\äõŸX›úÿ[TöXŸJHèH	âàõŸX›úÿ[TöXŸHOOH	… Hô]\õàù[Xô\äõŸX›úÿ[TöXŸJH√BàûH»ô]\õàõŸX›öXŸJ›‹ôKù—[ô⁄[ôT›‹ôJ
+KõŸX›Y›‹ôKôŸ]€€ôöY 
+K\›[X]S[ú ›‹ôKôŸ]€€ôöY 
+JJKúöXŸN»CBàÿ]⁄»ô]\õà»CBüCBÉBôù[ò›[€à[öŸYõŸX›õ‹îôX⁄\J›‹ôKôX⁄\RY
+H√Bàô]\õà›‹ôKú›]KúõŸX›Àôö[ô
+
+
+HOà
+ò€€\€ô[ù»◊JKú€€YJ
+ HOàÀö⁄[ôOOH	‹ôX⁄\I»	âàÀöYOOHôX⁄\RY
+JHù[√BüCBÉBôù[ò›[€àÿ[T]R[îôX⁄\U[ö]
+õŸX›ôX⁄\JH√Bà€€ú›]HHù[Xô\äõŸX›Àúÿ[T]JHN√Bà€€ú›úõ€HHõŸX›Àúÿ[U[ö]	›[âŒ√Bà€€ú›»HôX⁄\OÀûZY[[ö]	›[âŒ√BàYà
+úõ€HOOH Hô]\õà]N√BàYà
+úõ€HOOH	⁄Ÿ…»	âà»OOH	Ÿ… Hô]\õà]H
+àL√BàYà
+úõ€HOOH	Ÿ…»	âà»OOH	⁄Ÿ… Hô]\õà]H»L√BàYà
+úõ€HOOH	€	»	âà»OOH	€[	 Hô]\õà]H
+àL√BàYà
+úõ€HOOH	€[	»	âà»OOH	€	 Hô]\õà]H»L√Bàô]\õàN√BüCBÉBôù[ò›[€àôX⁄\TöX⁄[ô ›‹ôKôX⁄\K[öŸYõŸX›Hù[
+H√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›\»H[ô^›‹ôJ»ããú›‹ôKú›]KôX⁄\\ŒàÀããú›‹ôKú›]KúôX⁄\\Àôö[\ä
+äHOàãöYOOHôX⁄\KöY
+KôX⁄\WHJN√Bà€€ú›[ú»H\›[X]S[ú €€ôöY N√Bà€€ú›úôXZŸ›€àH€‹›úôXZŸ›€ä\ÀôX⁄\KöY€€ôöYÀ[ú N√Bà€€ú›ZY[]HHù[Xô\äôX⁄\KûZY[õ€Z[ò[
+H√Bà€€ú›[öŸY]HHù[Xô\ä[öŸYõŸX›Àò€€\€ô[ùœÀôö[ô
+
+ HOàÀö⁄[ôOOH	‹ôX⁄\I»	âàÀöYOOHôX⁄\KöY
+OÀú]JHN√Bà€€ú›[ö]€‹›H
+úôXZŸ›€ãö[ô‹ôYY[ù»
+»úôXZŸ›€ãôÿ\»
+»úôXZŸ›€ãôö^Y
+H
+à[öŸY]H
+»
+ù[Xô\äôX⁄\KúX⁄ÿY⁄[ô–€‹›
+H
+N√Bà€€ú›\ôŸ]X\ô⁄[àHôX⁄\Kù\ôŸ]X\ô⁄[î›œ»€€ôöYÀù\ôŸ]X\ô⁄[î›√Bà€€ú›ò]\»HYôôX›]ôTÿ[\‘ò]\ ôX⁄\K€€ôöY N√Bà€€ú››YŸŸ\›YHX]òŸZ[
+öXŸQúõ€P€‹›
+[ö]€‹›»ããò€€ôöYÀããúò]\À\ôŸ]X\ô⁄[î›à\ôŸ]X\ô⁄[àJH
+àLHYKNJH»L√Bà€€ú›õŸX›[ö]»HZY[]H»[öŸY]N√Bà€€ú›ÿ[\‘ò]HHò]\Àù›[√Bà€€ú›õŸö]\ï[ö]H›YŸŸ\›Y
+à
+HHÿ[\‘ò]JHH[ö]€‹›√Bà€€ú›õŸX›[€í›\ú»H
+ù[Xô\äôX⁄\KúõŸX›[€ìZ[ù]\ H
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+JH»å√Bàô]\õà»úôXZŸ›€ãZY[]K[öŸY]KõŸX›[ö]À[ö]€‹›\ôŸ]X\ô⁄[ãò]\À›YŸŸ\›YBàÿ[\‘ò]KõŸö]\ï[ö]›[€‹›à[ö]€‹›
+àõŸX›[ö]À›[ÿ[Nà›YŸŸ\›Y
+àõŸX›[ö]ÀBà›[õŸö]àõŸö]\ï[ö]
+àõŸX›[ö]ÀõŸö]›\éàõŸX›[€í›\ú»à»õŸö]\ï[ö]
+àõŸX›[ö]»»õŸX›[€í›\ú»àù[N√BüCBÉBôù[ò›[€àôX⁄\TõŸö]Xö[]Pÿ\ô
+›‹ôKôX⁄\K[öŸYõŸX›Hù[
+H√BàYà
+Jù[Xô\äôX⁄\OÀûZY[õ€Z[ò[
+Hà
+JHô]\õà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	“[ôõ‹õYH»ô[ô[Y[ù»\òHô\à»ô\›[Y»HôXŸZ]Kâ»JN√BàûH√Bà€€ú›HôX⁄\TöX⁄[ô ›‹ôKôX⁄\K[öŸYõŸX›
+N√Bà€€ú›[ôHH
+Xô[ò[YK€ôHH	… HOà[
+	›âÀﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹ŒàK[ù[H	›€ô_X^àò[YHJWJN√Bà€€ú›òX›XŸYHù[Xô\ä[öŸYõŸX›Àúÿ[TöXŸJN√Bà€€ú›òX›XŸYõŸö]HòX›XŸY
+à
+HHúÿ[\‘ò]JHHù[ö]€‹›√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»K√Bà[
+	‹›õ€ô…À»^à	‘ô\›[Y»HôXŸZ]H€€\]I»JKBà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[ôJ	‘ô[ô[Y[ù…À	Ÿõ]ù[JûZY[]J_H	‹ôX⁄\KûZY[[ö]X
+KBà[ôJ	“[ô‹ôYY[ù\…Àúõ
+òúôXZŸ›€ãö[ô‹ôYY[ù»
+àûZY[]JJKBà[ôJ	—Ë\…Àúõ
+òúôXZŸ›€ãôÿ\»
+àûZY[]JJKBà[ôJ	–›\›‹»ö^‹»õ‹‹ò⁄[€òZ\…Àúõ
+òúôXZŸ›€ãôö^Y
+àûZY[]JJKBà[ôJ	—[Xò[YŸ[ú…Àúõ
+
+ù[Xô\äôX⁄\KúX⁄ÿY⁄[ô–€‹›
+H
+H
+àúõŸX›[ö] JKBà[ôJ	–›\›»›[HôXŸZ]IÀúõ
+ù›[€‹›
+JKBà[ôJ	–›\›»‹àõŸ]…Àúõ
+ù[ö]€‹›
+JKBà[ôJ	”X\ôŸ[H\ŸZòYIÀ››äù\ôŸ]X\ô⁄[äJKBà[ôJ	’^HHYÿ[Y[ù…À››äúò]\Àú^[Y[ùôYT›
+JKBà[ôJ	–€€Z\‹Ë€…À››äúò]\Àò€€[Z\‹⁄[€î›
+JKBà[ôJ	“[\‹›»€ÿúôHHô[ôIÀ››äúò]\Àúÿ[\’^›
+JKBà[ôJ	‘ôpÈ€»›YŸ\öY»‹àõŸ]…Àúõ
+ú›YŸŸ\›Y
+K	‹K\›õ€ô… KBà[ôJ	’ô[ôH›[HôXŸZ]Hô\‹ŸHôpÈ€…Àúõ
+ù›[ÿ[JJKBà[ôJ	”X‹õ»‹àõŸ]…Àúõ
+úõŸö]\ï[ö]
+KúõŸö]\ï[ö]èH»	‹K\‹⁄]]ôI»à	‹KXòY	 KBà[ôJ	”X‹õ»›[HôXŸZ]IÀúõ
+ù›[õŸö]
+Kù›[õŸö]èH»	‹K\‹⁄]]ôI»à	‹KXòY	 KBà[ôJ	”X‹õ»‹à‹òHHõŸpÈË€…ÀúõŸö]›\àOHù[»	¯†%	»àúõ
+úõŸö]›\äJKBàããäòX›XŸYà»√Bà[ôJ	‘ôpÈ€»ò]XÿY»õ»ÿ]0Ë[Ÿ€…Àúõ
+òX›XŸY
+JKBà[ôJ	”X\ôŸ[Hõ»ôpÈ€»ò]XÿY…À››äòX›XŸYõŸö]»òX›XŸY
+KòX›XŸYõŸö]èH»	‹K\‹⁄]]ôI»à	‹KXòY	 KBàHà◊JKBàJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àò[‹ô\»ôXÿ[›[Y‹»€€ôõ‹õYHHX\ôŸ[HH‹»\òŸ[ùXZ\»Y⁄]Y‹Àà^K€€Z\‹Ë€»H[\‹›»
+	‹››äúÿ[\‘ò]J_JH∞ËH\ÿ€€ùY‹»»X‹õÀàpË€»HÿúòH\ô]H0ÍH\[ò\»[ôXÿY‹ã⁄\»ÿ[0Ë\ö[‹»\›0Ë€»õ‹»›\›‹»ö^‹ÀòJKBàJN√BàHÿ]⁄
+JH»ô]\õà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à€€ôö\òH‹»›\›‹»\òHô\à»ô\›[YŒà	ŸúöY[ôQ\úõ‹äJ_XJN»CBüCBÉBìS—S÷…ÿ€€X[ôK\ô]öY]…◊HH
+›JHOà√Bà€€ú››\ùHKú›\ùKô]HŸ^R[ú]
+
+N√Bà€€ú›[ôHKô[ô›\ù√Bà€€ú›‹X»HùZ[€€X[ôT\ö[Ÿ‹X ›ú›‹ôK›\ù[ô
+N√Bà€€ú›ô]öY]»H[
+	Ÿ]âÀ»€\‹Œà	‹K\ö[ù\ô]öY]…À	Ÿ]K]\›Y	Œà	ÿ€Y\ö[ù\ô]öY]…»K√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à€€X[ôHHõŸpÈË€»0≠»	‹‹XÀú\ö[ŸXJKBà[
+	‹	À»€\‹Œà	‹K[]]Y	À^à€€X[ôHŸ\òYH[H	‹‹XÀôŸ[ô\ò]Y]XJKBà[
+	‹›õ€ô…À»^à	”\›H0ÓõöXÿHHõŸpÈË€…»JKBàããä‹XÀúõŸX›[€ãõ[ô›»‹XÀúõŸX›[€ãõX\
+
+
+HOà[
+	Ÿ]âÀ»€\‹Œà	‹K\ô]öY]À[[ôIÀ	Ÿ]K]\›Y	Œà	ÿ€Y\ô]öY]ÀZ][I»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^àõò[YHJKBà[
+	‹›õ€ô…À»^à	Ÿõ]ù[Júô]ö\›J_H[ò€€Y[ôYH
+»]ù[ÿH0≠»	Ÿõ]ù[JúõŸ^öY _HõŸ^öYXJKBàJJHàŸ[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	‘Ÿ[H][ú»HõŸpÈË€»õ»\∞Î[ŸÀâ»JWJKBàJN√Bà€€ú›ùàH[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHKY‹õ›…À	Ÿ]K]\›Y	Œà	ÿ€Y\â»K	—Ÿ\ò\ààM	 N√BàùãòY]ô[ù\›[ô\ä	ÿ€X⁄…À\ﬁ[ò»
+
+HOà√Bà€€ú›€Hùãù^€€ù[ù»ùãù^€€ù[ùH	—Ÿ\ò[ô¯†)âŒ»ùãô\ÿXõYHùYN√BàûH»]ÿZ]ÿ]ôTä]ÿZ]Ÿ[ô\ò]P€€X[ôTä‹X K€€X[ôKI‹›\ùKXKIŸ[ôKúò
+N»CBàÿ]⁄
+JH»⁄[ô›Àò[\ù
+	”∞Ë€»õ⁄H‹‹Î]ô[Ÿ\ò\à»éà	»
+»
+
+H	âàKõY\‹ÿYŸJHJJN»CBàö[ò[H»ùãù^€€ù[ùH€»ùãô\ÿXõYHò[ŸN»CBàJN√Bàô]\õà⁄Y]
+»]Nà	–€€X[ôH\òH[\ô\‹Ë€…Àõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»à\ô\Ÿ[ùH[XH0ÓõöXÿH\›H\òHŸ»»\∞Î[Ÿ»H€€XH]]€X]Xÿ[Y[ùH‹»õŸ]‹»ô\]Y‹Àâ»JKô]öY]À[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XX›[€ú…»KÿùóJWHJN√BüN√BÉBôù[ò›[€àô[ô\‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›õŸX›»H›‹ôKú›]KúõŸX›Œ√Bà€€ú›X›]ôTõŸX›»HõŸX›Àôö[\ä
+
+HOàõŸX›\–X›]ôJ
+H	âàZ\–ù[ôTõŸX›
+
+JN√Bà€€ú›»ô[ôT›\ùà›\ùô[ôQ[ôà[ôô[ôT›]\Œà›]\Àô[ôTõŸX›YŒàô\]Y\›YõŸX›YÀô[ôP€Y[ùYàô\]Y\›Y€Y[ùYHH›ùöY]Œ√Bà€€ú›õŸX›Y»HÀããõô]»Ÿ]
+\úò^Kö\–\úò^Jô\]Y\›YõŸX›Y H»ô\]Y\›YõŸX›Y»à◊JWKôö[\ä
+Y
+HOàõŸX›Àú€€YJ
+
+HOàöYOOHY
+JN√Bà€€ú›\‘õŸX›ö[\àHõŸX›YÀõ[ô›à√Bà€€ú›õŸX›⁄[ôH…€õ‹õX[	À	ÿŸ\›IÀ	⁄⁄]	À	ÿ€€Xõ…◊Kö[ò€Y\ ›ùöY]Àùô[ôTõŸX›⁄[ô
+H»›ùöY]Àùô[ôTõŸX›⁄[ôà	…Œ√Bà€€ú›\“][Qö[\àH\‘õŸX›ö[\àõ€€X[äõŸX›⁄[ô
+N√Bà€€ú›X]⁄\‘õŸX›H
+Y
+HOà
+Z\‘õŸX›ö[\àõŸX›YÀö[ò€Y\ Y
+JH	âà
+\õŸX›⁄[ôõŸX›ÿ[R⁄[ô
+›‹ôKôŸ]
+	‹õŸX›…ÀY
+JHOOHõŸX›⁄[ô
+N√Bà€€ú›€Y[ùYHô\]Y\›Y€Y[ùYOOH	◊◊‹Ÿ[W◊…»›‹ôKú›]Kò€Y[ùÀú€€YJ
+ HOàÀöYOOHô\]Y\›Y€Y[ùY
+H»ô\]Y\›Y€Y[ùYà	…Œ√Bà€€ú›ô\‹ùHÿ[\‘\ö[Ÿ›[[X\ûJ›‹ôK›\ù[ô›]\ N√Bà€€ú›⁄\H
+Ÿ^KXô[
+HOà[
+	ÿù]€âÀ»€\‹Œà	‹KX⁄\	»
+»
+›]\»OOHŸ^H»	»KX⁄\[€â»à	… K	Ÿ]K]\›Y	Œàô[ôKYãI⁄Ÿ^_X€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ô[ôT\ö[Ÿ
+»ô[ôT›]\ŒàŸ^HJHKXô[
+N√Bà€€ú›\ö[ŸH\ö[ŸöY[ ›\ù[ô
+»›\ùàÀ[ôàHJHOà›òX›[€úÀúŸ]ô[ôT\ö[Ÿ
+»ô[ôT›\ùàÀô[ôQ[ôàHJK	›ô[ôI N√Bà€€ú›õŸX›ö[\àH[
+	Ÿ]Z[…À»	Ÿ]K]\›Y	Œà	›ô[ôK\õŸX›Yö[\â»JN√Bà€€ú››YŸYõŸX›Y»Hô]»Ÿ]
+õŸX›Y N√Bà€€ú›õŸX›⁄⁄XŸ\»HõŸX›Àôö[\ä
+
+HOà\õŸX›⁄[ôõŸX›ÿ[R⁄[ô
+
+HOOHõŸX›⁄[ô
+Kú€‹ù
+
+KäHOàõ‹õJKõò[YJKõÿÿ[P€€\\ôJõ‹õJãõò[YJJJN√Bà€€ú›⁄[ôö[\àH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	›ô[ôKZ⁄[ôYö[\â»K√Bà……À	’Ÿ‹»‹»\‹…◊K…ÿŸ\›IÀ	–Ÿ\›\…◊K…⁄⁄]	À	“⁄]…◊K…ÿ€€Xõ…À	–€€Xõ‹…◊K…€õ‹õX[	À	‘õŸ]‹»€€][ú…◊KBàKõX\
+
+›ò[YKXô[JHOà[
+	€‹[€âÀ»ò[YK^àXô[ããäõŸX›⁄[ôOOHò[YH»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà⁄[ôö[\ãòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà›òX›[€úÀúŸ]ô[ôT\ö[Ÿ
+»ô[ôTõŸX›⁄[ôà⁄[ôö[\ãùò[YKô[ôTõŸX›YŒà◊HJJN√Bà€€ú›õŸX››[[X\ûHH[
+	‹›[[X\ûIÀ»€\‹Œà	‹KZ[ú]	À›[Nà	ÿ›\ú€‹éú⁄[ù\âÀ^à\‘õŸX›ö[\à»	‹õŸX›YÀõ[ô›HõŸ]  HŸ[X⁄[€òY  Xà	’Ÿ‹»‹»õŸ]‹…»JN√Bà€€ú›õŸX›ŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	—Y⁄]H\òHÿÿ[^ò\à[HõŸ]¯†)âÀ	ÿ\öXK[Xô[	Œà	–ù\ÿÿ\àõŸ]»õ»ö[õ…»JN√Bà€€ú›õŸX›‹[€ú»H[
+	Ÿ]âÀ»›[Nà	€X^ZZY⁄åç€›ô\ôõ›À^Nò]]Œ€X\ô⁄[éé	»JN√Bà€€ú›[⁄X⁄»H[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	À⁄X⁄ŸYàZ\‘õŸX›ö[\ã	Ÿ]K]\›Y	Œà	›ô[ôK\õŸX›X[	»JN√Bà€€ú›⁄⁄XŸ\»HõŸX›⁄⁄XŸ\ÀõX\
+
+
+HOà√Bà€€ú›⁄X⁄»H[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	À⁄X⁄ŸYà›YŸYõŸX›YÀö\ öY
+Kò[YNàöY	Ÿ]K]\›Y	Œà	›ô[ôK\õŸX›X⁄X⁄…»JN√Bà€€ú›Xô[H[
+	€Xô[	À»€\‹Œà	‹KX⁄X⁄…»Kÿ⁄X⁄À[
+	‹‹[âÀ»^àõò[YHJWJN√Bà⁄X⁄ÀòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà√BàYà
+⁄X⁄Àò⁄X⁄ŸY
+H›YŸYõŸX›YÀòY
+öY
+N»[ŸH›YŸYõŸX›YÀô[]JöY
+N√Bà[⁄X⁄Àò⁄X⁄ŸYH›YŸYõŸX›YÀú⁄^ôHOOH√BàJN√Bàô]\õà»⁄X⁄ÀXô[N√BàJN√Bà[⁄X⁄ÀòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà√Bà›YŸYõŸX›YÀò€X\ä
+N√Bà[⁄X⁄Àò⁄X⁄ŸYHùYN√Bàõ‹à
+€€ú›»⁄X⁄»HŸà⁄⁄XŸ\ H⁄X⁄Àò⁄X⁄ŸYHò[ŸN√BàJN√BàõŸX›‹[€úÀò\[ô
+[
+	€Xô[	À»€\‹Œà	‹KX⁄X⁄…»Kÿ[⁄X⁄À[
+	‹›õ€ô…À»^à	’Ÿ‹»‹»õŸ]‹…»JWJKããò⁄⁄XŸ\ÀõX\
+
+»Xô[JHOàXô[
+JN√BàõŸX›ŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà√Bà€€ú›]Y\ûHHõ‹õJõŸX›ŸX\ò⁄ùò[YJN√Bàõ‹à
+€€ú›»Xô[HŸà⁄⁄XŸ\ HXô[ú›[Kô\‹^HHõ‹õJõò[YJKö[ò€Y\ ]Y\ûJH»	…»à	€õ€ôIŒ√BàJN√BàõŸX›ö[\ãò\[ô
+õŸX››[[X\ûKõŸX›ŸX\ò⁄õŸX›‹[€úÀBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ\Nà	ÿù]€âÀ	Ÿ]K]\›Y	Œà	›ô[ôK\õŸX›X\IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ô[ôT\ö[Ÿ
+»ô[ôTõŸX›YŒàÀããú›YŸYõŸX›Y◊HJHK	–\Xÿ\àö[õ… JN√BÉBà€€ú›€Y[ùö[\àH[
+	Ÿ]âÀ»€\‹Œà	‹KX€K\X⁄Ÿ\âÀ	Ÿ]K]\›Y	Œà	›ô[ôKX€Y[ùYö[\â»JN√Bà€€ú›Ÿ[X›€Y[ùH
+Y
+HOà›òX›[€úÀúŸ]ô[ôT\ö[Ÿ
+»ô[ôP€Y[ùYàYJN√BàYà
+€Y[ùY
+H√Bà€€ú›€Y[ùò[YHH€Y[ùYOOH	◊◊‹Ÿ[W◊…»»	‘Ÿ[H€Y[ùH»ô[ôH∞Ë\YI»à€Y[ùXô[
+›‹ôKôŸ]
+	ÿ€Y[ù…À€Y[ùY
+JN√Bà€Y[ùö[\ãò\[ô
+[
+	Ÿ]âÀ»€\‹Œà	‹KX€KX⁄\	»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…À^à€Y[ùò[YHJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	”[‹›ò\àŸ‹»‹»€Y[ù\…À	ÿ\öXK[Xô[	Œà	”[‹›ò\àŸ‹»‹»€Y[ù\…À€ò€X⁄Œà
+
+HOàŸ[X›€Y[ù
+	… HK	¯ß%I KBàJJN√BàH[ŸH√Bà€€ú›€Y[ùŸX\ò⁄H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K\ŸX\ò⁄	À\Nà	‹ŸX\ò⁄	ÀXŸZ€\éà	’Ÿ‹»‹»€Y[ù\»8†%Y⁄]H[Hõ€Yx†)âÀ	Ÿ]K]\›Y	Œà	›ô[ôKX€Y[ù\ŸX\ò⁄	»JN√Bà€€ú››YŸŸ\›[€ú»H[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄K\›YŸŸ\›	Àõ€Nà	€\›õﬁ	À›[Nà	Ÿ\‹^Nõõ€ôN€X^ZZY⁄åç€›ô\ôõ›À^Nò]]…»JN√Bà€€ú›‹[€àH
+Xô[Y
+HOà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀõ€Nà	€‹[€âÀXö[ô^à	Ã	À€ò€X⁄Œà
+
+HOàŸ[X›€Y[ù
+Y
+K€öŸ^Y›€éà
+]ô[ù
+HOà»Yà
+]ô[ùöŸ^HOOH	—[ù\â»]ô[ùöŸ^HOOH	»	 H»]ô[ùúô]ô[ùYò][
+
+N»Ÿ[X›€Y[ù
+Y
+N»HHKXô[
+N√Bà€€ú›\]HH
+
+HOà√Bà€€ú›]Y\ûHHõ‹õJ€Y[ùŸX\ò⁄ùò[YJN√Bà€€ú›⁄›–[H\]Y\ûH]Y\ûHOOH	›Ÿ‹…»]Y\ûHOOH	›Ÿ\…»]Y\ûKú›\ù’⁄]
+	›Ÿ‹»‹»€Y[ù\… N√Bà€€ú›X]⁄\»H⁄›–[»◊Hà›‹ôKú›]Kò€Y[ùÀôö[\ä
+ HOàõ‹õJ€Y[ùXô[
+ JKö[ò€Y\ ]Y\ûJJKú€XŸJ
+N√Bà›YŸŸ\›[€úÀúô\XŸP⁄[ô[äããä⁄›–[»€‹[€ä	’Ÿ‹»‹»€Y[ù\…À	… WHà◊JKããä
+\]Y\ûHõ‹õJ	‘Ÿ[H€Y[ùH»ô[ôH∞Ë\YI Kö[ò€Y\ ]Y\ûJJH»€‹[€ä	‘Ÿ[H€Y[ùH»ô[ôH∞Ë\YIÀ	◊◊‹Ÿ[W◊… WHà◊JKããõX]⁄\ÀõX\
+
+ HOà‹[€ä€Y[ùXô[
+ KÀöY
+JJN√Bà›YŸŸ\›[€úÀú›[Kô\‹^HH›YŸŸ\›[€úÀò⁄[[[Y[ù€›[ù»	…»à	€õ€ôIŒ√BàN√Bà€Y[ùŸX\ò⁄òY]ô[ù\›[ô\ä	Ÿõÿ›\…À\]JN√Bà€Y[ùŸX\ò⁄òY]ô[ù\›[ô\ä	⁄[ú]	À\]JN√Bà€Y[ùŸX\ò⁄òY]ô[ù\›[ô\ä	⁄Ÿ^Y›€âÀ
+]ô[ù
+HOà»Yà
+]ô[ùöŸ^HOOH	—\ÿÿ\I H›YŸŸ\›[€úÀú›[Kô\‹^HH	€õ€ôIŒ»JN√Bà€Y[ùö[\ãò\[ô
+€Y[ùŸX\ò⁄›YŸŸ\›[€ú N√BàCBÉBà€€ú›Ÿ[X›Y‹ô\ì[ô\»H
+][JHOà√Bà€€ú›[ô\»H‹ô\í][Tÿ[S[ô\ ][JN√BàYà
+Z\“][Qö[\äHô]\õà[ô\Œ√BàÀ»Ÿ[X›[ô»HŸ\›K⁄⁄]YX[ú»H⁄€Hö[YŸ]»Ÿ[X›[ô»[à[ù\õò[õŸX›BàÀ»ö[ô»]õŸX›]ô[à⁄[à]\X\ú»[ú⁄YHHŸ]ÉBàYà
+\–ù[ôTõŸX›
+›‹ôKôŸ]
+	‹õŸX›…À][KúõŸX›Y
+JH	âàX]⁄\‘õŸX›
+][KúõŸX›Y
+JHô]\õàﬁ»õŸX›Yà][KúõŸX›Y]Nàù[Xô\ä][Kú]JH›[à‹ô\í][Q‹õ‹‹ ][JHWN√Bàô]\õà[ô\Àôö[\ä
+[ôJHOàX]⁄\‘õŸX›
+[ôKúõŸX›Y
+JN√BàN√Bà€€ú›\‘Ÿ[X›YõŸX›H
+õ› HOàZ\“][Qö[\à
+õ›Àö⁄[ôOOH	‹ÿ[I√Bà»X]⁄\‘õŸX›
+õ›Àúÿ[KúõŸX›Y
+CBàà
+õ›Àõ‹ô\ãö][ú»◊JKú€€YJ
+]
+HOàŸ[X›Y‹ô\ì[ô\ ]
+Kõ[ô›à
+JN√Bà€€ú›ö\⁄XõTõ›‹»Hô\‹ùúõ›‹Àôö[\ä
+õ› HOà
+õ›Àö⁄[ôOOH	‹ÿ[I»õ›Àõ‹ô\ãô[ùôY›YHõ›Àõ‹ô\ãú]ZX⁄‘ÿ[JH	âà
+X€Y[ùYõ›Àò€Y[ùYOOH€Y[ùY
+H	âà\‘Ÿ[X›YõŸX›
+õ› JN√Bà€€ú›ö\⁄XõPÿ[òŸ[][€ú»Hô\‹ùòÿ[òŸ[][€úÀôö[\ä
+õ› HOà
+X€Y[ùYõ›Àò€Y[ùYOOH€Y[ùY
+H	âà\‘Ÿ[X›YõŸX›
+õ› JN√Bà€€ú›õ›”Y]öX‹»H
+õ› HOà√BàYà
+Z\“][Qö[\äHô]\õà»›[àõ›Àù›[ôXŸZ]ôYàõ›ÀúôXŸZ]ôY[ô[ôŒàõ›Àú[ô[ô»N√Bà€€ú››[Hõ›Àö⁄[ôOOH	‹ÿ[I»»õ›Àù›[à
+õ›Àõ‹ô\ãö][ú»◊JKúôYXŸJ
+›[K]
+HOà›[H
+»Ÿ[X›Y‹ô\ì[ô\ ]
+KúôYXŸJ
+[ôT›[K[ôJHOà[ôT›[H
+»[ôKù›[
+K
+N√Bà€€ú›ò][»Hõ›Àù›[à»›[»õ›Àù›[à√Bà€€ú›ôXŸZ]ôYHX]õZ[ä›[
+õ›ÀúôXŸZ]ôY
+H
+àò][ N√Bàô]\õà»›[ôXŸZ]ôY[ô[ôŒàX]õX^
+›[HôXŸZ]ôY
+HN√BàN√Bà€€ú›ö[\ôY›[»Hö\⁄XõTõ›‹ÀúôYXŸJ
+XÿÀõ› HOà»€€ú›HHõ›”Y]öX‹ õ› N»XÿÀù›[
+œHKù›[»XÿÀúôXŸZ]ôY
+œHKúôXŸZ]ôY»XÿÀú[ô[ô»
+œHKú[ô[ôŒ»ô]\õàXÿŒ»K»›[àôXŸZ]ôYà[ô[ôŒàJN√Bà€€ú›õŸX››[[X\ûSX\Hô]»X\
+
+N√Bà€€ú›Yö[\ôYõŸX›H
+Y]K›[
+HOà»€€ú›HõŸX››[[X\ûSX\ôŸ]
+Y
+H»Y]Nà›[àN»ú]H
+œH]N»ù›[
+œH›[»õŸX››[[X\ûSX\úŸ]
+Y
+N»N√Bàõ‹à
+€€ú›õ›»Ÿàö\⁄XõTõ›‹ H√BàYà
+õ›Àö⁄[ôOOH	‹ÿ[I HYö[\ôYõŸX›
+õ›Àúÿ[KúõŸX›Yù[Xô\äõ›Àúÿ[Kú]JHõ›Àù›[
+N√Bà[ŸHõ‹à
+€€ú›]Ÿàõ›Àõ‹ô\ãö][ú»◊JHõ‹à
+€€ú›[ôHŸàŸ[X›Y‹ô\ì[ô\ ]
+JHYö[\ôYõŸX›
+[ôKúõŸX›Y[ôKú]K[ôKù›[
+N√BàCBà€€ú›ö[\ôYõŸX›»HÀããúõŸX››[[X\ûSX\ùò[Y\ 
+WKõX\
+
+
+HOà
+»ããúò[YNà›‹ôKôŸ]
+	‹õŸX›…ÀöY
+OÀõò[YH	 õŸ]»ô[[›öY I»JJKú€‹ù
+
+Käy”æº∂âûÀk∫wµÁ]òò[[òŸK⁄[ôà	€‹‹…Àõ›\Œàõ›\Àùò[YKùö[J
+H	–òZ^H‹à\ôI»JJN√BàCBàô]\õà⁄Y]
+»]Nà	‘ôY⁄\›ò\à€€[»\ôIÀõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KZ[ù	À^àò]\òHH	›]Kú\ùSò[YH	ÿ€Y[ùIﬂH0≠»	›]Kô\ÿ‹ö\[€üKàH\ôH[òŸ\úò\∞ËH\[ò\»»ÿ[»ô\›[ùH\›Hò]\òKŸ[H[ùòYHõ»ÿZ^KòJK[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»KŸ[
+	‹‹[âÀ»^à	‘ÿ[»HòZ^\éà	»JK[
+	‹›õ€ô…À»^àúõ
+›]Kòò[[òŸJHJWJKöY[
+	—]HH\ôIÀ]JKöY[
+	”[›]õ…Àõ›\ WK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	Ÿö[ã[‹‹À\ÿ]ôIÀÿ]ôSXô[à	‘ôY⁄\›ò\à\ôI»JN√BüCBÉBôù[ò›[€àô\Ÿ]ò[ôŸJŸ^JH√Bà€€ú›õ›»Hô]»]J
+N»€€ú›ÿÿ[H
+
+HOà	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KI‘›ö[ô ôŸ]]J
+JKúY›\ù
+ã	Ã	 _X√BàYà
+Ÿ^HOOH	⁄⁄ôI Hô]\õà€ÿÿ[
+õ› Kÿÿ[
+õ› WN√BàYà
+Ÿ^HOOH	‹Ÿ[X[òI H»€€ú›»Hô]»]Jõ› N»ÀúŸ]]Jõ›ÀôŸ]]J
+HH
+
+õ›ÀôŸ]^J
+H
+»äH	H JN»€€ú›HHô]»]J N»KúŸ]]JÀôŸ]]J
+H
+»äN»ô]\õà€ÿÿ[
+ Kÿÿ[
+JWN»CBàYà
+Ÿ^HOOH	ÿ[õ… Hô]\õàÿ	€õ›ÀôŸ]ù[YX\ä
+_KLKLX	€õ›ÀôŸ]ù[YX\ä
+_KLLãLÃXN√Bà€€ú›HHô]»]Jõ›ÀôŸ]ù[YX\ä
+Kõ›ÀôŸ][€ù
+
+H
+»K
+N»ô]\õàÿ	€õ›ÀôŸ]ù[YX\ä
+_KI‘›ö[ô õ›ÀôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KLXÿÿ[
+JWN√BüCBÉBôù[ò›[€àö[ò[òŸPÿ\⁄õ›‘[ô[
+›
+H√Bà€€ú›»›‹ôKöY]»HH›»€€ú››\ùHöY]Àôö[î›\ù»€€ú›[ôHöY]Àôö[ë[ô√Bà€€ú›õ›»Hÿ\⁄õ› ›‹ôK›\ù[ô»õ⁄ôX›YàöY]Àôö[îõ⁄ôX›YXÿ€›[ùYàöY]Àôö[êXÿ€›[ùY[ôYö[ôYÿ]Y€‹ûRYàöY]Àôö[êÿ]Y€‹ûRY[ôYö[ôYJN√Bà€€ú›ô\Ÿ]H
+Ÿ^KXô[
+HOà[
+	ÿù]€âÀ»€\‹Œà	‹KX⁄\	»
+»
+öY]Àôö[ëõ›‘ô\Ÿ]OOHŸ^H»	»KX⁄\[€â»à	… K	Ÿ]K]\›Y	Œàö[ãYõ›ÀI⁄Ÿ^_X€ò€X⁄Œà
+
+HOà»Yà
+Ÿ^HOOH	‹\ú€€ò[^òY… H›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[ëõ›‘ô\Ÿ]àŸ^HJN»[ŸH»€€ú›‹ÀWHHô\Ÿ]ò[ôŸJŸ^JN»›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[ëõ›‘ô\Ÿ]àŸ^Kö[î›\ùàÀö[ë[ôàHJN»HHKXô[
+N√Bà€€ú›Xÿ€›[ùH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿö[ãYõ›ÀXXÿ€›[ù	À€ò⁄[ôŸNà
+JHOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[êXÿ€›[ùYàKù\ôŸ]ùò[YHJHKŸ[
+	€‹[€âÀ»ò[YNà	…À^à	’Ÿ\»\»€€ù\…»JKããòXÿ€›[ù‹[€ú ›‹ôJKõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^àKõò[YKããäöY]Àôö[êXÿ€›[ùYOOHKöY»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJWJN√Bà€€ú›ÿ]Y€‹öY\»H›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ HOàXÀò\ò⁄]ôY	âàÀú\ô[ùY	âàÀòÿ\⁄õ›—‹õ›\OOH	€ò[ÀXÿZ^I N√Bà€€ú›ÿ]Y€‹ûHH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿö[ãYõ›ÀXÿ]Y€‹ûIÀ€ò⁄[ôŸNà
+JHOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[êÿ]Y€‹ûRYàKù\ôŸ]ùò[YHJHKŸ[
+	€‹[€âÀ»ò[YNà	…À^à	’Ÿ\»\»ÿ]Y€‹öX\…»JKããòÿ]Y€‹öY\ÀõX\
+
+ HOà[
+	€‹[€âÀ»ò[YNàÀöY^àÀõò[YKããäöY]Àôö[êÿ]Y€‹ûRYOOHÀöY»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJWJN√BÉBà]X›X[Hÿ\⁄[›ô[Y[ù ›‹ôJKôö[\ä
+JHOà[ë]Tò[ôŸJKò]›\ù[ô
+JN√BàX›X[HX›X[ôö[\ä
+JHOàöY]Àôö[êXÿ€›[ùY»KòXÿ€›[ùYOOHöY]Àôö[êXÿ€›[ùYà[Kùò[úŸô\äN√BàYà
+öY]Àôö[êÿ]Y€‹ûRY
+HX›X[HX›X[ôö[\ä
+JHOàÿ[õ€öXÿ[ÿ]Y€‹ûRY
+›‹ôKKòÿ]Y€‹ûRY
+HOOHÿ[õ€öXÿ[ÿ]Y€‹ûRY
+›‹ôKöY]Àôö[êÿ]Y€‹ûRY
+JN√BàX›X[ú€‹ù
+
+KäHOà]S€õJKò]
+Kõÿÿ[P€€\\ôJ]S€õJãò]
+JHKõXô[õÿÿ[P€€\\ôJãõXô[	‹Pîâ JN√BÉBà][ô[ô»HöY]Àôö[îõ⁄ôX›Y»\›]\ ›‹ôK»›]\Œà	ÿXô\ù…Àÿ]Y€‹ûRYàöY]Àôö[êÿ]Y€‹ûRY[ôYö[ôYJHà◊N√Bà[ô[ô»H[ô[ôÀôö[\ä
+äHOà\ãù]Kòÿ[òŸ[Y]	âàãòò[[òŸHàåH	âà
+[ë]Tò[ôŸJãù]KôYQ]K›\ù[ô
+H
+ãú›]\»OOH	›ô[ò⁄Y…»	âà›\ù	âà]S€õJãù]KôYQ]JH›\ù
+JJN√BÉBà€€ú›]Z[XY\àH
+
+HOà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\⁄ZXY	À	ÿ\öXKZY[âŒà	›ùYI»KŸ[
+	‹‹[âÀ»^à	—]I»JK[
+	‹‹[âÀ»^à	—\ÿ‹öpÈË€…»JK[
+	‹‹[âÀ»^à	’ò[‹â»JWJN√Bà€€ú›X›X[õ›‹»HX›X[õX\
+
+JHOà√Bà€€ú›ÿ]HKòÿ]Y€‹ûRY»›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀKòÿ]Y€‹ûRY
+Hàù[»€€ú›Xÿ»HKòXÿ€›[ùY»›‹ôKôŸ]
+	ÿÿ\⁄Xÿ€›[ù…ÀKòXÿ€›[ùY
+Hàù[√Bà]€‹úôX›[€àHù[√BàYà
+Kú€›\òŸU\HOOH	Ÿö[ò[òŸTŸ][Y[ù	»	âàKù]RY
+H€‹úôX›[€àH»]RYàKù]RYŸ][Y[ùYàKú€›\òŸRYŸ][Y[ù⁄[ôà	Ÿö[ò[òŸTŸ][Y[ù	»N√BàYà
+Kú€›\òŸU\HOOH	‹^[Y[ù	»	âàKõ‹ô\èÀöY
+H√Bà€€ú›‹ô\ï]HH›‹ôKú›]Kôö[ò[òŸU]\Àôö[ô
+
+
+HOàú€›\òŸU\HOOH	Ÿ[ò€€Y[ôI»	âàú€›\òŸRYOOHKõ‹ô\ãöY
+N√BàYà
+‹ô\ï]JH€‹úôX›[€àH»]RYà‹ô\ï]KöYŸ][Y[ùYàKú€›\òŸRYŸ][Y[ù⁄[ôà	‹^[Y[ù	»N√BàCBà€€ú›Y]HH€Kô\ôX›[€àOOH	Ÿ[ùòYI»»	—[ùòYHôX[^òYI»à	‘ÿpÎYHôX[^òYIÀÿ]Àõò[YKXÿœÀõò[YKKõY]Ÿ€‹úôX›[€à»	’‹]YH\òH€‹úöY⁄\â»àù[Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 N√Bàô]\õà[
+€‹úôX›[€à»	ÿù]€â»à	Ÿ]âÀ»€\‹ŒàKXÿ\⁄\õ›»	€Kô\ôX›[€àOOH	Ÿ[ùòYI»»	‹KXÿ\⁄Z[â»à	‹KXÿ\⁄[›]	ﬂIÿ€‹úôX›[€à»	»KXÿ\⁄YY]XõI»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ãYõ›ÀXX›X[\õ›…Àããä€‹úôX›[€à»»€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK\Ÿ][Y[ùYY]	Àããò€‹úôX›[€àJHHàﬂJHKŸ[
+	›[YIÀ»€\‹Œà	‹KXÿ\⁄Y]IÀ]][YNà]S€õJKò]
+K^àõ]]JKò]
+HJK[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\⁄Y\ÿ‹ö\[€â»KŸ[
+	‹›õ€ô…À»^àKõXô[JK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àY]HJWJK[
+	‹›õ€ô…À»€\‹ŒàKXÿ\⁄]ò[YH	€Kô\ôX›[€àOOH	Ÿ[ùòYI»»	‹K\‹⁄]]ôI»à	‹KXòY	ﬂX^à	€Kô\ôX›[€àOOH	Ÿ[ùòYI»»	 …»à	¯¢$âﬂH	ÿúõ
+Kò[[›[ù
+_XJWJN√BàJN√Bà€€ú›[ô[ô‘õ›‹»H[ô[ôÀõX\
+
+äHOà√Bà€€ú›]HHãù]N»€€ú›\“[àH]Kô\ôX›[€àOOH	‹ôXŸXô\âŒ»€€ú››ô\ôYHHãú›]\»OOH	›ô[ò⁄Y…Œ»€€ú›ÿ]H]Kòÿ]Y€‹ûRY»›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À]Kòÿ]Y€‹ûRY
+Hàù[√Bà€€ú›Y]HH⁄\“[à»	–HôXŸXô\â»à	–HYÿ\âÀÿ]Àõò[YKãúŸ]YàåH»\ò⁄X[0≠»∞ËHòZ^Y»	ÿúõ
+ãúŸ]Y
+_Xàù[Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 N√Bàô]\õà[
+	ÿù]€âÀ»€\‹ŒàKXÿ\⁄\õ›»KXÿ\⁄\[ô[ô»	⁄\“[à»	‹KXÿ\⁄Z[â»à	‹KXÿ\⁄[›]	ﬂI€›ô\ôYH»	»KXÿ\⁄[›ô\ôYI»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ãYõ›À\[ô[ôÀ\õ›…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK]]KY]Z[	ÀYà]KöYJHKŸ[
+	›[YIÀ»€\‹Œà	‹KXÿ\⁄Y]IÀ]][YNà]S€õJ]KôYQ]JK^àõ]]J]KôYQ]JHJK[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\⁄Y\ÿ‹ö\[€â»KŸ[
+	Ÿ]âÀﬂKŸ[
+	‹›õ€ô…À»^à]Kú\ùSò[YH]Kô\ÿ‹ö\[€àJK›ô\ôYH	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHK]ÿ\õâÀ^à	’ô[ò⁄Y…»JWKôö[\äõ€€X[äJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	›]Kô\ÿ‹ö\[€üH0≠»	€Y]_XJWJK[
+	‹›õ€ô…À»€\‹ŒàKXÿ\⁄]ò[YH	⁄\“[à»	‹K\‹⁄]]ôI»à	‹KXòY	ﬂX^à	⁄\“[à»	 …»à	¯¢$âﬂH	ÿúõ
+ãòò[[òŸJ_XJWJN√BàJN√BÉBà€€ú›^UXõHHõ›Àô^\Àõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹K]XõK\ÿ‹õ€	»K[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»KŸ[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	—XI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	—[ùòY\…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	‘ÿpÎY\…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	‘ÿ[»XI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	–X›[][Y…»JWJKããôõ›Àô^\ÀõX\
+
+äHOà[
+	›âÀﬂKŸ[
+	›	À»^àõ]]J	‹ãô]_ULéåå
+HJK[
+	›	À»€\‹Œà	‹K[ù[HK\‹⁄]]ôIÀ^àúõ
+ãö[äHJK[
+	›	À»€\‹Œà	‹K[ù[HKXòY	À^àúõ
+ãõ›]
+HJK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ãòò[[òŸJHJK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ãò›[][]]ôJHJWJJWJJHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH[›ö[Y[ùpÈË€»ôX[^òYHô\›H\∞Î[ŸÀâ»JN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	‘ôX[^òY»Hù]\õ…»JK[
+	⁄âÀ»^à	—õ^»HÿZ^I»JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ŸôK[‹[âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ŸôK\ô]öY]…À›\ù[ôJHK	—ëH»\∞Î[Ÿ… KBà[
+	€Xô[	À»€\‹Œà	‹K]ŸŸ€I»KŸ[
+	⁄[ú]	À»\Nà	ÿ⁄X⁄ÿõﬁ	ÀããäöY]Àôö[îõ⁄ôX›Y»»⁄X⁄ŸYà	ÿ⁄X⁄ŸY	»HàﬂJK€ò⁄[ôŸNà
+JHOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îõ⁄ôX›YàKù\ôŸ]ò⁄X⁄ŸYJHJK[
+	‹‹[âÀ»^à	”[‹›ò\àò[‹ô\»H]Z]\â»JWJKBàJKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KX⁄\õ›…»K‹ô\Ÿ]
+	⁄⁄ôIÀ	“⁄ôI Kô\Ÿ]
+	‹Ÿ[X[òIÀ	‘Ÿ[X[òI Kô\Ÿ]
+	€Y\…À	”pÍú… Kô\Ÿ]
+	ÿ[õ…À	–[õ… Kô\Ÿ]
+	‹\ú€€ò[^òY…À	‘\∞Î[Ÿ»\‹XÎYöX€… WJKBàöY]Àôö[ëõ›‘ô\Ÿ]OOH	‹\ú€€ò[^òY…»»\ö[ŸöY[ ›\ù[ô
+»›\ùàÀ[ôàHJHOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[î›\ùàÀö[ë[ôàHJK	Ÿö[ãYõ›… Hà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à\∞Î[Ÿ»Ÿ[X⁄[€òY»]]€X]Xÿ[Y[ùNà	Ÿõ]]J	‹›\ùULéåå
+_H]0ÍH	Ÿõ]]J	Ÿ[ôULéåå
+_XJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–HëH\ÿH\›HY\€[»\∞Î[Ÿ»H€€ú⁄Y\òHŸHH[\ô\ÿKà‹»ö[õ‹»H€€ùHHÿ]Y€‹öXHXòZ^»Ÿ\ùô[H\[ò\»\òH[ò[\ÿ\à»ÿZ^Kâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	–€€ùIÀXÿ€›[ù
+KöY[
+	–ÿ]Y€‹öXIÀÿ]Y€‹ûJWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\›]‹öY	»K‹›]ÿ\ô
+	—[ùòY\»ôX[^òY\…Àúõ
+õ›Àù›[[äK	€⁄… K›]ÿ\ô
+	‘ÿpÎY\»ôX[^òY\…Àúõ
+õ›Àù›[›]
+Kõ›Àù›[›]»	›ÿ\õâ»à	‹€Ÿù	 K›]ÿ\ô
+	‘ÿ[»ôX[^òY…Àúõ
+õ›Àù›[[àHõ›Àù›[›]
+Kõ›Àù›[[àHõ›Àù›[›]èH»	€ò]ûI»à	ÿòY	 K›]ÿ\ô
+	‘ÿ[»X›[][Y…Àúõ
+õ›Àô[ô[ô Kõ›Àô[ô[ô»èH»	€ò]ûI»à	ÿòY	 WJKBàöY]Àôö[îõ⁄ôX›Y	âà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»KŸ[
+	‹›õ€ô…À»^àô]ö\Ë€»»\∞Î[ŸŒà
+…ÿúõ
+õ›Àúõ⁄ôX›Y[ä_H0≠»8¢$âÿúõ
+õ›Àúõ⁄ôX›Y›]
+_XJK[
+	‹‹[âÀ»^à	»€€ù\»[ô[ù\»∞Ë€»[\ò[H»ôX[^òYÀàô[ò⁄Y‹»[ù\ö[‹ô\»[X∞Í[H\\ôXŸ[Hõ»[\ùHXòZ^Àâ»JWJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	’Y»]YH[ùõ›HHÿZ]I»JKBàX›X[õ›‹Àõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\⁄[\›	»KŸ]Z[XY\ä
+KããòX›X[õ›‹◊JHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH[ùòYH›HÿpÎYHôX[^òYHô\›H\∞Î[ŸÀâ»JKBàöY]Àôö[îõ⁄ôX›Y	âà[
+	⁄…À»€\‹Œà	‹KZ…À^à	’ò[‹ô\»H]Z]\â»JKBàöY]Àôö[îõ⁄ôX›Y	âà
+[ô[ô‘õ›‹Àõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\⁄[\›	»KŸ]Z[XY\ä
+Kããú[ô[ô‘õ›‹◊JHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[Hò[‹à[ô[ùHô\›H\∞Î[ŸÀâ»JJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘ô\›[[»‹àXI»JK^UXõKBàKôö[\äõ€€X[äJN√BüCBÉBìS—S÷…ŸôK\ô]öY]…◊HH
+›[Ÿ[
+HOàôTô]öY]‘⁄Y]
+›[Ÿ[
+N√BÉBôù[ò›[€àôTô]öY]‘⁄Y]
+›[Ÿ[HﬂJH√Bà€€ú››\ùH[Ÿ[ú›\ù›ùöY]Àôö[î›\ù»€€ú›[ôH[Ÿ[ô[ô›ùöY]Àôö[ë[ô√Bà€€ú›ôHHX[òYŸ\öX[ôJ›ú›‹ôK›\ù[ô
+N√Bà€€ú›[ôHH
+Xô[[[›[ù‹[€ú»HﬂJHOà[
+	›âÀ‹[€úÀù›[»»€\‹Œà	‹KZ›ã]›[	»HàﬂK√Bà[
+	›	À»€\‹Œà‹[€úÀô]Z[»	‹K[]]Y	»à	…À^à	€‹[€úÀô]Z[»	¯†%	»à	…ﬂI€Xô[XJKBà[
+	›	À»€\‹ŒàK[ù[I€‹[€úÀòòY»	»KXòY	»à	…ﬂI€‹[€úÀô€€Ÿ»	»K\‹⁄]]ôI»à	…ﬂX^à‹[€úÀõôYÿ]]ôH»8¢$à	ÿúõ
+[[›[ù
+_Xàúõ
+[[›[ù
+HJKBàJN√Bà€€ú›XY€õ‹⁄\»HôKôXY€õ‹›X‹ÀõX\
+
+][JHOà[
+	‹ŸX›[€âÀ»€\‹ŒàKXÿ[›]	⁄][Kù€ôHOOH	ÿòY	»»	»KXÿ[›]Y[ôŸ\â»à	…ﬂX	Ÿ]K]\›Y	ŒàôKYXY€õ‹⁄\ÀI⁄][Kù€ô_XKŸ[
+	‹›õ€ô…À»^à][Kù]HJK[
+	‹‹[âÀ»^à	⁄][Kù^XJWJJN√Bà€€ú›àH[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHKY‹õ›…À	Ÿ]K]\›Y	Œà	ŸôK\â»K	—Ÿ\ò\àëH[HàM	 N√BàãòY]ô[ù\›[ô\ä	ÿ€X⁄…À\ﬁ[ò»
+
+HOà√Bà€€ú›‹öY⁄[ò[Hãù^€€ù[ù»ãù^€€ù[ùH	—Ÿ\ò[ô»∏†)âŒ»ãô\ÿXõYHùYN√BàûH»]ÿZ]ÿ]ôTä]ÿZ]Ÿ[ô\ò]QôTäôJKôKI‹›\ùKIŸ[ôKúò
+N»CBàÿ]⁄
+\úõ‹äH»⁄[ô›Àò[\ù
+	”∞Ë€»õ⁄H‹‹Î]ô[Ÿ\ò\àHëNà	»
+»
+
+\úõ‹à	âà\úõ‹ãõY\‹ÿYŸJH\úõ‹äJN»CBàö[ò[H»ãù^€€ù[ùH‹öY⁄[ò[»ãô\ÿXõYHò[ŸN»CBàJN√Bàô]\õà⁄Y]
+»]Nà	—ëHŸ\ô[ò⁄X[»\∞Î[Ÿ…Àõ›‹Œà√Bà[
+	‹	À»€\‹Œà	‹KXÿ[›]	À^à€€\]0Íõò⁄XHH	Ÿõ]]J	‹›\ùULéåå
+_H]0ÍH	Ÿõ]]J	Ÿ[ôULéåå
+_Kàò[‹ô\»]Z]Y‹»H[ô[ù\»[ùò[H[ùY‹ò[Y[ùN»[ùô\›[Y[ù‹»Hò[úŸô\∞Íõò⁄X\»öXÿ[Hõ‹òKòJKBà[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	À	Ÿ]K]\›Y	Œà	ŸôK]XõI»K√Bà[ôJ	‘ôXŸZ]HHô[ô\…ÀôKúÿ[\‘ô]ô[ùYJK[ôJ	”›]ò\»ôXŸZ]\»‹\òX⁄[€òZ\…ÀôKõ›\îô]ô[ùYJK[ôJ	‘ôXŸZ]H‹\òX⁄[€ò[	ÀôKô‹õ‹‹‘ô]ô[ùYK»›[àùYHJKBàããôôKò€‹›õ›‹ÀõX\
+
+õ› HOà[ôJõ›Àõò[YKõ›Àò[[›[ù»]Z[àùYKôYÿ]]ôNàùYHJJK[ôJ	–›\›‹»\ô]‹…ÀôKô\ôX›€‹›À»›[àùYKôYÿ]]ôNàùYHJKBà[ôJ	”X‹õ»úù]…ÀôKô‹õ‹‹‘õŸö]»›[àùYKòYàôKô‹õ‹‹‘õŸö]€€ŸàôKô‹õ‹‹‘õŸö]èHJKBàããôôKô^[úŸTõ›‹ÀõX\
+
+õ› HOà[ôJõ›Àõò[YKõ›Àò[[›[ù»]Z[àùYKôYÿ]]ôNàùYHJJK[ôJ	—\‹\ÿ\»‹\òX⁄[€òZ\…ÀôKõ‹\ò][ô—^[úŸ\À»›[àùYKôYÿ]]ôNàùYHJKBà[ôJ	‘ô\›[Y»»\∞Î[Ÿ…ÀôKõô]ô\›[»›[àùYKòYàôKõô]ô\›[€€ŸàôKõô]ô\›[èHJKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\›]‹öY	»K‹›]ÿ\ô
+	”X\ôŸ[Húù]IÀôKô‹õ‹‹”X\ô⁄[î›OHù[»	‘Ÿ[HôXŸZ]I»à	”X]úõ›[ô
+ôKô‹õ‹‹”X\ô⁄[î›
+àL
+_IXôKô‹õ‹‹‘õŸö]èH»	€ò]ûI»à	ÿòY	 K›]ÿ\ô
+	”X\ôŸ[H0Î\]ZYIÀôKõô]X\ô⁄[î›OHù[»	‘Ÿ[HôXŸZ]I»à	”X]úõ›[ô
+ôKõô]X\ô⁄[î›
+àL
+_IXôKõô]ô\›[èH»	€⁄…»à	ÿòY	 K›]ÿ\ô
+	–Z[ôHHôXŸXô\âÀúõ
+ôKõ‹[îôXŸZ]òXõ\ KôKõ‹[îôXŸZ]òXõ\»»	›ÿ\õâ»à	‹€Ÿù	 K›]ÿ\ô
+	–Z[ôHHYÿ\âÀúõ
+ôKõ‹[î^XXõ\ KôKõ‹[î^XXõ\»»	›ÿ\õâ»à	‹€Ÿù	 WJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—XY€∞Ï‹›X€»]]€pË]X€…»JKããôXY€õ‹⁄\ÀBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\›H0ÍH[XHëHŸ\ô[ò⁄X[⁄[\YöXÿYH\òHX⁄\Ë€Àà\òHÿúöYÿpÈÌY\»ö\ÿÿZ\»H€€ù0ËXôZ\»õ‹õXZ\Àò[YHH€\‹⁄YöXÿpÈË€»€€HŸ]H€€ùY‹ãâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\⁄Y]XX›[€ú…»K‹óJKBàHJN√BüCBÉBôù[ò›[€àö[ò[òŸT\ò⁄\Ÿ\‘[ô[
+›
+H√Bà€€ú›õ›‹»H›ú›‹ôKú›]Kú\ò⁄\Ÿ\Àú€XŸJ
+Kú€‹ù
+
+KäHOàKò]ãò]»HàLJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	—õ‹õôXŸY‹ô\»H[ú›[[‹…»JK[
+	⁄âÀ»^à	–€€\ò\…»JWJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸK[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹\ò⁄\ŸKXY	»JHK	 »€€\òI WJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’ŸH€€\òH]X[^òH»›\›»‹»[ú›[[‹Àõ‹õôXŸY‹ã\›0Ï‹öX€»H\›‹]YKàúô]K[\‹›‹Àù\õ‹»H[òÿ\ô€‹»Ë€»ò]XY‹»[ùôH‹»][úÀàõÿÍàX⁄YHõ»[∞Èÿ[Y[ù»ŸH»›[[X∞Í[H]ôH[ùò\àõ»€€ù\»HYÿ\ãâ»JKBàõ›‹Àõ[ô›»[
+	›[	À»€\‹Œà	‹K[\›K\õ›‹…»Kõ›‹ÀõX\
+
+\ò⁄\ŸJHOà√Bà€€ú››\Y\àH\ò⁄\ŸKú›\Y\íY»›ú›‹ôKôŸ]
+	‹›\Y\ú…À\ò⁄\ŸKú›\Y\íY
+Hàù[√Bà€€ú›]HH\ò⁄\ŸKù]RY»›ú›‹ôKôŸ]
+	Ÿö[ò[òŸU]\…À\ò⁄\ŸKù]RY
+Hàù[√Bà€€ú››]HH]H»]T›]J›ú›‹ôK]JHàù[√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K\õ›ÀZ][IÀ€ò€X⁄Œà
+
+HOà]H	âà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK]]KY]Z[	ÀYà]KöYJHK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY[òÀ]]I»KŸ[
+	‹›õ€ô…À»^à›\Y\èÀõò[YH	‘Ÿ[Hõ‹õôXŸY‹â»JK›]H»]PòYŸJ›]Kú›]\ Hà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	‘€€Y[ùH\›‹]YI»JWJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	Ÿõ]]J\ò⁄\ŸKò]
+_H0≠»	 \ò⁄\ŸKö][\»◊JKõX\
+
+][JHOà›ú›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…À][Kö[ô‹ôYY[ùY
+OÀõò[YJKôö[\äõ€€X[äKöõ⁄[ä	À	 _XJKBà…ŸúôZY⁄	À	›^\…À	⁄[ù\ô\›	À	ŸôY\…◊Kú€€YJ
+Ÿ^JHOàù[Xô\ä\ò⁄\ŸV⁄Ÿ^WJHà
+H	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à÷…—úô]IÀ\ò⁄\ŸKôúôZY⁄K…“[\‹›‹…À\ò⁄\ŸKù^\◊K…“ù\õ‹…À\ò⁄\ŸKö[ù\ô\›K…—[òÿ\ô€‹…À\ò⁄\ŸKôôY\◊WKôö[\ä
+Àò[YWJHOàù[Xô\äò[YJHà
+KõX\
+
+€Xô[ò[YWJHOà	€Xô[Nà	ÿúõ
+ò[YJ_X
+Köõ⁄[ä	»0≠»	 HJKBàJKBà[
+	‹›õ€ô…À»€\‹Œà	‹K[ù[IÀ^àúõ
+\ò⁄\ŸKù›[
+HJKBà]H	âà[
+	‹‹[âÀ»€\‹Œà	‹KX⁄]âÀ^à	¯†.â»JKBàKôö[\äõ€€X[äJN√BàJJHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH€€\òHôY⁄\›òYKâ»JKBàJN√BüCBÉBìS—S÷…‹\ò⁄\ŸKXY	◊HH
+›
+HOà\ò⁄\ŸPY⁄Y]
+›
+N√Bôù[ò›[€à\ò⁄\ŸPY⁄Y]
+›
+H√Bà€€ú›»›‹ôHHH›»€€ú››\Y\ú»H›‹ôKú›]Kú›\Y\úÀôö[\ä
+ HOà\Àò\ò⁄]ôY
+N»€€ú›[ô‹ôYY[ù»H›‹ôKú›]Kö[ô‹ôYY[ùŒ√BàYà
+\›\Y\úÀõ[ô›
+Hô]\õà⁄Y]
+»]Nà	”õ›òH€€\òIÀõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KXÿ[›]	À^à	–ÿY\›ôH[»Y[õ‹»[Hõ‹õôXŸY‹à[ù\»Hö[YZ\òH€€\òKâ»JK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK\›\Y\ú…»JHK	–ÿY\›ò\àõ‹õôXŸY‹â WHJN√BàYà
+Z[ô‹ôYY[ùÀõ[ô›
+Hô]\õà⁄Y]
+»]Nà	”õ›òH€€\òIÀõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KXÿ[›]	À^à	–ÿY\›ôH‹»[ú›[[‹»[ù\»HôY⁄\›ò\à[XH€€\òKâ»JWHJN√Bà€€ú››\Y\àH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸK\›\Y\â»K›\Y\úÀõX\
+
+ HOà[
+	€‹[€âÀ»ò[YNàÀöY^àÀõò[YHJJJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+K	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKY]I»JN√Bà€€ú›ö[ò[òŸP⁄⁄XŸHH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKYö[ò[òŸI»KŸ[
+	€‹[€âÀ»ò[YNà	‹⁄[IÀ^à	‘⁄[H0≠»‹öX\àõ»€€ù\»HYÿ\â»JK[
+	€‹[€âÀ»ò[YNà	€ò[…À^à	”∞Ë€»0≠»€€Y[ùH\›0Ï‹öX€»H\›‹]YI»JWJN√Bà€€ú›YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+K	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKYYI»JN√Bà€€ú›⁄]X][€àH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸK\⁄]X][€â»KŸ[
+	€‹[€âÀ»ò[YNà	‹[ô[ùIÀ^à	‘Yÿ\à\⁄\…»JK[
+	€‹[€âÀ»ò[YNà	‹]Z]Y…À^à	‘Y€»Y€‹òI»JWJN√Bà€€ú›Y]ŸH^[Y[ùY]ŸŸ[X›
+›‹ôK	‹\ò⁄\ŸK[Y]Ÿ	 N√Bà€€ú›Xÿ€›[ùH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKXXÿ€›[ù	»KXÿ€›[ù‹[€ú ›‹ôJKõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^àKõò[YHJJJN√Bà€€ú›ôYô\úôY\ò⁄\ŸPÿ]Y€‹ûHHÿ]Y€‹ûPûRŸ^J›‹ôK	⁄[ú›[[‹… N√Bà€€ú›Yò][ÿ]Y€‹ûHHôYô\úôY\ò⁄\ŸPÿ]Y€‹ûOÀò\ò⁄]ôY»ù[àôYô\úôY\ò⁄\ŸPÿ]Y€‹ûN√Bà€€ú›^XXõPÿ]Y€‹öY\»HX›]ôQö[ò[òŸPÿ]Y€‹öY\ ›‹ôK	‹Yÿ\âÀYò][ÿ]Y€‹ûOÀöY
+N√Bà€€ú›ÿ]Y€‹ûHH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKXÿ]Y€‹ûI»K^XXõPÿ]Y€‹öY\ÀõX\
+
+][JHOà[
+	€‹[€âÀ»ò[YNà][KöY^à	⁄][Kò€ŸH»	⁄][Kò€Ÿ_H0≠»à	…ﬂI⁄][Kõò[Y_Xããä][KöYOOHYò][ÿ]Y€‹ûOÀöY»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›][\–õﬁH[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[[\›	»JN»€€ú›[ô\»H◊N»]ô^[ôR[ô^H√Bà€€ú›úôZY⁄H[€ô^QöY[
+	‹\ò⁄\ŸKYúôZY⁄	 N√Bà€€ú›^\»H[€ô^QöY[
+	‹\ò⁄\ŸK]^\… N√Bà€€ú›[ù\ô\›H[€ô^QöY[
+	‹\ò⁄\ŸKZ[ù\ô\›	 N√Bà€€ú›ôY\»H[€ô^QöY[
+	‹\ò⁄\ŸKYôY\… N√Bà€€ú›^òQöY[»H»úôZY⁄^\À[ù\ô\›ôY\»N√Bà€€ú›€‹›ô]öY]»H[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKX€‹›\ô]öY]…»JN√Bà€€ú›ôXY][\»H
+
+HOà[ô\ÀõX\
+
+[ôJHOà
+»[ô‹ôYY[ùYà[ôKö[ôÀùò[YK]Nà\úŸSù[J[ôKú]Kùò[YJH[ö]öXŸNà\úŸSù[J[ôKúöXŸKö[ú]ùò[YJHJJN√Bà€€ú›ôXY^ò\»H
+
+HOàÿöôX›ôúõ€Q[ùöY\ ÿöôX›ô[ùöY\ ^òQöY[ KõX\
+
+⁄Ÿ^K€€ùõ€JHOà⁄Ÿ^K€€ùõ€ö[ú]ùò[YKùö[J
+H»\úŸSù[J€€ùõ€ö[ú]ùò[YJHàJJN√Bàù[ò›[€à[ÿÿ]P€‹› ][\À^ò\ H√Bà€€ú›ò\ŸP€‹›»H][\ÀõX\
+
+][JHOà][Kú]H
+à][Kù[ö]öXŸJN√Bà€€ú››Xù›[Hò\ŸP€‹›ÀúôYXŸJ
+›[Kò[YJHOà›[H
+»ò[YK
+N√Bà€€ú›^òPŸ[ù»HÿöôX›ùò[Y\ ^ò\ KúôYXŸJ
+›[Kò[YJHOà›[H
+»X]úõ›[ô
+ò[YH
+àL
+K
+N√Bà]›[][]]ôPò\ŸHH»][ÿÿ]YH√Bà€€ú›[ÿÿ]Y][\»H][\ÀõX\
+
+][K[ô^
+HOà√Bà›[][]]ôPò\ŸH
+œHò\ŸP€‹›÷⁄[ô^N√Bà€€ú›ô^[ÿÿ]YH[ô^OOH][\Àõ[ô›HH»^òPŸ[ù»àX]úõ›[ô
+^òPŸ[ù»
+à›[][]]ôPò\ŸH»›Xù›[
+N√Bà€€ú›[ÿÿ]Y⁄\ôŸ\»H
+ô^[ÿÿ]YH[ÿÿ]Y
+H»L√Bà[ÿÿ]YHô^[ÿÿ]Y√Bàô]\õà»ããö][K[ÿÿ]Y⁄\ôŸ\À›[€‹›àò\ŸP€‹›÷⁄[ô^H
+»[ÿÿ]Y⁄\ôŸ\À[ôY[ö]öXŸNà
+ò\ŸP€‹›÷⁄[ô^H
+»[ÿÿ]Y⁄\ôŸ\ H»][Kú]HN√BàJN√Bàô]\õà»][\Œà[ÿÿ]Y][\À›Xù›[›[àX]úõ›[ô
+›Xù›[
+àL
+»^òPŸ[ù H»LN√BàCBàù[ò›[€àô[ô\ê€‹›ô]öY] 
+H√Bà€€ú›][\»HôXY][\ 
+Kôö[\ä
+][JHOà][Kú]Hà	âà][Kù[ö]öXŸHà
+N√Bà€€ú›^ò\»HôXY^ò\ 
+N√BàYà
+Z][\Àõ[ô›ÿöôX›ùò[Y\ ^ò\ Kú€€YJ
+ò[YJHOàò[YHOHù[ò[YH
+JH√Bà€‹›ô]öY]Àúô\XŸP⁄[ô[ä[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	“[ôõ‹õYH‹»][ú»Hò[‹ô\»‹⁄]]õ‹»\òHô\à»ò]Z[Àâ»JJN√Bàô]\õé√BàCBà€€ú›€‹›»H[ÿÿ]P€‹› ][\À^ò\ N√Bà€‹›ô]öY]Àúô\XŸP⁄[ô[äBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘ô\›[[»Hò]Z[»H€€\òI»JKBà[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[
+	›âÀﬂKŸ[
+	›	À»^à	“][ú…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+€‹›Àú›Xù›[
+HJWJKBàããñ÷…—úô]IÀ^ò\ÀôúôZY⁄K…“[\‹›‹…À^ò\Àù^\◊K…“ù\õ‹…À^ò\Àö[ù\ô\›K…—[òÿ\ô€‹…À^ò\ÀôôY\◊WKõX\
+
+€Xô[ò[YWJHOà[
+	›âÀﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ò[YJHJWJJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	’›[H€€\òI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸK]›[	À^àúõ
+€‹›Àù›[
+HJWJKBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–›\›‹»YX⁄[€òZ\»\›öXùpÎY‹»õ‹‹ò⁄[€ò[Y[ùH[»ò[‹àHÿYH][Nâ»JKBàããò€‹›Àö][\ÀõX\
+
+][JHOà[
+	‹	À»€\‹Œà	‹K[]]Y	À^à	‹›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…À][Kö[ô‹ôYY[ùY
+OÀõò[YH	“[ú›[[…ﬂH0≠»YX⁄[€ò[	ÿúõ
+][Kò[ÿÿ]Y⁄\ôŸ\ _H0≠»›\›»â	⁄][Kõ[ôY[ö]öXŸKù—ö^Y
+
+Kúô\XŸJ	ÀâÀ	À	 _H‹à	‹›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…À][Kö[ô‹ôYY[ùY
+OÀú›ÿ⁄’[ö]	›[öYYIﬂXJJKBà
+N√BàCBàù[ò›[€àY[ôJ
+H√Bà€€ú›[ô^Hô^[ôR[ô^
+ Œ√Bà€€ú›[ô»H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà\ò⁄\ŸKZ][KI⁄[ô^XK[ô‹ôYY[ùÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^à	⁄Kõò[Y_H
+	⁄Kú›ÿ⁄’[ö]JXJJJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	€ù[Xô\âÀZ[éà	ÃåIÀ›\à	ÿ[ûIÀò[YNà	ÃIÀ	Ÿ]K]\›Y	Œà\ò⁄\ŸK\]KI⁄[ô^XJN√Bà€€ú›öXŸHH[€ô^QöY[
+ù[\ò⁄\ŸK\öXŸKI⁄[ô^X
+N√Bà€€ú›[ôHH»[ôÀ]KöXŸKõ›Œàù[N√Bà[ôKúõ›»H[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»K√BàöY[
+	“[ú›[[ÀŸ[Xò[YŸ[IÀ[ô KBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	‘]X[ùYYIÀ]JKöY[
+	‘ôpÈ€»‹à[öYYHH€€\òIÀöXŸJWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà»[ôKúõ›Àúô[[›ôJ
+N»[ô\Àú‹XŸJ[ô\Àö[ô^Ÿä[ôJKJN»ô[ô\ê€‹›ô]öY] 
+N»HK	‘ô[[›ô\à][I KBàJN√Bà[ô\Àú\⁄
+[ôJN»][\–õﬁò\[ô
+[ôKúõ› N√Bà⁄[ôÀ]KöXŸKö[ú]Kôõ‹ëXX⁄
+
+€€ùõ€
+HOà»€€ùõ€òY]ô[ù\›[ô\ä	⁄[ú]	Àô[ô\ê€‹›ô]öY] N»€€ùõ€òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀô[ô\ê€‹›ô]öY] N»JN√Bàô[ô\ê€‹›ô]öY] 
+N√BàCBàY[ôJ
+N√BàÿöôX›ùò[Y\ ^òQöY[ Kôõ‹ëXX⁄
+
+€€ùõ€
+HOà€€ùõ€ö[ú]òY]ô[ù\›[ô\ä	⁄[ú]	Àô[ô\ê€‹›ô]öY] JN√Bà€€ú›ö[ò[òŸQöY[»H[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	‹\ò⁄\ŸKYö[ò[òŸKYöY[…»K√BàöY[
+	–ÿ]Y€‹öXHõ»[õ»H€€ù\…Àÿ]Y€‹ûJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	’ô[ò⁄[Y[ù…ÀYJKöY[
+	‘⁄]XpÈË€…À⁄]X][€äWJKBàöY[
+	—õ‹õXHHYÿ[Y[ù…ÀY]Ÿ
+KöY[
+	–€€ùHö[ò[òŸZ\òIÀXÿ€›[ù
+KBàJN√Bà€€ú›ﬁ[ò—ö[ò[òŸUö\⁄Xö[]HH
+
+HOà»ö[ò[òŸQöY[Àú›[Kô\‹^HHö[ò[òŸP⁄⁄XŸKùò[YHOOH	‹⁄[I»»	…»à	€õ€ôIŒ»N√Bàö[ò[òŸP⁄⁄XŸKòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀﬁ[ò—ö[ò[òŸUö\⁄Xö[]JN»ﬁ[ò—ö[ò[òŸUö\⁄Xö[]J
+N√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›][\»HôXY][\ 
+N√BàYà
+Z][\Àõ[ô›][\Àú€€YJ
+][JHOàJ][Kú]Hà
+HJ][Kù[ö]öXŸHà
+JJH»⁄[ô›Àò[\ù
+	“[ôõ‹õYH]X[ùYYHHôpÈ€»∞Ë[Y‹»[HŸ‹»‹»][ú»H€€\òKâ N»ô]\õé»CBà€€ú›^ò\»HôXY^ò\ 
+N√BàYà
+ÿöôX›ùò[Y\ ^ò\ Kú€€YJ
+ò[YJHOàSù[Xô\ãö\—ö[ö]Jò[YJHò[YH
+JH»⁄[ô›Àò[\ù
+	—úô]K[\‹›‹Àù\õ‹»H[òÿ\ô€‹»]ô[H\àò[‹ô\»ù[pÍ\öX€‹»Y›XZ\»›HXZ[‹ô\»]YHô\õÀâ N»ô]\õé»CBà€€ú›€‹›»H[ÿÿ]P€‹› ][\À^ò\ N√Bà€€ú››[H€‹›Àù›[»€€ú›\ò⁄\ŸRYH]ZY
+
+N»€€ú›ö[ò[ò⁄X[UòX⁄ŸYHö[ò[òŸP⁄⁄XŸKùò[YHOOH	‹⁄[IŒ»€€ú›]RYHö[ò[ò⁄X[UòX⁄ŸY»]ZY
+
+Hà[ôYö[ôY»€€ú›Ÿ[X›Y›\Y\àH›‹ôKôŸ]
+	‹›\Y\ú…À›\Y\ãùò[YJN√Bà›òX›[€úÀõ]]]J
+ô^›‹ôJHOà√Bàô^›‹ôKù\Ÿ\ù\ò⁄\ŸJ»Yà\ò⁄\ŸRY]à]R\€ ]Kùò[YJK›\Y\íYà›\Y\ãùò[YK][\Œà€‹›Àö][\À›Xù›[à€‹›Àú›Xù›[ããô^ò\À›[ö[ò[ò⁄X[UòX⁄ŸYããä]RY»»]RYHàﬂJHJN√BàYà
+ö[ò[ò⁄X[UòX⁄ŸY
+Hô^›‹ôKù\Ÿ\ùö[ò[òŸU]J»Yà]RY\ôX›[€éà	‹Yÿ\âÀ\‹›YY]à]R\€ ]Kùò[YJK€€\][òŸQ]Nà]R\€ ]Kùò[YJKYQ]Nà]R\€ YKùò[YJK[[›[ùà›[\ÿ‹ö\[€éà€€\òH0≠»	‹Ÿ[X›Y›\Y\èÀõò[YH	—õ‹õôXŸY‹âﬂXÿ]Y€‹ûRYàÿ]Y€‹ûKùò[YH[ôYö[ôY\ùU\Nà	Ÿõ‹õôXŸY‹âÀ\ùRYà›\Y\ãùò[YK\ùSò[YNàŸ[X›Y›\Y\èÀõò[YH	—õ‹õôXŸY‹âÀ^X›YY]ŸàY]Ÿùò[YK€›\òŸU\Nà	ÿ€€\òIÀ€›\òŸRYà\ò⁄\ŸRYJN√Bà€€ú›ûR[ô‹ôYY[ùHô]»X\
+
+N√Bàõ‹à
+€€ú›][HŸà€‹›Àö][\ H√Bà€€ú››[HHûR[ô‹ôYY[ùôŸ]
+][Kö[ô‹ôYY[ùY
+H»]Nà›[€‹›àN√Bà›[Kú]H
+œH][Kú]N»›[Kù›[€‹›
+œH][Kù›[€‹›√BàûR[ô‹ôYY[ùúŸ]
+][Kö[ô‹ôYY[ùY›[JN√BàCBàõ‹à
+€€ú›⁄[ô‹ôYY[ùY›[WHŸàûR[ô‹ôYY[ù
+H√Bà€€ú›[ô‹ôYY[ùHô^›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…À[ô‹ôYY[ùY
+N√Bàô^›‹ôKòYöXŸP⁄[ôŸJ»Yà]ZY
+
+K]à]R\€ ]Kùò[YJK[ô‹ôYY[ùYöXŸNà›[Kù›[€‹›»›[Kú]HJN√BàYà
+[ô‹ôYY[ù
+Hô^›‹ôKù\Ÿ\ù[ô‹ôYY[ù
+»ããö[ô‹ôYY[ù\››\Y\éàŸ[X›Y›\Y\èÀõò[YH[ô‹ôYY[ùõ\››\Y\ã⁄‹[ô“Y[éàò[ŸHJN√BàCBàYà
+ö[ò[ò⁄X[UòX⁄ŸY	âà⁄]X][€ãùò[YHOOH	‹]Z]Y… Hô^›‹ôKòYö[ò[òŸTŸ][Y[ù
+»Yà]ZY
+
+K]à]R\€ ]Kùò[YJK]RY[[›[ùà›[Y]ŸàY]Ÿùò[YKXÿ€›[ùYàXÿ€›[ùùò[YH[ôYö[ôYJN√BàJN√BàCBàô]\õà⁄Y]
+»]Nà	‘ôY⁄\›ò\à€€\òIÀõ›‹ŒàŸöY[
+	—õ‹õôXŸY‹âÀ›\Y\äKöY[
+	—]HH€€\òIÀ]JK][\–õﬁ[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ€ò€X⁄ŒàY[ôHK	 »YX⁄[€ò\à][I K[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	—úô]IÀúôZY⁄
+KöY[
+	“[\‹›‹…À^\ KöY[
+	“ù\õ‹…À[ù\ô\›
+KöY[
+	—[òÿ\ô€‹…ÀôY\ WJK€‹›ô]öY]ÀöY[
+	—[ùò\àõ»€€ù\»HYÿ\è…Àö[ò[òŸP⁄⁄XŸJKö[ò[òŸQöY[À[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ŸH\ÿ€€\à8†'∞Ë€¯†'KH€€\òH]X[^ò\∞ËH›\›Àõ‹õôXŸY‹ã\›0Ï‹öX€»H\›‹]YKX\»∞Ë€»[ùò\∞ËHõ»€€ù\»HYÿ\àô[HòHëKâ»JK[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	“[ôõ‹õYH»ôpÈ€»‹àŸÀ]õ»›H[öYYH8†%HY\€XH[öYYHÿY\›òYHõ»[ú›[[Àà‹»›\›‹»YX⁄[€òZ\»Ë€»ò]XY‹»[»ò[‹à‹»][úÀâ»JWK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	‹\ò⁄\ŸK\ÿ]ôI»JN√BüCBÉBôù[ò›[€àö[ò[òŸP⁄\ù[ô[
+›
+H√Bà€€ú›ÿ]»H›ú›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ HOàXÀò\ò⁄]ôY
+Kú€XŸJ
+CBàú€‹ù
+
+KäHOà›ö[ô Kò€ŸH	ŒNI Kõÿÿ[P€€\\ôJ›ö[ô ãò€ŸH	ŒNI K[ôYö[ôY»ù[Y\öXŒàùYHJHKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹Pîâ JN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	”‹ôÿ[ö^òpÈË€»€€ù0ËXö[H€€ôôZ]\öXI»JK[
+	⁄âÀ»^à	‘[õ»H€€ù\…»JWJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ÿÿ][X[òYŸIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹öX\…»JHK	”‹ôÿ[ö^ò\àÿ]Y€‹öX\… WJK[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»[õ»Ÿ\\òHôXŸZ]\À›\›‹»\ô]‹À\‹\ÿ\»‹\òX⁄[€òZ\À[ùô\›[Y[ù‹»H[›ö[Y[ùpÈÌY\»Hõ‹öY]0Ë\öXKàÿ]Y€‹öX\»ô\]Y\»Ë€»\ú]Z]òY\»Ÿ[H[\ò\à[∞Èÿ[Y[ù‹»[ùY€‹Àâ»JK[
+	Ÿ]âÀ»€\‹Œà	‹KXX›[€ô‹öY	»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸKXXÿ€›[ù…»JHK	–€€ù\»Hò[ò€‹… K[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK[Y]Ÿ…»JHK	—õ‹õX\»HYÿ[Y[ù… K[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK\›\Y\ú…»JHK	—õ‹õôXŸY‹ô\… WJK[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»Kÿ]ÀõX\
+
+ HOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[ù[HK[]]YKXÿ]Y€‹ûKX€ŸIÀ^àÀò€ŸH	…»JK[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›»KXÿ]Y€‹ûKZ[ôõ…»KŸ[
+	‹›õ€ô…À»^à	ÿÀú\ô[ùY»	¯†%	»à	…ﬂIÿÀõò[Y_XJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àÿÀõò]\ôHÀö⁄[ôÀòôZ]ö[‹ãÀòÿ\⁄õ›—‹õ›\Kôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 HJWJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹ûKYY]	ÀYàÀöYJHK	—Y]\â WJJJWJN√BüCBÉBôù[ò›[€àõ‹õôXŸY‹ô\‘[ô[
+›
+H√Bà€€ú››\Y\ú»H›ú›‹ôKú›]Kú›\Y\úÀôö[\ä
+›\Y\äHOà\›\Y\ãò\ò⁄]ôY
+CBàú€XŸJ
+Kú€‹ù
+
+KäHOàKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹Pîâ JN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	—õ‹õôXŸY‹ô\…»JK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK\›\Y\ú…»JHK	 »ÿY\›ò\à›HY]\â WJKBà›\Y\úÀõ[ô›»[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K›\Y\úÀõX\
+
+›\Y\äHOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»KŸ[
+	‹›õ€ô…À»€\‹Œà	‹KY‹õ›…À^à›\Y\ãõò[YHJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK\›\Y\ú…»JHK	—Y]\â WJJJHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[Hõ‹õôXŸY‹àÿY\›òYÀâ»JKBàJN√BüCBÉBìS—S÷…Ÿö[ò[òŸK\›\Y\ú…◊HH
+›
+HOàö[ò[òŸT›\Y\ú‘⁄Y]
+›
+N√Bôù[ò›[€àö[ò[òŸT›\Y\ú‘⁄Y]
+›
+H√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	ÀXŸZ€\éà	”õ€YH»õ‹õôXŸY‹âÀ	Ÿ]K]\›Y	Œà	‹›\Y\ã[ò[YI»JN√Bà€€ú›ö\ù^HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀ	Ÿ]K]\›Y	Œà	‹›\Y\ãXö\ù^I»JN√Bà€€ú›õ›‹»H›ú›‹ôKú›]Kú›\Y\úÀõX\
+
+›\Y\äHOà√Bà€€ú›Y]ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNà›\Y\ãõò[YHJN√Bà€€ú›Y]ö\ù^HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNà›\Y\ãòö\ù^H	…»JN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹ŒàKY]Z[Xÿ\ô	‹›\Y\ãò\ò⁄]ôY»	»K\ô]ô\úŸY	»à	…ﬂXK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	”õ€YIÀY]ò[YJKöY[
+	—]HH[ö]ô\úË\ö[…ÀY]ö\ù^JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+›‹ôJHOà›‹ôKù\Ÿ\ù›\Y\ä»ããú›\Y\ãò[YNàY]ò[YKùò[YKùö[J
+H›\Y\ãõò[YKö\ù^NàY]ö\ù^Kùò[YH[ôYö[ôYJJHK	‘ÿ[ò\â KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+›‹ôJHOà›‹ôKù\Ÿ\ù›\Y\ä»ããú›\Y\ã\ò⁄]ôYà\›\Y\ãò\ò⁄]ôYJJHK›\Y\ãò\ò⁄]ôY»	‘ôX]]ò\â»à	–\ú]Z]ò\â KBàJKBàJN√BàJN√Bàô]\õà⁄Y]
+»]Nà	—õ‹õôXŸY‹ô\…Àõ›‹ŒàŸ[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	”õ€YIÀò[YJKöY[
+	—]HH[ö]ô\úË\ö[…Àö\ù^JWJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	‹›\Y\ãXY	À€ò€X⁄Œà
+
+HOà»Yà
+ò[YKùò[YKùö[J
+JH›òX›[€úÀõ]]]S[Ÿ[
+
+›‹ôJHOà›‹ôKù\Ÿ\ù›\Y\ä»Yà]ZY
+
+Kò[YNàò[YKùò[YKùö[J
+Kö\ù^Nàö\ù^Kùò[YH[ôYö[ôYJJN»HK	 »YX⁄[€ò\àõ‹õôXŸY‹â Kããúõ›‹◊HJN√BüCBÉBìS—S÷…Ÿö[ò[òŸKXXÿ€›[ù…◊HH
+›
+HOàö[ò[òŸPXÿ€›[ù‘⁄Y]
+›
+N√Bôù[ò›[€àö[ò[òŸPXÿ€›[ù‘⁄Y]
+›
+H√Bà€€ú›\\»H÷…ÿÿZ^IÀ	–ÿZ^H[H[öZ\õ…◊K…ÿ€€ùKX€‹úô[ùIÀ	–€€ùH€‹úô[ùI◊K…‹›\[òÿIÀ	‘›\[∞ÈÿI◊K…ÿÿ\ùZ\òKYY⁄][	À	–ÿ\ùZ\òHY⁄][	◊K…€X\]Z[ö[öIÀ	–€€ùHHX\]Z[ö[öI◊K…€›]õ…À	”›]òI◊WN√Bà€€ú›õ›‹»H›ú›‹ôKú›]Kòÿ\⁄Xÿ€›[ùÀõX\
+
+JHOà√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNàKõò[YH	…»JN√Bà€€ú›[ú›]][€àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNàKö[ú›]][€à	…ÀXŸZ€\éà	—^éàùXò[öÀ⁄X‹ôYKY\òÿY»Y€…»JN√Bà€€ú›\HH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	»K\\ÀõX\
+
+›ò[YKXô[JHOà[
+	€‹[€âÀ»ò[YK^àXô[ããä
+KòXÿ€›[ù\H	€›]õ… HOOHò[YH»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›ò[[òŸHH[€ô^QöY[
+Kõ‹[ö[ô–ò[[òŸH
+N√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNà]S€õJKõ‹[ö[ô—]JHŸ^R[ú]
+
+HJN√Bà€€ú›ÿ]ôHH
+
+HOà√BàYà
+[ò[YKùò[YKùö[J
+JH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ\⁄Xÿ€›[ù
+»ããòKò[YNàò[YKùò[YKùö[J
+K[ú›]][€éà[ú›]][€ãùò[YKùö[J
+H[ôYö[ôYXÿ€›[ù\Nà\Kùò[YK‹[ö[ô–ò[[òŸNà\úŸSù[Jò[[òŸKö[ú]ùò[YJH‹[ö[ô—]Nà]R\€ ]Kùò[YJHJJN√BàN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	»
+»
+Kò\ò⁄]ôY»	»K\ô]ô\úŸY	»à	… HK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	”õ€YHH€€ùIÀò[YJKöY[
+	–ò[ò€»›H[ú›]ZpÈË€…À[ú›]][€äKöY[
+	’\…À\JKöY[
+	‘ÿ[»[öX⁄X[	Àò[[òŸJKöY[
+	—]H[öX⁄X[	À]JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ€ò€X⁄Œàÿ]ôHK	‘ÿ[ò\à[\òpÈÌY\… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ\⁄Xÿ€›[ù
+»ããòK\ò⁄]ôYàXKò\ò⁄]ôYJJHKKò\ò⁄]ôY»	‘ôX]]ò\â»à	–\ú]Z]ò\â KBàJKBàJN√BàJN√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	ÀXŸZ€\éà	—^éàò[ò€»[ù\â»JN√Bà€€ú›[ú›]][€àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	ÀXŸZ€\éà	–ò[ò€»›H[ú›]ZpÈË€…»JN√Bà€€ú›\HH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	»K\\ÀõX\
+
+›ò[YKXô[JHOà[
+	€‹[€âÀ»ò[YK^àXô[JJJN√Bà€€ú›YH
+
+HOà√BàYà
+[ò[YKùò[YKùö[J
+JH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ\⁄Xÿ€›[ù
+»Yà]ZY
+
+Kò[YNàò[YKùò[YKùö[J
+K[ú›]][€éà[ú›]][€ãùò[YKùö[J
+H[ôYö[ôYXÿ€›[ù\Nà\Kùò[YK‹[ö[ô–ò[[òŸNàJJN√BàN√Bàô]\õà⁄Y]
+»]Nà	–€€ù\ÀÿZ^\»Hò[ò€‹…Àõ›‹Œà√Bà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–ÿY\›ôH€ôH»[öZ\õ»öXÿKàõÿÍàŸH[\ò\à»õ€YK»ò[ò€À»\»H»ÿ[»[öX⁄X[Ÿ[H\ô\à»\›0Ï‹öX€Àâ»JKBàããúõ›‹ÀBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–YX⁄[€ò\àõ›òH€€ùI»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	”õ€YHH€€ùIÀò[YJKöY[
+	–ò[ò€»›H[ú›]ZpÈË€…À[ú›]][€äKöY[
+	’\…À\JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	Ÿö[ò[òŸKXXÿ€›[ùXY	À€ò€X⁄ŒàYK	 »YX⁄[€ò\à€€ùI K[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸKXYù\›Y[ù	»JHK	–Zù\›H›Hò[úŸô\∞Íõò⁄XI WJKBàHJN√BüCBÉBìS—S÷…Ÿö[ò[òŸK[Y]Ÿ…◊HH
+›
+HOàö[ò[òŸSY]Ÿ‘⁄Y]
+›
+N√Bôù[ò›[€àö[ò[òŸSY]Ÿ‘⁄Y]
+›
+H√Bà€€ú›Y]Ÿ»H^[Y[ùY]ŸôX€‹ô ›ú›‹ôJN√Bà€€ú›ÿ]ôSY]Ÿ»H
+ô^
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+›‹ôJHOà›‹ôKúŸ]€€ôöY »^[Y[ùY]ŸŒàô^JJN√Bà€€ú›õ›‹»HY]ŸÀõX\
+
+Y]Ÿ
+HOà√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]KY‹õ›…À\Nà	›^	Àò[YNàY]Ÿõò[YHJN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KY]Z[Xÿ\ô	»
+»
+Y]Ÿò\ò⁄]ôY»	»K\ô]ô\úŸY	»à	… HK√Bàò[YKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà»€€ú›ò[YHHò[YKùò[YKùö[J
+N»Yà
+]ò[YJH»ò[YKôõÿ›\ 
+N»ô]\õé»Hÿ]ôSY]Ÿ Y]ŸÀõX\
+
+][JHOà][KöYOOHY]ŸöY»»ããö][Kò[YNàò[YHHà][JJN»HK	‘ÿ[ò\â KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOàÿ]ôSY]Ÿ Y]ŸÀõX\
+
+][JHOà][KöYOOHY]ŸöY»»ããö][K\ò⁄]ôYàZ][Kò\ò⁄]ôYHà][JJHKY]Ÿò\ò⁄]ôY»	‘ôX]]ò\â»à	–\ú]Z]ò\â KBàJN√BàJN√Bà€€ú›ô]”ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]KY‹õ›…À	Ÿ]K]\›Y	Œà	Ÿö[ò[òŸK[Y]Ÿ[ò[YIÀ\Nà	›^	ÀXŸZ€\éà	—^éà[ö»HYÿ[Y[ùÀò[KöXY…»JN√Bà€€ú›YH
+
+HOà√Bà€€ú›ò[YHHô]”ò[YKùò[YKùö[J
+N»Yà
+[ò[YJH»ô]”ò[YKôõÿ›\ 
+N»ô]\õé»CBàÿ]ôSY]Ÿ ÀããõY]ŸÀ»Yà]ZY
+
+Kò[YHWJN√BàN√Bàô]\õà⁄Y]
+»]Nà	—õ‹õX\»HYÿ[Y[ù…Àõ›‹Œà√Bà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\›\»‹0ÈÌY\»\\ôXŸ[Hõ‹»ôXŸXö[Y[ù‹ÀYÿ[Y[ù‹»Hö[õ‹Àà\ú]Z]ò\àX[ù0Í[H»\›0Ï‹öX€»[ùY€»Hô]\òHH‹0ÈË€»‹»õ›õ‹»[∞Èÿ[Y[ù‹Àâ»JKBàããúõ›‹ÀBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K€ô]”ò[YK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	Ÿö[ò[òŸK[Y]ŸXY	À€ò€X⁄ŒàYK	 »YX⁄[€ò\â WJKBàHJN√BüCBÉBôù[ò›[€àö[ò[òŸTô\‹ù‘[ô[
+›
+H√Bà€€ú›»›‹ôKöY]»HH›√Bà€€ú››\ùHöY]Àôö[î›\ù»€€ú›[ôHöY]Àôö[ë[ô√Bà€€ú›[ŸHHöY]Àôö[îô\‹ù[ŸH	‹ôX[^òY…Œ√Bà€€ú›‹[î\ö[ŸHöY]Àôö[îô\‹ù‹[î\ö[Ÿ	ÿ[	Œ√Bà€€ú›ö[\î›\ùH[ŸHOOH	ÿXô\ù…»	âà‹[î\ö[ŸOOH	ÿ[	»»ù[à›\ù√Bà€€ú›ö[\ë[ôH[ŸHOOH	ÿXô\ù…»	âà‹[î\ö[ŸOOH	ÿ[	»»ù[à[ô√Bà€€ú›\ôX›[€àHöY]Àôö[îô\‹ù\ôX›[€à	›Ÿ‹…Œ√Bà€€ú›Ÿ[X›Yÿ]Y€‹ûHHöY]Àôö[îô\‹ùÿ]Y€‹ûRY	…Œ√Bà€€ú›\ò⁄\ŸQ^ò\»H÷…ŸúôZY⁄	À	Ÿúô]KX€€\ò\…À	—úô]I◊K…›^\…À	⁄[\‹›‹ÀX€€\ò\…À	“[\‹›‹…◊K…⁄[ù\ô\›	À	⁄ù\õ‹ÀX€€\ò\…À	“ù\õ‹…◊K…ŸôY\…À	Ÿ[òÿ\ô€‹ÀX€€\ò\…À	—[òÿ\ô€‹…◊WN√Bà€€ú›ò\ŸS[›ô[Y[ù»H[ŸHOOH	ÿXô\ù…√Bà»\›]\ ›‹ôK»›]\Œà	ÿXô\ù…»JKôö[\ä
+õ› HOàõ›Àòò[[òŸHàåJKõX\
+
+õ› HOà
+√BàYà‹[éâ‹õ›Àù]KöYX]RYàõ›Àù]KöY]àõ›Àù]KôYQ]KBà\ôX›[€éàõ›Àù]Kô\ôX›[€àOOH	‹ôXŸXô\â»»	Ÿ[ùòYI»à	‹ÿZYIÀ[[›[ùàõ›Àòò[[òŸKBàXô[àõ›Àù]Kô\ÿ‹ö\[€ã\ùSò[YNàõ›Àù]Kú\ùSò[YK›]\Œàõ›Àú›]\Àÿ]Y€‹ûRYàõ›Àù]Kòÿ]Y€‹ûRYBàJJCBààÿ\⁄[›ô[Y[ù ›‹ôJKôö[\ä
+[›ô[Y[ù
+HOà[[›ô[Y[ùùò[úŸô\äN√Bà€€ú›[[›ô[Y[ù»Hò\ŸS[›ô[Y[ùÀôõ]X\
+
+[›ô[Y[ù
+HOà√BàYà
+[[›ô[Y[ùù]RY[›ô[Y[ùô\ôX›[€àOOH	‹ÿZYI Hô]\õà€[›ô[Y[ùN√Bà€€ú›]HH›‹ôKôŸ]
+	Ÿö[ò[òŸU]\…À[›ô[Y[ùù]RY
+N√Bà€€ú›\ò⁄\ŸHH]OÀú€›\òŸU\HOOH	ÿ€€\òI»»›‹ôKôŸ]
+	‹\ò⁄\Ÿ\…À]Kú€›\òŸRY
+Hàù[√BàYà
+\\ò⁄\ŸJHô]\õà€[›ô[Y[ùN√Bà€€ú›^ò\»H\ò⁄\ŸQ^ò\ÀõX\
+
+ŸöY[Ÿ^KXô[JHOà
+»Ÿ^KXô[Ÿ[ùŒàX]úõ›[ô
+
+ù[Xô\ä\ò⁄\ŸVŸöY[JH
+H
+àL
+HJJKôö[\ä
+\ù
+HOà\ùòŸ[ù»à
+N√BàYà
+Y^ò\Àõ[ô›
+Hô]\õà€[›ô[Y[ùN√Bà€€ú›\ò⁄\ŸPŸ[ù»HX]úõ›[ô
+
+ù[Xô\ä\ò⁄\ŸKù›[
+H
+H
+àL
+N√Bà€€ú›^òPŸ[ù»H^ò\ÀúôYXŸJ
+›[K\ù
+HOà›[H
+»\ùòŸ[ùÀ
+N√BàYà
+\ò⁄\ŸPŸ[ù»^òPŸ[ù»\ò⁄\ŸPŸ[ù»H
+Hô]\õà€[›ô[Y[ùN√Bà€€ú›\ù»Hﬁ»Ÿ^Nà	⁄][\…ÀXô[à	“][ú…ÀŸ[ùŒà\ò⁄\ŸPŸ[ù»H^òPŸ[ùÀÿ]Y€‹ûRYà[›ô[Y[ùòÿ]Y€‹ûRYKBàããô^ò\ÀõX\
+
+\ù
+HOà
+»ããú\ùÿ]Y€‹ûRYàÿ]Y€‹ûPûRŸ^J›‹ôK\ùöŸ^JOÀöY[›ô[Y[ùòÿ]Y€‹ûRYJJWN√Bà€€ú›ZYŸ[ù»HX]úõ›[ô
+[›ô[Y[ùò[[›[ù
+àL
+N√Bà]›[][]]ôHH»]\‹⁄Y€ôYH√Bàô]\õà\ùÀõX\
+
+\ù[ô^
+HOà√Bà›[][]]ôH
+œH\ùòŸ[ùŒ√Bà€€ú›ô^\‹⁄Y€ôYH[ô^OOH\ùÀõ[ô›HH»ZYŸ[ù»àX]úõ›[ô
+ZYŸ[ù»
+à›[][]]ôH»\ò⁄\ŸPŸ[ù N√Bà€€ú›[[›[ùH
+ô^\‹⁄Y€ôYH\‹⁄Y€ôY
+H»L√Bà\‹⁄Y€ôYHô^\‹⁄Y€ôY√Bàô]\õà»ããõ[›ô[Y[ùYà	€[›ô[Y[ùöYNâ‹\ùöŸ^_XXô[à	€[›ô[Y[ùõXô[H0≠»	‹\ùõXô[X[[›[ùÿ]Y€‹ûRYà\ùòÿ]Y€‹ûRYN√BàJKôö[\ä
+\ù
+HOà\ùò[[›[ùà
+N√BàJN√Bà€€ú›ÿ]Y€‹ûRYH
+[›ô[Y[ù
+HOàÿ[õ€öXÿ[ÿ]Y€‹ûRY
+›‹ôK[›ô[Y[ùòÿ]Y€‹ûRY
+H	◊◊‹Ÿ[W◊…Œ√Bà€€ú›ÿ]Y€‹ûSò[YHH
+Y
+HOàYOOH	◊◊‹Ÿ[W◊…»»	‘Ÿ[Hÿ]Y€‹öXI»à›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀY
+OÀõò[YH	–ÿ]Y€‹öXH[ùYÿIŒ√Bà€€ú›ÿ]Y€‹öY\»Hô]»X\
+
+N√Bà€€ú›\ôX›[€ú»H\ôX›[€àOOH	›Ÿ‹…»»…‹ôXŸXô\âÀ	‹Yÿ\â◊HàŸ\ôX›[€àOOH	Ÿ[ùòYI»»	‹ôXŸXô\â»à	‹Yÿ\â◊N√Bàõ‹à
+€€ú›ò[YHŸà\ôX›[€ú Hõ‹à
+€€ú›ÿ]Y€‹ûHŸàX›]ôQö[ò[òŸPÿ]Y€‹öY\ ›‹ôKò[YJJH√Bà€€ú›YHÿ[õ€öXÿ[ÿ]Y€‹ûRY
+›‹ôKÿ]Y€‹ûKöY
+N√BàYà
+Xÿ]Y€‹öY\Àö\ Y
+JHÿ]Y€‹öY\ÀúŸ]
+Y›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀY
+Hÿ]Y€‹ûJN√BàCBàõ‹à
+€€ú›[›ô[Y[ùŸà[[›ô[Y[ù H√BàYà
+\ôX›[€àOOH	›Ÿ‹…»	âà[›ô[Y[ùô\ôX›[€àOOH\ôX›[€äH€€ù[ùYN√Bà€€ú›YHÿ]Y€‹ûRY
+[›ô[Y[ù
+N√BàYà
+Xÿ]Y€‹öY\Àö\ Y
+JHÿ]Y€‹öY\ÀúŸ]
+Y›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀY
+Hù[
+N√BàCBà€€ú›ÿ]Y€‹ûS‹[€ú»HÀããòÿ]Y€‹öY\Àô[ùöY\ 
+WKú€‹ù
+
+KäHOà√BàYà
+VÃHOOH	◊◊‹Ÿ[W◊… Hô]\õàN√BàYà
+ñÃHOOH	◊◊‹Ÿ[W◊… Hô]\õàLN√Bàô]\õà›ö[ô VÃWOÀò€ŸH	… Kõÿÿ[P€€\\ôJ›ö[ô ñÃWOÀò€ŸH	… K[ôYö[ôY»ù[Y\öXŒàùYHJHÿ]Y€‹ûSò[YJVÃJKõÿÿ[P€€\\ôJÿ]Y€‹ûSò[YJñÃJK	‹Pîâ N√BàJN√Bà€€ú›[›ô[Y[ù»H[[›ô[Y[ùÀôö[\ä
+JHOà[ë]Tò[ôŸJKò]ö[\î›\ùö[\ë[ô
+CBà	âà
+\ôX›[€àOOH	›Ÿ‹…»Kô\ôX›[€àOOH\ôX›[€äCBà	âà
+\Ÿ[X›Yÿ]Y€‹ûHÿ]Y€‹ûRY
+JHOOHŸ[X›Yÿ]Y€‹ûJJN√Bà€€ú›‹[ï]P€›[ùH[ŸHOOH	ÿXô\ù…»»ô]»Ÿ]
+[›ô[Y[ùÀõX\
+
+[›ô[Y[ù
+HOà[›ô[Y[ùù]RY
+JKú⁄^ôHà√Bà€€ú›[ï›[H[›ô[Y[ùÀôö[\ä
+JHOàKô\ôX›[€àOOH	Ÿ[ùòYI KúôYXŸJ
+ÀJHOà»
+»Kò[[›[ù
+N√Bà€€ú››]›[H[›ô[Y[ùÀôö[\ä
+JHOàKô\ôX›[€àOOH	‹ÿZYI KúôYXŸJ
+ÀJHOà»
+»Kò[[›[ù
+N√Bà€€ú›ûPÿ]Y€‹ûHHô]»X\
+
+N√Bàõ‹à
+€€ú›[›ô[Y[ùŸà[›ô[Y[ù H√Bà€€ú›YHÿ]Y€‹ûRY
+[›ô[Y[ù
+N√Bà€€ú››[»HûPÿ]Y€‹ûKôŸ]
+Y
+H»[ùòYNàÿZYNàN√Bà›[÷€[›ô[Y[ùô\ôX›[€óH
+œH[›ô[Y[ùò[[›[ù√BàûPÿ]Y€‹ûKúŸ]
+Y›[ N√BàCBà€€ú››ô\ôYHH[ŸHOOH	‹ôX[^òY…»»\›]\ ›‹ôK»\ôX›[€éà	‹ôXŸXô\âÀ›]\Œà	›ô[ò⁄Y…»JHà◊N√Bà€€ú›ÿ]Y€‹ûTõ›‹»HÀããòûPÿ]Y€‹ûKô[ùöY\ 
+WKú€‹ù
+
+KäHOà
+ñÃWKô[ùòYH
+»ñÃWKúÿZYJHH
+VÃWKô[ùòYH
+»VÃWKúÿZYJJKõX\
+
+⁄Y›[◊JHOà[
+	›âÀﬂK√Bà[
+	›	À»^àÿ]Y€‹ûSò[YJY
+HJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›[Àô[ùòYJHJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+›[ÀúÿZYJHJKBàJJN√Bà€€ú›[›ô[Y[ùõ›‹»H[›ô[Y[ùÀõX\
+
+[›ô[Y[ù
+HOà[
+	›âÀﬂK√Bà[
+	›	À»^àõ]]J[›ô[Y[ùò]
+HJKBà[ŸHOOH	ÿXô\ù…»	âà[
+	›	À»^à[›ô[Y[ùú\ùSò[YH	”∞Ë€»[ôõ‹õXY…»JKBà[
+	›	ÀﬂK[ŸHOOH	ÿXô\ù…»»[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK]]KY]Z[	ÀYà[›ô[Y[ùù]RYJHK[›ô[Y[ùõXô[
+Hà[›ô[Y[ùõXô[
+KBà[
+	›	À»^àÿ]Y€‹ûSò[YJÿ]Y€‹ûRY
+[›ô[Y[ù
+JHJKBà[ŸHOOH	ÿXô\ù…»	âà[
+	›	À»^àíSó‘’UT÷€[›ô[Y[ùú›]\◊OÀñÃH[›ô[Y[ùú›]\»	—[HXô\ù…»JKBà[
+	›	À»€\‹ŒàK[ù[I€[›ô[Y[ùô\ôX›[€àOOH	‹ÿZYI»»	»KXòY	»à	»K\‹⁄]]ôIﬂX^à	€[›ô[Y[ùô\ôX›[€àOOH	‹ÿZYI»»	¯¢$à	»à	 »	ﬂIÿúõ
+[›ô[Y[ùò[[›[ù
+_XJKBàJJN√Bà€€ú››ô\ôYTõ›‹»H›ô\ôYKõX\
+
+äHOà[
+	›âÀﬂK√Bà[
+	›	À»^à	‹ãù]Kú\ùSò[YH	‘Ÿ[H€Y[ùIﬂH0≠»	‹ãõ›ô\ôYQ^\ﬂHXJ XJKBà[
+	›	À»€\‹Œà	‹K[ù[HKXòY	À^àúõ
+ãòò[[òŸJHJKBàJJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	—X⁄\ÌY\»€€H€\ô^òI»JK[
+	⁄âÀ»^à	‘ô[]0Ï‹ö[‹»ö[ò[òŸZ\õ‹…»JWJK[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà√Bà€€ú›[ô\»H÷…—]IÀ	’\…À	‘\‹€ÿH»õ‹õôXŸY‹âÀ	—\ÿ‹öpÈË€…À	‘[õ»H€€ùIÀ	‘⁄]XpÈË€…À	’ò[‹â◊Kããõ[›ô[Y[ùÀõX\
+
+JHOàŸ]S€õJKò]
+KKô\ôX›[€àOOH	Ÿ[ùòYI»»	—[ùòYI»à	‘ÿpÎYIÀKú\ùSò[YH	…ÀKõXô[ÿ]Y€‹ûSò[YJÿ]Y€‹ûRY
+JJK[ŸHOOH	ÿXô\ù…»»íSó‘’UT÷€Kú›]\◊OÀñÃHKú›]\»	—[HXô\ù…»à	‘ôX[^òY…ÀKò[[›[ùù—ö^Y
+äKúô\XŸJ	ÀâÀ	À	 WJWN√Bà›€õÿYö[Jö[ò[òŸZ\õÀI€[Ÿ_KIŸö[\î›\ù	⁄[öX⁄[…ﬂKIŸö[\ë[ô	Ÿö[IﬂKò‹›ò[ô\ÀõX\
+
+äHOàãõX\
+‹›êŸ[
+Köõ⁄[ä	Œ… JKöõ⁄[ä	◊â K	›^ÿ‹›â N√BàHK	—^‹ù\à‘’â WJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KX⁄\õ›…»K√Bà[
+	ÿù]€âÀ»€\‹ŒàKX⁄\	€[ŸHOOH	‹ôX[^òY…»»	»KX⁄\[€â»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ù\ôX[^ôY	À€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ù[ŸNà	‹ôX[^òY…Àö[îô\‹ùÿ]Y€‹ûRYà	…»JHK	‘Yÿ[Y[ù‹»HôXŸXö[Y[ù‹… KBà[
+	ÿù]€âÀ»€\‹ŒàKX⁄\	€[ŸHOOH	ÿXô\ù…»»	»KX⁄\[€â»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ù[‹[âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ù[ŸNà	ÿXô\ù…Àö[îô\‹ùÿ]Y€‹ûRYà	…»JHK	–€€ù\»[HXô\ù… KBàJKBà[ŸHOOH	ÿXô\ù…»	âà[
+	Ÿ]âÀ»€\‹Œà	‹KX⁄\õ›…»K√Bà[
+	ÿù]€âÀ»€\‹ŒàKX⁄\	€‹[î\ö[ŸOOH	ÿ[	»»	»KX⁄\[€â»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ù\\ö[ŸX[	À€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ù‹[î\ö[Ÿà	ÿ[	»JHK	’Ÿ‹»‹»ô[ò⁄[Y[ù‹… KBà[
+	ÿù]€âÀ»€\‹ŒàKX⁄\	€‹[î\ö[ŸOOH	ÿ›\›€I»»	»KX⁄\[€â»à	…ﬂX	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ù\\ö[ŸX›\›€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ù‹[î\ö[Ÿà	ÿ›\›€I»JHK	‘Ÿ[X⁄[€ò\à]\… KBàJKBà
+[ŸHOOH	‹ôX[^òY…»‹[î\ö[ŸOOH	ÿ›\›€I H	âà\ö[ŸöY[ ›\ù[ô
+»›\ùàÀ[ôàHJHOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[î›\ùàÀö[ë[ôàHJK	Ÿö[ã\ô\‹ù	 KBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»K√BàöY[
+[ŸHOOH	ÿXô\ù…»»	’\»H€€ùI»à	’\»H[›ö[Y[ùpÈË€…À[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ùY\ôX›[€âÀ€ò⁄[ôŸNà
+]ô[ù
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ù\ôX›[€éà]ô[ùù\ôŸ]ùò[YKö[îô\‹ùÿ]Y€‹ûRYà	…»JHK[ŸHOOH	ÿXô\ù…»»√Bà[
+	€‹[€âÀ»ò[YNà	›Ÿ‹…À^à	–HôXŸXô\àHHYÿ\âÀããä\ôX›[€àOOH	›Ÿ‹…»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBà[
+	€‹[€âÀ»ò[YNà	Ÿ[ùòYIÀ^à	–€€ù\»HôXŸXô\âÀããä\ôX›[€àOOH	Ÿ[ùòYI»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBà[
+	€‹[€âÀ»ò[YNà	‹ÿZYIÀ^à	–€€ù\»HYÿ\âÀããä\ôX›[€àOOH	‹ÿZYI»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBàHà√Bà[
+	€‹[€âÀ»ò[YNà	›Ÿ‹…À^à	’Ÿ\»\»[ùòY\»HÿpÎY\…Àããä\ôX›[€àOOH	›Ÿ‹…»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBà[
+	€‹[€âÀ»ò[YNà	Ÿ[ùòYIÀ^à	‘ôXŸZ]\»H›]ò\»[ùòY\…Àããä\ôX›[€àOOH	Ÿ[ùòYI»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBà[
+	€‹[€âÀ»ò[YNà	‹ÿZYIÀ^à	—\‹\ÿ\»H›]ò\»ÿpÎY\…Àããä\ôX›[€àOOH	‹ÿZYI»»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJKBàJJKBàöY[
+	‘[õ»H€€ùIÀ[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ùXÿ]Y€‹ûIÀ€ò⁄[ôŸNà
+]ô[ù
+HOà›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[îô\‹ùÿ]Y€‹ûRYà]ô[ùù\ôŸ]ùò[YHJHK√Bà[
+	€‹[€âÀ»ò[YNà	…À^à	’Ÿ‹»‹»[õ‹»H€€ùI»JKBàããòÿ]Y€‹ûS‹[€úÀõX\
+
+⁄Yÿ]Y€‹ûWJHOà[
+	€‹[€âÀ»ò[YNàY^à	ÿÿ]Y€‹ûOÀò€ŸH»	ÿÿ]Y€‹ûKò€Ÿ_H0≠»à	…ﬂIÿÿ]Y€‹ûSò[YJY
+_XããäŸ[X›Yÿ]Y€‹ûHOOHY»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJKBàJJKBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à[ŸHOOH	ÿXô\ù…√Bà»	”[‹›òH»ÿ[»]YHZ[ôHò[HôXŸXô\à›HYÿ\ãà€€H]\»Ÿ[X⁄[€òY\À»ö[õ»\ÿH»ô[ò⁄[Y[ùŒ»Yÿ[Y[ù‹»\ò⁄XZ\»∞ËHõ‹ò[HXò]Y‹Ààò\»€€\ò\À‹»ò[‹ô\»YX⁄[€òZ\»Ë€»\›öXùpÎY‹»õ‹‹ò⁄[€ò[Y[ùH[»ÿ[»ô\›[ùKâ√Bàà	”‹»ò[‹ô\»€€ú⁄Y\ò[HH]H[H]YH»[öZ\õ»[ùõ›H›HÿZ]Kà€€ù\»Z[ôH[HXô\ù»∞Ë€»[ùò[Hô\›H›[àò\»€€\ò\Àúô]K[\‹›‹Àù\õ‹»H[òÿ\ô€‹»\\ôXŸ[H[H€€ù\»∞Ï‹öX\Œ»‹»][ú»\õX[ôXŸ[HòHÿ]Y€‹öXH\ÿ€€YHõ»ôY⁄\›õÀâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\›]‹öY	»K‹›]ÿ\ô
+[ŸHOOH	ÿXô\ù…»»	–HôXŸXô\â»à	—[ùòY\»ôXŸXöY\…Àúõ
+[ï›[
+K	€⁄… K›]ÿ\ô
+[ŸHOOH	ÿXô\ù…»»	–HYÿ\â»à	‘ÿpÎY\»Yÿ\…Àúõ
+›]›[
+K›]›[»	›ÿ\õâ»à	‹€Ÿù	 K›]ÿ\ô
+[ŸHOOH	ÿXô\ù…»»	—Yô\ô[∞ÈÿH»ö[õ…»à	‘ÿ[»»ö[õ…Àúõ
+[ï›[H›]›[
+K[ï›[H›]›[èH»	€ò]ûI»à	ÿòY	 WJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	’›[‹à[õ»H€€ùI»JKBàÿ]Y€‹ûTõ›‹Àõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹K]XõK\ÿ‹õ€	»K[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»KŸ[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	‘[õ»H€€ùI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à[ŸHOOH	ÿXô\ù…»»	–HôXŸXô\â»à	—[ùòY\…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à[ŸHOOH	ÿXô\ù…»»	–HYÿ\â»à	‘ÿpÎY\…»JWJKããòÿ]Y€‹ûTõ›‹◊JJHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH€€ùH[ò€€ùòYH\òH\›\»ö[õ‹Àâ»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à[ŸHOOH	ÿXô\ù…»»€€ù\»[HXô\ù»
+	€‹[ï]P€›[ùH0Î][  K	€[›ô[Y[ùÀõ[ô›H[öJ H‹à€€ùJXà[∞Èÿ[Y[ù‹»»ö[õ»
+	€[›ô[Y[ùÀõ[ô›JXJKBà[›ô[Y[ùõ›‹Àõ[ô›»[
+	Ÿ]âÀ»€\‹Œà	‹K]XõK\ÿ‹õ€	»K[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	À	Ÿ]K]\›Y	Œà	Ÿö[ã\ô\‹ù[[›ô[Y[ù…»KŸ[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à[ŸHOOH	ÿXô\ù…»»	’ô[ò⁄[Y[ù…»à	—]I»JK[ŸHOOH	ÿXô\ù…»	âà[
+	›	À»^à	–€Y[ùH»õ‹õôXŸY‹â»JK[
+	›	À»^à	—\ÿ‹öpÈË€…»JK[
+	›	À»^à	‘[õ»H€€ùI»JK[ŸHOOH	ÿXô\ù…»	âà[
+	›	À»^à	‘⁄]XpÈË€…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à[ŸHOOH	ÿXô\ù…»»	‘ÿ[…»à	’ò[‹â»JWJKããõ[›ô[Y[ùõ›‹◊JJHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H[∞Èÿ[Y[ù»[ò€€ùòY»\òH\›\»ö[õ‹Àâ»JKBà[ŸHOOH	‹ôX[^òY…»	âà[
+	Ÿ]Z[…ÀﬂKŸ[
+	‹›[[X\ûIÀ»^à€Y[ù\»[òY[\[ù\»
+	€›ô\ôYTõ›‹Àõ[ô›JXJK›ô\ôYTõ›‹Àõ[ô›»[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»K›ô\ôYTõ›‹ Hà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H€Y[ùH[òY[\[ùKâ»JK[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–€€ú›[H»ÿ[»]X[‹»€Y[ù\Œ»∞Ë€»ŸY›YH‹»ö[õ‹»\›Hô[]0Ï‹ö[Àâ»JWJKBà[ŸHOOH	‹ôX[^òY…»	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ÿ[»HÿZ^H∞Ë€»0ÍH»Y\€[»]YHX‹õÀà\ô\»Ÿ[H[›ö[Y[ùpÈË€»H[öZ\õ»öXÿ[Hõ‹òH\›Hô[]0Ï‹ö[»H€€ù[ùX[Hõ»ô[]0Ï‹ö[»Ÿ\ô[ò⁄X[HõŸpÈË€Àâ»JKBàJN√BüCBÉBò€€ú›–UQ”‘ñW““Së»H√Bà…Ÿ\‹\ÿUò\öX]ô[	À	—\‹\ÿHò\öpË]ô[	À	—\‹\ÿ\»ò\öpË]ôZ\…◊KBà…Ÿ\‹\ÿQö^IÀ	—\‹\ÿHö^IÀ	—\‹\ÿ\»ö^\…◊KBà…ÿ›\›…À	–›\›…À	–›\›‹…◊KBà…‹ôXŸZ]IÀ	‘ôXŸZ]IÀ	‘ôXŸZ]\…◊KBà…‹\ôIÀ	‘\ôIÀ	‘\ô\…◊KBóN√Bò€€ú›⁄[ô⁄‹ùH
+ HOà
+»\‹\ÿQö^Nà	—ö^IÀ\‹\ÿUò\öX]ô[à	’ò\öpË]ô[	À›\›Œà	–›\›…ÀôXŸZ]Nà	‘ôXŸZ]IÀ\ôNà	‘\ôI»V⁄◊H	… N√BÉBã äà‹‹õ›\ú»ŸàH\‹\ÿKXXõHÿ]Y€‹öY\»
+ö^K›ò\öpË]ô[
+K›Xòÿ]Y€‹öX\»[ô[ùY\ò⁄]ôYY[ãà
+ã√Bôù[ò›[€à\‹\ÿPÿ]Y€‹ûQ‹õ›\ ›‹ôJH√Bàô]\õà÷…Ÿ\‹\ÿUò\öX]ô[	À	—\‹\ÿ\»ò\öpË]ôZ\…◊K…Ÿ\‹\ÿQö^IÀ	—\‹\ÿ\»ö^\…◊K…ÿ›\›…À	–›\›‹…◊WKõX\
+
+⁄⁄[ôXô[JHOà√Bà€€ú›ÿ]»H›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ HOàÀö⁄[ôOOH⁄[ô	âàXÀò\ò⁄]ôY
+N√Bà€€ú›‹»Hÿ]Àôö[\ä
+ HOàXÀú\ô[ùY
+N√Bà€€ú›‹»H◊N√Bàõ‹à
+€€ú›Ÿà‹ H√Bà‹Àú\⁄
+[
+	€‹[€âÀ»ò[YNàöY^àõò[YHJJN√Bàõ‹à
+€€ú››XàŸàÿ]Àôö[\ä
+ HOàÀú\ô[ùYOOHöY
+JH‹Àú\⁄
+[
+	€‹[€âÀ»ò[YNà›XãöY^à8†%	‹›Xãõò[Y_XJJN√BàCBàõ‹à
+€€ú›‹ú[àŸàÿ]Àôö[\ä
+ HOàÀú\ô[ùY	âà]‹Àú€€YJ
+
+HOàöYOOHÀú\ô[ùY
+JJH‹Àú\⁄
+[
+	€‹[€âÀ»ò[YNà‹ú[ãöY^à‹ú[ãõò[YHJJN√Bàô]\õà‹Àõ[ô›»[
+	€‹‹õ›\	À»Xô[K‹ Hàù[√BàJKôö[\äõ€€X[äN√BüCBÉBôù[ò›[€àö[ò[òŸZ\õ‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›[€ùH›ùöY]Àôö[ò[òŸS[€ù›\úô[ù[€ù
+
+N√Bà€€ú›ŸôVYX\ãôS[€ùù[Xô\óHH[€ùú‹]
+	ÀI KõX\
+ù[Xô\äN√Bà€€ú›ôS[€ù›\ùH	€[€ùKLX√Bà€€ú›ôS[€ù[ôH	€[€ùKI‘›ö[ô ô]»]JôVYX\ãôS[€ùù[Xô\ã
+KôŸ]]J
+JKúY›\ù
+ã	Ã	 _X√Bà€€ú›\HH›ùöY]Àôö[ò[òŸU\H	›Ÿ‹…Œ√Bà€€ú›ÿ]ò[YHH
+Y
+HOà›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀY
+OÀõò[YH	 Ÿ[Hÿ]Y€‹öXJIŒ√Bà€€ú›[›ô[Y[ù»H◊N√Bàõ‹à
+€€ú›»Ÿà›‹ôKú›]Kúÿ[\ H[›ô[Y[ùÀú\⁄
+»YàÀöY]àÀò]\Nà	‹ôXŸZ]IÀXô[à›‹ôKôŸ]
+	‹õŸX›…ÀÀúõŸX›Y
+OÀõò[YH	’ô[ôH∞Ë\YIÀ\ÿ‹ö\[€éàÀò⁄[õô[	’ô[ôIÀ[[›[ùà
+Àú]H
+H
+à
+Àù[ö]öXŸH
+Kô]ô\úÿ[⁄[ôà	‹ÿ[IÀô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	‹ÿ[IÀÀöY
+HJN√Bàõ‹à
+€€ú›Ÿà›‹ôKú›]Kú^[Y[ù H√Bà€€ú›[ò»H›‹ôKôŸ]
+	Ÿ[ò€€Y[ô\…Àô[ò€€Y[ôRY
+N»€€ú›€HH[òœÀò€Y[ùRY»›‹ôKôŸ]
+	ÿ€Y[ù…À[òÀò€Y[ùRY
+Hàù[√Bà[›ô[Y[ùÀú\⁄
+»YàöY]àò]\Nà	‹ôXŸZ]IÀXô[à€OÀõò[YH	‘Yÿ[Y[ù»Hô[ôIÀ\ÿ‹ö\[€éà…‘Yÿ[Y[ù…Àôõ‹õXWKôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 K[[›[ùàùò[‹àô]ô\úÿ[⁄[ôà	‹^[Y[ù	Àô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	‹^[Y[ù	ÀöY
+HJN√BàCBàõ‹à
+€€ú›[ò€€YHŸà›‹ôKú›]Kö[ò€€Y\»◊JH[›ô[Y[ùÀú\⁄
+»Yà[ò€€YKöY]à[ò€€YKò]\Nà	‹ôXŸZ]IÀXô[àÿ]ò[YJ[ò€€YKòÿ]Y€‹ûRY
+K\ÿ‹ö\[€éà[ò€€YKô\ÿ‹ö\[€à	”›]òHôXŸZ]IÀ[[›[ùà[ò€€YKùò[‹àô]ô\úÿ[⁄[ôà	⁄[ò€€YIÀô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	⁄[ò€€YIÀ[ò€€YKöY
+HJN√Bàõ‹à
+€€ú›Ÿà›‹ôKú›]Kô\‹\ÿ\ H√Bà€€ú›⁄[ôH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…Àòÿ]Y€‹ûRY
+OÀö⁄[ô√Bà€€ú›[›ï\HH⁄[ôOOH	ÿ›\›…»»	ÿ›\›…»à	Ÿ\‹\ÿIŒ√Bà[›ô[Y[ùÀú\⁄
+»YàöY]àò]\Nà[›ï\KXô[àÿ]ò[YJòÿ]Y€‹ûRY
+K\ÿ‹ö\[€éà⁄⁄[ô⁄‹ù
+⁄[ô
+Kô\ÿ‹ö\[€óKôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 K[[›[ùàùò[‹àô]ô\úÿ[⁄[ôà	Ÿ\‹\ÿIÀô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	Ÿ\‹\ÿIÀöY
+HJN√BàCBàõ‹à
+€€ú›àŸà›‹ôKú›]Kùò\öXXõP€‹› H[›ô[Y[ùÀú\⁄
+»YàãöY]àãò]\Nà	ÿ›\›…ÀXô[à	–›\›»[ùY€…À\ÿ‹ö\[€éàãõõ›H	…À[[›[ùàãò[[›[ùô]ô\úÿ[⁄[ôà	›ò\öXXõP€‹›	Àô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	›ò\öXXõP€‹›	ÀãöY
+HJN√Bàõ‹à
+€€ú››Ÿà›‹ôKú›]Kôö[ò[òŸTŸ][Y[ù H√Bà€€ú›]HH›‹ôKôŸ]
+	Ÿö[ò[òŸU]\…À›ù]RY
+N»Yà
+]]JH€€ù[ùYN√BàYà
+›ö⁄[ôOOH	ÿ€Y[ù\^[Y[ùX[ÿÿ][€â»›ö⁄[ôOOH	ÿ‹ôY]	 H€€ù[ùYN√Bà€€ú›⁄[ôH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À]Kòÿ]Y€‹ûRY
+OÀõò]\ôN√Bà€€ú›\ÿ€›[ùH›ö⁄[ôOOH	Ÿ\ÿ€›[ù	Œ»€€ú›‹‹»H›ö⁄[ôOOH	€‹‹…Œ√Bà[›ô[Y[ùÀú\⁄
+»Yà›öY]à›ò]\Nà\ÿ€›[ù‹‹»»	Ÿ\‹\ÿI»à]Kô\ôX›[€àOOH	‹ôXŸXô\â»»	‹ôXŸZ]I»à⁄[ôOOH	ÿ›\›…»»	ÿ›\›…»à	Ÿ\‹\ÿIÀXô[à‹‹»»	‘\ôH€€H€Y[ùI»à\ÿ€›[ù»	—\ÿ€€ù»€€òŸYY»òH]Z]pÈË€…»à
+]Kú\ùSò[YH]Kô\ÿ‹ö\[€äK\ÿ‹ö\[€éà›]Kú\ùSò[YH]Kô\ÿ‹ö\[€ã\ÿ€›[ù‹‹»»	‹Ÿ[H[›ö[Y[ù»HÿZ^I»à›õY]ŸKôö[\äõ€€X[äKöõ⁄[ä	»0≠»	 K[[›[ùà›ò[[›[ùô]ô\úÿ[⁄[ôà	Ÿö[ò[òŸTŸ][Y[ù	Àô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	Ÿö[ò[òŸTŸ][Y[ù	À›öY
+Kõ€òÿ\⁄à\ÿ€›[ù‹‹»JN√BàCBàõ‹à
+€€ú›]HŸà›‹ôKú›]Kôö[ò[òŸU]\ H√Bà€€ú››]HH]T›]J›‹ôK]JN»Yà
+]Kòÿ[òŸ[Y]›]Kòò[[òŸHHåJH€€ù[ùYN√Bà€€ú›ò]\ôHH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À]Kòÿ]Y€‹ûRY
+OÀõò]\ôN√Bà[›ô[Y[ùÀú\⁄
+»Yà[ô[ôÀI›]KöYX]à]KôYQ]K\Nà]Kô\ôX›[€àOOH	‹ôXŸXô\â»»	‹ôXŸZ]I»àò]\ôHOOH	ÿ›\›…»»	ÿ›\›…»à	Ÿ\‹\ÿIÀXô[à]Kú\ùSò[YH]Kô\ÿ‹ö\[€ã\ÿ‹ö\[€éà	‹›]Kú›]\»OOH	›ô[ò⁄Y…»»	’ô[ò⁄Y…»à	‘[ô[ùIﬂH0≠»	›]Kô\ÿ‹ö\[€üX[[›[ùà›]Kòò[[òŸK[ô[ôŒàùYHJN√BàCBàõ‹à
+€€ú›‹‹»Ÿà›‹ôKú›]Kú\ô\ H[›ô[Y[ùÀú\⁄
+»Yà‹‹ÀöY]à‹‹Àò]\Nà	ÿ›\›…ÀXô[à	‘\ôHHõŸpÈË€…À\ÿ‹ö\[€éà‹‹Àõõ›H	‘Ÿ[HÿpÎYHHÿZ^IÀ[[›[ùà‹‹Àò[[›[ùô]ô\úÿ[⁄[ôà	‹\ôIÀô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	‹\ôIÀ‹‹ÀöY
+Kõ€òÿ\⁄àùYHJN√Bàõ‹à
+€€ú›HŸà›‹ôKú›]Kòÿ\⁄Yù\›Y[ù H[›ô[Y[ùÀú\⁄
+»YàKöY]àKò]\NàKô\ôX›[€àOOH	‹ÿZYI»»	Ÿ\‹\ÿI»à	‹ôXŸZ]IÀXô[àKö⁄[ôOOH	›ò[úŸô\â»»	’ò[úŸô\∞Íõò⁄XH[ùôH€€ù\…»àKö⁄[ôOOH	ÿ€Y[ù\^[Y[ù	»»	‘Yÿ[Y[ù»›[H€Y[ùI»à	–Zù\›Hö[ò[òŸZ\õ…À\ÿ‹ö\[€éàKô\ÿ‹ö\[€à	…À[[›[ùàKò[[›[ùô]ô\úÿ[⁄[ôà	ÿÿ\⁄Yù\›Y[ù	Àô]ô\úŸYà›‹ôKö\‘ô]ô\úŸY
+	ÿÿ\⁄Yù\›Y[ù	ÀKöY
+Kò[úŸô\éàKö⁄[ôOOH	›ò[úŸô\â»JN√Bà]][\»H[›ô[Y[ùÀôö[\ä
+JHOà[€ùŸäKò]
+HOOH[€ù
+N√BàYà
+\HOOH	›Ÿ‹… H][\»H][\Àôö[\ä
+JHOàKù\HOOH\JN√Bà][\Àú€‹ù
+
+KäHOà
+Kò]ãò]»HàLJJN√Bà€€ú›[ùòYHH][\ÀúôYXŸJ
+ÀJHOà[Kúô]ô\úŸY	âà[Kú[ô[ô»	âà[Kõõ€òÿ\⁄	âà[Kùò[úŸô\à	âàKù\HOOH	‹ôXŸZ]I»»»
+»Kò[[›[ùàÀ
+N√Bà€€ú›ÿZYHH][\ÀúôYXŸJ
+ÀJHOà[Kúô]ô\úŸY	âà[Kú[ô[ô»	âà[Kõõ€òÿ\⁄	âà[Kùò[úŸô\à	âàKù\HOOH	‹ôXŸZ]I»»»
+»Kò[[›[ùàÀ
+N√Bà€€ú›\›HŸ”\›
+][\À
+JHOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»
+»
+Kúô]ô\úŸY»	»K\ô]ô\úŸY	»à	… K	Ÿ]K\ŸX\ò⁄	Œà	€KõXô[H	€Kô\ÿ‹ö\[€üXK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	Ÿ]âÀﬂKŸ[
+	‹›õ€ô…À»^àKõXô[JKKú[ô[ô»	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHK]ÿ\õâÀ^à	‹ô]ö\›…»JKKõõ€òÿ\⁄	âà[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸIÀ^à	‹Ÿ[HÿZ^I»JWKôö[\äõ€€X[äJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^àKô\ÿ‹ö\[€àJWJKBà[
+	‹‹[âÀ»€\‹ŒàK[ù[H	€Kú[ô[ô»Kõõ€òÿ\⁄»	‹K[]]Y	»àKù\HOOH	‹ôXŸZ]I»»	‹K\‹⁄]]ôI»à	‹KXòY	ﬂX^à	€Kú[ô[ô»Kõõ€òÿ\⁄»	¯•„	»àKù\HOOH	‹ôXŸZ]I»»	 …»à	¯¢$âﬂH	ÿúõ
+Kò[[›[ù
+_XJKBàKúô]ô\úÿ[⁄[ô	âà\›‹õõ–€€ùõ€
+›Kúô]ô\úÿ[⁄[ôKöY
+KBàJJN√Bà€€ú›[€ù[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	Ÿö[ã[[€ù	À\Nà	€[€ù	Àò[YNà[€ùJN√Bà[€ù[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸS[€ù
+[€ù[ú]ùò[YH›\úô[ù[€ù
+
+JJN√Bà€€ú›⁄\H
+Ÿ^KXô[
+HOà[
+	ÿù]€âÀ»€\‹Œà	‹KX⁄\	»
+»
+\HOOHŸ^H»	»KX⁄\[€â»à	… K€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]ö[ò[òŸU\JŸ^JHKXô[
+N√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	—[ùòY\»HÿpÎY\…»JK[
+	⁄âÀ»^à	”[∞Èÿ[Y[ù‹…»JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ŸôK[[€ù[‹[âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ŸôK\ô]öY]…À›\ùàôS[€ù›\ù[ôàôS[€ù[ôJHK	—ëH»pÍú… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	ÿÿ][X[òYŸIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹öX\…»JHK	–ÿ]Y€‹öX\… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	Ÿö[ãXXÿ€›[ùÀ[‹[âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸKXXÿ€›[ù…»JHK	–€€ù\»Hò[ò€‹… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	Ÿö[ã[Y]ŸÀ[‹[âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK[Y]Ÿ…»JHK	—õ‹õX\»HYÿ[Y[ù… KBàJKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KXX›[€ô‹öY	»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	Ÿö[ãY[ùûK[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK]]KXY	À\ôX›[€éà	‹ôXŸXô\â»JHK	 »õ›òH[ùòYI KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	Ÿö[ãY^][ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	Ÿö[ò[òŸK]]KXY	À\ôX›[€éà	‹Yÿ\â»JHK	 »õ›òHÿpÎYI KBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\ÿ€€H\[ò\»[ùòYH›HÿpÎYKà[ùõ»»[∞Èÿ[Y[ù»õÿÍà[ôõ‹õXHŸH∞ËHõ⁄H]Z]Y»›HŸHöXÿ\∞ËH[ô[ùK[0Í[HH]Kÿ]Y€‹öXKõ‹õXHHYÿ[Y[ù»H€€ùHö[ò[òŸZ\òKâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»K\\ö[Ÿ]]I»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”pÍú»HôYô\∞Íõò⁄XI»JK[€ù[ú]JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\›]‹öY	»K‹›]ÿ\ô
+	—[ùòY\…Àúõ
+[ùòYJK	€⁄… K›]ÿ\ô
+	‘ÿpÎY\…Àúõ
+ÿZYJKÿZYHà»	›ÿ\õâ»à	‹€Ÿù	 K›]ÿ\ô
+	‘ÿ[…Àúõ
+[ùòYHHÿZYJK[ùòYHHÿZYHèH»	€ò]ûI»à	ÿòY	 WJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KX⁄\õ›…»Kÿ⁄\
+	›Ÿ‹…À	’Ÿ‹… K⁄\
+	‹ôXŸZ]IÀ	‘ôXŸZ]\… K⁄\
+	Ÿ\‹\ÿIÀ	—\‹\ÿ\… K⁄\
+	ÿ›\›…À	–›\›‹… WJKBà][\Àõ[ô›»[
+	Ÿ]âÀﬂK‹ŸX\ò⁄[ú]
+	–ù\ÿÿ\à[›ö[Y[ùpÈË€¯†)âÀ\›	Ÿö[ã\ŸX\ò⁄	 K\›JHà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH[›ö[Y[ùpÈË€»€€H\›Hö[õÀâ»JKBàJN√BüCBÉBìS—S÷…Ÿö[ò[òŸKXYù\›Y[ù	◊HH
+›
+HOàö[ò[òŸPYù\›Y[ù⁄Y]
+›
+N√Bôù[ò›[€àö[ò[òŸPYù\›Y[ù⁄Y]
+›
+H√Bà€€ú›Xÿ€›[ù»HXÿ€›[ù‹[€ú ›ú›‹ôJN√Bà€€ú›⁄[ôH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿö[ãXYù\›Z⁄[ô	»KŸ[
+	€‹[€âÀ»ò[YNà	ÿYù\›Y[ù	À^à	–Zù\›HH[ùòYH›HÿpÎYI»JK[
+	€‹[€âÀ»ò[YNà	›ò[úŸô\âÀ^à	’ò[úŸô\∞Íõò⁄XH[ùôH€€ù\…»JWJN√Bà€€ú›\ôX›[€àH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	»KŸ[
+	€‹[€âÀ»ò[YNà	Ÿ[ùòYIÀ^à	—[ùòYI»JK[
+	€‹[€âÀ»ò[YNà	‹ÿZYIÀ^à	‘ÿpÎYI»JWJN√Bà€€ú›úõ€HH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	»KXÿ€›[ùÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^àKõò[YHJJJN»€€ú›»H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	»KXÿ€›[ùÀõX\
+
+JHOà[
+	€‹[€âÀ»ò[YNàKöY^àKõò[YHJJJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+HJN»€€ú›[[›[ùH[€ô^QöY[
+ù[	Ÿö[ãXYù\›X[[›[ù	 N»€€ú›\ÿ‹ö\[€àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	ÀXŸZ€\éà	”[›]õ»»Zù\›I»JN√Bà€€ú›\ôX›[€ëöY[HöY[
+	’\»»Zù\›IÀ\ôX›[€äN»€€ú›—öY[HöY[
+	–€€ùHH\›[õ…À N√Bà€€ú›ôX€€ò⁄[HH
+
+HOà»€€ú›ò[úŸô\àH⁄[ôùò[YHOOH	›ò[úŸô\âŒ»\ôX›[€ëöY[ú›[Kô\‹^HHò[úŸô\à»	€õ€ôI»à	…Œ»—öY[ú›[Kô\‹^HHò[úŸô\à»	…»à	€õ€ôIŒ»N√Bà⁄[ôòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀôX€€ò⁄[JN»ôX€€ò⁄[J
+N√Bàù[ò›[€àÿ]ôJ
+H»€€ú›ò[YHH\úŸSù[J[[›[ùö[ú]ùò[YJN»Yà
+Jò[YHà
+JH»[[›[ùö[ú]ôõÿ›\ 
+N»ô]\õé»HYà
+⁄[ôùò[YHOOH	›ò[úŸô\â»	âàúõ€Kùò[YHOOHÀùò[YJH»Àôõÿ›\ 
+N»ô]\õé»H›òX›[€úÀõ]]]J
+ HOàÀòYÿ\⁄Yù\›Y[ù
+»Yà]ZY
+
+K]à]R\€ ]Kùò[YJK⁄[ôà⁄[ôùò[YK\ôX›[€éà\ôX›[€ãùò[YK[[›[ùàò[YKXÿ€›[ùYàúõ€Kùò[YH[ôYö[ôYããä⁄[ôùò[YHOOH	›ò[úŸô\â»»»–Xÿ€›[ùYàÀùò[YHHàﬂJK\ÿ‹ö\[€éà\ÿ‹ö\[€ãùò[YKùö[J
+H
+⁄[ôùò[YHOOH	›ò[úŸô\â»»	’ò[úŸô\∞Íõò⁄XI»à	–Zù\›Hö[ò[òŸZ\õ… HJJN»CBàô]\õà⁄Y]
+»]Nà	–Zù\›Hö[ò[òŸZ\õ…Àõ›‹ŒàŸöY[
+	”‹\òpÈË€…À⁄[ô
+KöY[
+⁄[ôùò[YHOOH	›ò[úŸô\â»»	–€€ùHH‹öYŸ[I»à	–€€ùIÀúõ€JK—öY[\ôX›[€ëöY[öY[
+	—]IÀ]JKöY[
+	’ò[‹âÀ[[›[ù
+KöY[
+	—\ÿ‹öpÈË€…À\ÿ‹ö\[€äK[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’ò[úŸô\∞Íõò⁄X\»]Y[H»[öZ\õ»HYÿ\ãX\»∞Ë€»Ë€»ôXŸZ]Hô[H\‹\ÿKâ»JWK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	Ÿö[ãXYù\›\ÿ]ôI»JN√BüCBÉBìS—S÷…Ÿ\‹\ÿKXY	◊HH
+›
+HOà\‹\ÿT⁄Y]
+›
+N√BìS—S÷…⁄[ò€€YKXY	◊HH
+›
+HOà[ò€€YT⁄Y]
+›
+N√BÉBôù[ò›[€à[ò€€YT⁄Y]
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›ÿ]»H›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ HOàÀö⁄[ôOOH	‹ôXŸZ]I»	âàXÀò\ò⁄]ôY
+N√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	⁄[ò€€YKY]IÀ\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+HJN√Bà€€ú›ôYô\úôYHÿ]Àôö[ô
+
+ HOàõ‹õJÀõò[YJKö[ò€Y\ 	€›]òI JHÿ]÷ÃN√Bà€€ú›ÿ]Ÿ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	⁄[ò€€YKXÿ]	»Kÿ]ÀõX\
+
+ HOà[
+	€‹[€âÀ»ò[YNàÀöY^àÀõò[YKããäôYô\úôY	âàÀöYOOHôYô\úôYöY»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›\ÿ»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	⁄[ò€€YKY\ÿ…À\Nà	›^	ÀXŸZ€\éà	—^éàŸöX⁄[òKôY[Xõ€€Àô[ôH^òI»JN√Bà€€ú›[[›[ùH[€ô^QöY[
+ù[	⁄[ò€€YKX[[›[ù	 N√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›ò[‹àH\úŸSù[J[[›[ùö[ú]ùò[YJN√BàYà
+Jò[‹àà
+JH»[[›[ùö[ú]ôõÿ›\ 
+N»ô]\õé»CBà€€ú›]H]Kùò[YH»ô]»]J	Ÿ]Kùò[Y_ULéåå
+Kù“T”‘›ö[ô 
+Hàõ›“\€ 
+N√Bà›òX›[€úÀõ]]]J
+ HOàÀòY[ò€€YJ»Yà]ZY
+
+K]ò[‹ãÿ]Y€‹ûRYàÿ]Ÿ[ùò[YH[ôYö[ôY\ÿ‹ö\[€éà\ÿÀùò[YKùö[J
+H	”›]òHôXŸZ]I»JJN√BàCBàô]\õà⁄Y]
+»]Nà	”[∞Èÿ\à›]òHôXŸZ]IÀõ›‹ŒàŸöY[
+	—]IÀ]JKÿ]Àõ[ô›»öY[
+	–ÿ]Y€‹öXIÀÿ]Ÿ[
+Hàù[öY[
+	—\ÿ‹öpÈË€…À\ÿ KöY[
+	’ò[‹àôXŸXöY…À[[›[ù
+K[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’\ŸH€€Y[ùH\òH[öZ\õ»]YH∞Ë€»ôZ[»H[XHô[ôKàYÿ[Y[ù‹»H[ò€€Y[ô\»∞ËH[ùò[H€ﬁö[ö‹Àâ»JWKôö[\äõ€€X[äK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	⁄[ò€€YK\ÿ]ôI»JN√BüCBÉBôù[ò›[€à\‹\ÿT⁄Y]
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›‹õ›\»H\‹\ÿPÿ]Y€‹ûQ‹õ›\ ›‹ôJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	Ÿ\‹Y]IÀ\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+HJN√Bà€€ú›ÿ]Ÿ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿ\‹Xÿ]	»K‹õ›\ N√Bà€€ú›\ÿ»H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	Ÿ\‹Y\ÿ…À\Nà	›^	ÀXŸZ€\éà	Ÿ\ÿ‹öpÈË€»
+‹⁄[€ò[
+I»JN√Bà€€ú›[[›[ùH[€ô^QöY[
+ù[	Ÿ\‹X[[›[ù	 N√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›HH\úŸSù[J[[›[ùö[ú]ùò[YJN√BàYà
+Xÿ]Ÿ[ùò[YJH»ÿ]Ÿ[ôõÿ›\ 
+N»ô]\õé»CBàYà
+HOHù[JHà
+JH»[[›[ùö[ú]ôõÿ›\ 
+N»ô]\õé»CBà€€ú›]H]Kùò[YH»ô]»]J	Ÿ]Kùò[Y_ULéåå
+Kù“T”‘›ö[ô 
+Hàõ›“\€ 
+N√Bà›òX›[€úÀõ]]]J
+ HOàÀòY\‹\ÿJ»Yà]ZY
+
+K]ò[‹éàKÿ]Y€‹ûRYàÿ]Ÿ[ùò[YKããä\ÿÀùò[YKùö[J
+H»»\ÿ‹ö\[€éà\ÿÀùò[YKùö[J
+HHàﬂJHJJN√BàCBàYà
+Y‹õ›\Àõ[ô›
+H√Bàô]\õà⁄Y]
+»]Nà	”[∞Èÿ\à\‹\ÿIÀõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–‹öYH[XHÿ]Y€‹öXHH\‹\ÿHö[YZ\õ»8†%‹]YH[H8†'ÿ]Y€‹öX\¯†'HòH[HH\‹\ÿ\Àâ»JWHJN√BàCBàô]\õà⁄Y]
+√Bà]Nà	”[∞Èÿ\à\‹\ÿIÀBàõ›‹ŒàŸöY[
+	—]IÀ]JKöY[
+	–ÿ]Y€‹öXIÀÿ]Ÿ[
+KöY[
+	—\ÿ‹öpÈË€…À\ÿ KöY[
+	’ò[‹âÀ[[›[ù
+WKBà€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	Ÿ\‹XY	ÀBàJN√BüCBÉBìS—S÷…ÿÿ]Y€‹öX\…◊HH
+›
+HOàÿ]Y€‹öX\‘⁄Y]
+›
+N√BÉBò€€ú›ÿ]Y€‹ûSò]\ôHH
+⁄[ô
+HOà⁄[ôOOH	‹ôXŸZ]I»»	‹ôXŸZ]I»à⁄[ôOOH	ÿ›\›…»⁄[ôOOH	‹\ôI»»	ÿ›\›…»à	Ÿ\‹\ÿIŒ√Bò€€ú›ÿ]Y€‹ûTõ€›Ÿ^HH
+⁄[ô
+HOà⁄[ôOOH	‹ôXŸZ]I»»	‹ôXŸZ]\…»à⁄[ôOOH	ÿ›\›…»⁄[ôOOH	‹\ôI»»	ÿ›\›‹…»à	Ÿ\‹\ÿ\…Œ√Bò€€ú›ÿ]Y€‹ûR[ï\ŸHH
+›‹ôKY
+HOà…Ÿ\‹\ÿ\…À	⁄[ò€€Y\…À	Ÿö[ò[òŸU]\…À	ÿÿ\⁄Yù\›Y[ù…◊CBàú€€YJ
+€€X›[€äHOà›‹ôKú›]Vÿ€€X›[€óKú€€YJ
+ôX€‹ô
+HOàôX€‹ôòÿ]Y€‹ûRYOOHY
+JCBà›‹ôKú›]Kòÿ]Y€‹öY\Àú€€YJ
+ÿ]Y€‹ûJHOàÿ]Y€‹ûKú\ô[ùYOOHY
+N√Bò€€ú›ÿ]Y€‹ûQ\ôX›[€àH
+ÿ]Y€‹ûJHOàÿ]Y€‹ûKô\ôX›[€à
+ÿ]Y€‹ûKõò]\ôHOOH	‹ôXŸZ]I»ÿ]Y€‹ûKö⁄[ôOOH	‹ôXŸZ]I»»	‹ôXŸXô\â»à	‹Yÿ\â N√Bò€€ú›ÿ]Y€‹ûSò[YP€€ôõX›H
+›‹ôKò[YK\ôX›[€ã^Ÿ\YH	… HOà›‹ôKú›]Kòÿ]Y€‹öY\Àú€€YJ
+ÿ]Y€‹ûJHOÉBàXÿ]Y€‹ûKò\ò⁄]ôY	âàÿ]Y€‹ûKöYOOH^Ÿ\Y	âàÿ]Y€‹ûQ\ôX›[€äÿ]Y€‹ûJHOOH\ôX›[€à	âàõ‹õJÿ]Y€‹ûKõò[YJHOOHõ‹õJò[YJJN√Bò€€ú›ÿ]Y€‹ûP€ŸP€€ôõX›H
+›‹ôK€ŸK^Ÿ\YH	… HOàõ€€X[ä€ŸJH	âà›‹ôKú›]Kòÿ]Y€‹öY\Àú€€YJ
+ÿ]Y€‹ûJHOÉBàXÿ]Y€‹ûKò\ò⁄]ôY	âàÿ]Y€‹ûKöYOOH^Ÿ\Y	âà›ö[ô ÿ]Y€‹ûKò€ŸH	… Kùö[J
+HOOH€ŸJN√Bò€€ú›ÿ]Y€‹ûT\ô[ù»H
+›‹ôK⁄[ô^Ÿ\YH	… HOà›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ÿ]Y€‹ûJHOÉBàXÿ]Y€‹ûKò\ò⁄]ôY	âàXÿ]Y€‹ûKú\ô[ùY	âàÿ]Y€‹ûKöYOOH^Ÿ\Y	âàÿ]Y€‹ûKõò]\ôHOOHÿ]Y€‹ûSò]\ôJ⁄[ô
+JN√Bôù[ò›[€àô^ÿ]Y€‹ûP€ŸJ›‹ôK\ô[ùY
+H√Bà€€ú›\ô[ùH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À\ô[ùY
+N√BàYà
+\\ô[ùÀò€ŸJHô]\õà	…Œ√Bà€€ú›ôYö^H	‹\ô[ùò€Ÿ_Kò√Bà€€ú›\ŸYHô]»Ÿ]
+›‹ôKú›]Kòÿ]Y€‹öY\ÀõX\
+
+ÿ]Y€‹ûJHOà›ö[ô ÿ]Y€‹ûKò€ŸH	… JJN√Bà]ù[Xô\àHN√Bà⁄[H
+\ŸYö\ 	‹ôYö^I€ù[Xô\üX
+JHù[Xô\ä Œ√Bàô]\õà	‹ôYö^I€ù[Xô\üX√BüCBÉBãÀ»ŸY\€ÿ]Y€‹ûHY»õ‹àö[ò[ò⁄X[\›‹ûN»\ò⁄]ôYÿ]Y€‹öY\»›^H]òZ[XõHõ‹à[ú‹X›[€ãÉBôù[ò›[€àÿ]Y€‹öX\‘⁄Y]
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›ò[YRHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]KY‹õ›…À	Ÿ]K]\›Y	Œà	ÿÿ][ò[YIÀ\Nà	›^	ÀXŸZ€\éà	”õ›òHÿ]Y€‹öXI»JN√Bà€€ú›€ŸRHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿÿ]X€ŸIÀ\Nà	›^	ÀXŸZ€\éà	–ÏŸY€»]]€pË]X€…»JN√Bà€€ú›⁄[ôŸ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿÿ]Z⁄[ô	»K–UQ”‘ñW““SëÀõX\
+
+›ãJHOà[
+	€‹[€âÀ»ò[YNàã^àJJJN√Bà€€ú›\ô[ùŸ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿÿ]\\ô[ù	»JN√Bà€€ú›\úõ‹àH[
+	‹	À»€\‹Œà	‹K\⁄Y][\Ÿ…Àõ€Nà	ÿ[\ù	»JN√Bàù[ò›[€àö[\ô[ù 
+H√Bà€€ú›ô]ö[›\»H\ô[ùŸ[ùò[YN√Bà€€ú›õ€›Hÿ]Y€‹ûPûRŸ^J›‹ôKÿ]Y€‹ûTõ€›Ÿ^J⁄[ôŸ[ùò[YJJN√Bà€€ú›‹»Hÿ]Y€‹ûT\ô[ù ›‹ôK⁄[ôŸ[ùò[YJN√Bà\ô[ùŸ[úô\XŸP⁄[ô[ä[
+	€‹[€âÀ»ò[YNà	…À^à	¯†%ÿ]Y€‹öXHö[ò⁄\[8†%	»JKããù‹ÀõX\
+
+‹
+HOà[
+	€‹[€âÀ»ò[YNà‹öY^à‹õò[YHJJJN√Bà\ô[ùŸ[ùò[YHH‹Àú€€YJ
+‹
+HOà‹öYOOHô]ö[›\ H»ô]ö[›\»à‹Àú€€YJ
+‹
+HOà‹öYOOHõ€›ÀöY
+H»õ€›öYà	…Œ√BàCBàö[\ô[ù 
+N√Bà⁄[ôŸ[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀö[\ô[ù N√Bàù[ò›[€àY
+
+H√Bà€€ú›õHHò[YRKùò[YKùö[J
+N√Bà€€ú›€ŸHH€ŸRKùò[YKùö[J
+Hô^ÿ]Y€‹ûP€ŸJ›‹ôK\ô[ùŸ[ùò[YJN√Bà\úõ‹ãù^€€ù[ùH	…Œ√BàYà
+[õJH»\úõ‹ãù^€€ù[ùH	“[ôõ‹õYH»õ€YHHÿ]Y€‹öXKâŒ»ò[YRKôõÿ›\ 
+N»ô]\õé»CBàYà
+ÿ]Y€‹ûSò[YP€€ôõX›
+›‹ôKõK⁄[ôŸ[ùò[YHOOH	‹ôXŸZ]I»»	‹ôXŸXô\â»à	‹Yÿ\â JH»\úõ‹ãù^€€ù[ùH	“∞ËH^\›H[XHÿ]Y€‹öXH]]òH€€H\‹ŸHõ€YH\òH\›H‹\òpÈË€ÀâŒ»ò[YRKôõÿ›\ 
+N»ô]\õé»CBàYà
+ÿ]Y€‹ûP€ŸP€€ôõX›
+›‹ôK€ŸJJH»\úõ‹ãù^€€ù[ùH	—\‹ŸHÏŸY€»∞ËH\ù[òŸHH›]òHÿ]Y€‹öXH]]òKâŒ»€ŸRKôõÿ›\ 
+N»ô]\õé»CBà€€ú›\ô[ùH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À\ô[ùŸ[ùò[YJN√Bà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ]Y€‹ûJ»Yà]ZY
+
+Kò[YNàõKããä€ŸH»»€ŸHHàﬂJK⁄[ôà⁄[ôŸ[ùò[YKò]\ôNàÿ]Y€‹ûSò]\ôJ⁄[ôŸ[ùò[YJKÿ\⁄õ›—‹õ›\à⁄[ôŸ[ùò[YHOOH	‹\ôI»»	€ò[ÀXÿZ^I»à\ô[ùÀòÿ\⁄õ›—‹õ›\	€‹\òX⁄[€ò[	Àããä\ô[ùŸ[ùò[YH»»\ô[ùYà\ô[ùŸ[ùò[YHHàﬂJHJJN√BàCBÉBà€€ú›X›]ôHH›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ÿ]Y€‹ûJHOàXÿ]Y€‹ûKò\ò⁄]ôY
+Kú€XŸJ
+CBàú€‹ù
+
+KäHOà›ö[ô Kò€ŸH	ŒNI Kõÿÿ[P€€\\ôJ›ö[ô ãò€ŸH	ŒNI K[ôYö[ôY»ù[Y\öXŒàùYHJHKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹Pîâ JN√Bà€€ú›\ò⁄]ôYH›‹ôKú›]Kòÿ]Y€‹öY\Àôö[\ä
+ÿ]Y€‹ûJHOàÿ]Y€‹ûKò\ò⁄]ôY
+Kú€XŸJ
+CBàú€‹ù
+
+KäHOàKõò[YKõÿÿ[P€€\\ôJãõò[YK	‹Pîâ JN√Bà€€ú›ÿ]õ›»H
+ÿ]Y€‹ûJHOà[
+	€IÀ»€\‹Œà	‹K[\›Z][IÀ	Ÿ]K]\›Y	Œà	ÿÿ]\õ›…»K√Bà[
+	‹‹[âÀ»€\‹Œà	‹K[ù[HK[]]YKXÿ]Y€‹ûKX€ŸIÀ^àÿ]Y€‹ûKò€ŸH	…»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›»KXÿ]Y€‹ûKZ[ôõ…»KŸ[
+	‹›õ€ô…À»^à	ÿÿ]Y€‹ûKú\ô[ùY»	¯†%	»à	…ﬂIÿÿ]Y€‹ûKõò[Y_XJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à⁄⁄[ô⁄‹ù
+ÿ]Y€‹ûKö⁄[ô
+Hÿ]Y€‹ûKõò]\ôKÿ]Y€‹ûKô\Xÿ]SŸà»€€ú€€YYH[H	‹›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…Àÿ]Y€‹ûKô\Xÿ]SŸäOÀõò[YH	€›]òHÿ]Y€‹öXIﬂXàÿ]Y€‹ûKò\ò⁄]ôY»	–\ú]Z]òYI»à	–]]òI◊Köõ⁄[ä	»0≠»	 HJWJKBàXÿ]Y€‹ûKò\ò⁄]ôY	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	ÿÿ]YY]	À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹ûKYY]	ÀYàÿ]Y€‹ûKöYJHK	—Y]\â KBàXÿ]Y€‹ûKò\ò⁄]ôY	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	–\ú]Z]ò\âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ]Y€‹ûJ»ããòÿ]Y€‹ûK\ò⁄]ôYàùYHJJHK	¸'Â·	 KBàÿ]Y€‹ûKò\ò⁄]ôY	âàXÿ]Y€‹ûKô\Xÿ]SŸà	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ]Y€‹ûJ»ããòÿ]Y€‹ûK\ò⁄]ôYàò[ŸHJJHK	‘ôX]]ò\â KBàXÿ]Y€‹ûKò\ò⁄]ôY	âàXÿ]Y€‹ûKúﬁ\›[RŸ^H	âàXÿ]Y€‹ûR[ï\ŸJ›‹ôKÿ]Y€‹ûKöY
+H	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ]Nà	—^€Z\àÿ]Y€‹öXHù[òÿH\ÿYIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀúô[[›ôPÿ]Y€‹ûJÿ]Y€‹ûKöY
+JHK	¯ß%I KBàKôö[\äõ€€X[äJN√BÉBàô]\õà⁄Y]
+√Bà]Nà	”‹ôÿ[ö^ò\àÿ]Y€‹öX\…ÀBàõ›‹Œà√Bà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–ÿYHôXŸZ]K›\›»›H\‹\ÿH]ôH\à[XHÿ]Y€‹öXH€\òKà\»Ï‹X\»€€ú€€YY\»öXÿ[H\ú]Z]òY\Œ»‹»[∞Èÿ[Y[ù‹»[ùY€‹»€€ù[ùX[H€€HŸ]\»∞Î[ò›[‹Àâ»JKBàöY[
+	”õ›òHÿ]Y€‹öXIÀò[YRJKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	’\…À⁄[ôŸ[
+KöY[
+	—‹ù\»ö[ò⁄\[	À\ô[ùŸ[
+KöY[
+	–ÏŸY€»
+‹⁄[€ò[
+IÀ€ŸRJWJKBà\úõ‹ãBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	ÿÿ]XY	À€ò€X⁄ŒàYK	 »YX⁄[€ò\â WJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^àÿ]Y€‹öX\»]]ò\»
+	ÿX›]ôKõ[ô›JXJKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»KX›]ôKõX\
+ÿ]õ› JKBà\ò⁄]ôYõ[ô›	âà[
+	Ÿ]Z[…ÀﬂKŸ[
+	‹›[[X\ûIÀ»^àÿ]Y€‹öX\»\ú]Z]òY\»
+	ÿ\ò⁄]ôYõ[ô›JXJK[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»K\ò⁄]ôYõX\
+ÿ]õ› JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KXÿ\ôõ€›	»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ	Ÿ]K]\›Y	Œà	ÿÿ]Y€ôIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀò€‹ŸS[Ÿ[
+
+HK	–€€ò€Z\â WJKBàKôö[\äõ€€X[äKBàJN√BüCBÉBìS—S÷…ÿÿ]Y€‹ûKYY]	◊HH
+›[Ÿ[
+HOàÿ]Y€‹ûQY]⁄Y]
+›[Ÿ[öY
+N√Bôù[ò›[€àÿ]Y€‹ûQY]⁄Y]
+›Y
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›ÿ]Y€‹ûHH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀY
+N√BàYà
+Xÿ]Y€‹ûJHô]\õà⁄Y]
+»]Nà	–ÿ]Y€‹öXH∞Ë€»[ò€€ùòYIÀõ›‹Œà◊HJN√Bà€€ú›ÿ⁄ŸYHõ€€X[äÿ]Y€‹ûKúﬁ\›[RŸ^Hÿ]Y€‹ûR[ï\ŸJ›‹ôKY
+JN√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNàÿ]Y€‹ûKõò[YK	Ÿ]K]\›Y	Œà	ÿÿ]YY][ò[YI»JN√Bà€€ú›€ŸHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNàÿ]Y€‹ûKò€ŸH	…À	Ÿ]K]\›Y	Œà	ÿÿ]YY]X€ŸI»JN√Bà€€ú›⁄[ôH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿÿ]YY]Z⁄[ô	»K–UQ”‘ñW““SëÀõX\
+
+›ò[YKXô[JHOà[
+	€‹[€âÀ»ò[YK^àXô[ããäò[YHOOHÿ]Y€‹ûKö⁄[ô»»Ÿ[X›Yà	‹Ÿ[X›Y	»HàﬂJHJJJN√Bà€€ú›\ô[ùH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	ÿÿ]YY]\\ô[ù	»JN√Bà€€ú›ö[\ô[ù»H
+
+HOà√Bà€€ú›⁄⁄XŸ\»Hÿ]Y€‹ûT\ô[ù ›‹ôK⁄[ôùò[YKY
+N√Bà€€ú›õ€›Hÿ]Y€‹ûPûRŸ^J›‹ôKÿ]Y€‹ûTõ€›Ÿ^J⁄[ôùò[YJJN√Bà€€ú›ô]ö[›\»H\ô[ùùò[YHÿ]Y€‹ûKú\ô[ùY√Bà\ô[ùúô\XŸP⁄[ô[ä[
+	€‹[€âÀ»ò[YNà	…À^à	¯†%ÿ]Y€‹öXHö[ò⁄\[8†%	»JKããò⁄⁄XŸ\ÀõX\
+
+][JHOà[
+	€‹[€âÀ»ò[YNà][KöY^à][Kõò[YHJJJN√Bà\ô[ùùò[YHH⁄⁄XŸ\Àú€€YJ
+][JHOà][KöYOOHô]ö[›\ H»ô]ö[›\»à⁄⁄XŸ\Àú€€YJ
+][JHOà][KöYOOHõ€›ÀöY
+H»õ€›öYà	…Œ√BàN√Bàö[\ô[ù 
+N»⁄[ôòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀö[\ô[ù N√Bà€€ú›\úõ‹àH[
+	‹	À»€\‹Œà	‹K\⁄Y][\Ÿ…Àõ€Nà	ÿ[\ù	»JN√Bàù[ò›[€àÿ]ôJ
+H√Bà€€ú›ô]”ò[YHHò[YKùò[YKùö[J
+N»€€ú›ô]–€ŸHH€ŸKùò[YKùö[J
+N√Bà€€ú›ô]“⁄[ôHÿ⁄ŸY»ÿ]Y€‹ûKö⁄[ôà⁄[ôùò[YN√Bà€€ú›ô]‘\ô[ùYHÿ⁄ŸY»ÿ]Y€‹ûKú\ô[ùYà\ô[ùùò[YH[ôYö[ôY√Bà\úõ‹ãù^€€ù[ùH	…Œ√BàYà
+[ô]”ò[YJH»\úõ‹ãù^€€ù[ùH	“[ôõ‹õYH»õ€YHHÿ]Y€‹öXKâŒ»ò[YKôõÿ›\ 
+N»ô]\õé»CBàYà
+õ‹õJô]”ò[YJHOOHõ‹õJÿ]Y€‹ûKõò[YJH	âàÿ]Y€‹ûSò[YP€€ôõX›
+›‹ôKô]”ò[YKÿ]Y€‹ûQ\ôX›[€ä»ããòÿ]Y€‹ûK⁄[ôàô]“⁄[ôò]\ôNàÿ]Y€‹ûSò]\ôJô]“⁄[ô
+HJKY
+JH»\úõ‹ãù^€€ù[ùH	“∞ËH^\›H[XHÿ]Y€‹öXH]]òH€€H\‹ŸHõ€YH\òH\›H‹\òpÈË€ÀâŒ»ò[YKôõÿ›\ 
+N»ô]\õé»CBàYà
+ô]–€ŸHOOH›ö[ô ÿ]Y€‹ûKò€ŸH	… Kùö[J
+H	âàÿ]Y€‹ûP€ŸP€€ôõX›
+›‹ôKô]–€ŸKY
+JH»\úõ‹ãù^€€ù[ùH	—\‹ŸHÏŸY€»∞ËH\ù[òŸHH›]òHÿ]Y€‹öXH]]òKâŒ»€ŸKôõÿ›\ 
+N»ô]\õé»CBà€€ú›\ô[ùÿ]Y€‹ûHH›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…Àô]‘\ô[ùY
+N√Bà€€ú›ôX€‹ôHÿ]Y€‹ûKúﬁ\›[RŸ^CBà»»ããòÿ]Y€‹ûKò[YNàô]”ò[YK€ŸNàô]–€ŸK›\›€Sò[YNàô]”ò[YHOOHQêUS–“Tïôö[ô
+
+[ùûJHOà[ùûKúﬁ\›[RŸ^HOOHÿ]Y€‹ûKúﬁ\›[RŸ^JOÀõò[YK›\›€P€ŸNàô]–€ŸHOOHQêUS–“Tïôö[ô
+
+[ùûJHOà[ùûKúﬁ\›[RŸ^HOOHÿ]Y€‹ûKúﬁ\›[RŸ^JOÀò€ŸHCBàà»ããòÿ]Y€‹ûKò[YNàô]”ò[YK€ŸNàô]–€ŸH[ôYö[ôY⁄[ôàô]“⁄[ôò]\ôNàÿ⁄ŸY»ÿ]Y€‹ûKõò]\ôHàÿ]Y€‹ûSò]\ôJô]“⁄[ô
+K\ô[ùYàô]‘\ô[ùYÿ\⁄õ›—‹õ›\àÿ⁄ŸY»ÿ]Y€‹ûKòÿ\⁄õ›—‹õ›\àô]“⁄[ôOOH	‹\ôI»»	€ò[ÀXÿZ^I»à\ô[ùÿ]Y€‹ûOÀòÿ\⁄õ›—‹õ›\	€‹\òX⁄[€ò[	»N√Bà›òX›[€úÀõ]]]S[Ÿ[
+
+ HOàÀù\Ÿ\ùÿ]Y€‹ûJôX€‹ô
+JN√Bà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹öX\…»JN√BàCBàô]\õà⁄Y]
+»]NàY]\àÿ]Y€‹öXH0≠»	ÿÿ]Y€‹ûKõò[Y_Xõ›‹Œà√BàöY[
+	”õ€YIÀò[YJKöY[
+	–ÏŸY€»»[õ»H€€ù\…À€ŸJKBàÿ⁄ŸY»[
+	‹	À»€\‹Œà	‹KZ[ù	À^àÿ]Y€‹ûKúﬁ\›[RŸ^H»	—\›Hÿ]Y€‹öXHò^à\ùH»[õ»Y∞Ë€Àà»\»H»‹ù\»Ë€»ö^‹»\òHô\Ÿ\ùò\à‹»ô[]0Ï‹ö[‹Œ»õ€YHHÏŸY€»Ÿ[HŸ\àY]Y‹Àâ»à	—\›Hÿ]Y€‹öXH∞ËH[H[∞Èÿ[Y[ù‹»›H›Xòÿ]Y€‹öX\Àà\òHô\Ÿ\ùò\à»\›0Ï‹öX€ÀY]H\[ò\»»õ€YHH»ÏŸY€Àâ»JHà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	’\…À⁄[ô
+KöY[
+	—‹ù\»ö[ò⁄\[	À\ô[ù
+WJKBà\úõ‹ã[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›	À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	ÿÿ]Y€‹öX\…»JHK	¯°§õ€\à0Ë»ÿ]Y€‹öX\… KBàK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	ÿÿ]YY]\ÿ]ôI»JN√BüCBÉBãÀ»8• 8• \ô\»»òZ^\»
+ô]à»Ã»8†%ò[YH‹›»ÿ\›JH8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBò€€ú›TëW““Së»H÷…⁄[ú›[[…À	“[ú›[[…◊K…‹õŸ]…À	‘õŸ]…◊K…Ÿ[Xò[YŸ[IÀ	—[Xò[YŸ[I◊K…€›]õ…À	”›]õ…◊WN√BÉBôù[ò›[€à\ô\‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›[H›‹ôKú›]Kú\ô\Àú€XŸJ
+Kú€‹ù
+
+KäHOà
+Kò]ãò]»HàLJJN√Bà€€ú›[€ùH›ùöY]ÀõŸ”[€ù√Bà€€ú›][\»H[€ù»[ôö[\ä
+
+HOà[€ùŸäò]
+HOOH[€ù
+Hà[√Bà€€ú››[H][\ÀúôYXŸJ
+À
+HOà
+›‹ôKö\‘ô]ô\úŸY
+	‹\ôIÀöY
+H»»à»
+»
+ò[[›[ù
+JK
+N√Bà€€ú›\›HŸ”\›
+][\À
+
+HOà√Bà€€ú›⁄[ôXô[HTëW““SëÀôö[ô
+
+ HOà÷ÃHOOHúôYí⁄[ô
+OÀñÃWH	”›]õ…Œ√Bà€€ú›ô\€€ôYH
+úôYí⁄[ôOOH	⁄[ú›[[…»	âàúôYíY	âà›‹ôKôŸ]
+	⁄[ô‹ôYY[ù…ÀúôYíY
+OÀõò[YJCBà
+úôYí⁄[ôOOH	‹õŸ]…»	âàúôYíY	âà›‹ôKôŸ]
+	‹õŸX›…ÀúôYíY
+OÀõò[YJHù[√BàÀ»]HHH‹›][H
+[ú›[[À‘õŸ] H[àõ€»ÿúŸ\ùòpÈË€»
+õ›JHô[›»[à€X[\à\KÉBà€€ú›]HHô\€€ôY»
+ú]H»	‹ô\€€ôYH0≠»	Ÿõ]ù[Jú]J_Xàô\€€ôY
+Hà
+õõ›H⁄[ôXô[
+N√Bà€€ú››Xù]HHô\€€ôY»
+õõ›H⁄[ôXô[
+Hà
+õõ›H»⁄[ôXô[à	… N√Bàô]\õà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»
+»
+›‹ôKö\‘ô]ô\úŸY
+	‹\ôIÀöY
+H»	»K\ô]ô\úŸY	»à	… K	Ÿ]K\ŸX\ò⁄	Œà	‹ô\€€ôY	…ﬂH	‹õõ›H	…ﬂXK√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	Ÿ]âÀﬂK[
+	‹›õ€ô…À»^à]HJJKBà›Xù]H	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à›Xù]HJKBàKôö[\äõ€€X[äJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[ù[HKXòY	À^à8¢$à	ÿúõ
+ò[[›[ù
+_XJKBà\›‹õõ–€€ùõ€
+›	‹\ôIÀöY
+KBàJN√BàJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘\ô\…»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	‹\ôK[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹\ôKXY	»JHK	 »ôY⁄\›ò\â KBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»]YHŸH\ô]NàX\‹ÿH]YH]H\úòYÀõŸ]»]YH∞Ë€»ô[ô]K[Xò[YŸ[H[öYöXÿYKàH\ôHYô]H»ô\›[Y»Ÿ\ô[ò⁄X[HõŸpÈË€ÀX\»∞Ë€»‹öXH›]òHÿpÎYHH[öZ\õÀâ»JKBà[õ[ô›à	âàŸ—ö[\ú ›\›»ŸX\ò⁄XŸZ€\éà	–ù\ÿÿ\à\ôx†)âÀŸX\ò⁄\›Yà	‹\ôK\ŸX\ò⁄	À[€ù\›Yà	‹\ôK[[€ù	»JKBà][\Àõ[ô›à	âà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»K]›[…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^à›[	€[€ù»
+	€[€ùXô[
+[€ù
+_JXà	…ﬂHJKúõ
+›[
+WJWJKBà[õ[ô›OOHBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH\ôHôY⁄\›òYKà‹]YH[H8†'
+»ôY⁄\›ò\∏†'Kâ»JCBàà][\Àõ[ô›OOH»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XH\ôHô\›HpÍúÀâ»JHà\›BàKôö[\äõ€€X[äJN√BüCBÉBìS—S÷…‹\ôKXY	◊HH
+›
+HOà\ôT⁄Y]
+›
+N√BÉBôù[ò›[€à\ôT⁄Y]
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›\»H›‹ôKù—[ô⁄[ôT›‹ôJ
+N√Bà€€ú›[ú»H\›[X]S[ú €€ôöY N√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹\ôKY]IÀ\Nà	Ÿ]IÀò[YNàŸ^R[ú]
+
+HJN√Bà€€ú›⁄[ôH[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ôKZ⁄[ô	»KTëW““SëÀõX\
+
+›ãJHOà[
+	€‹[€âÀ»ò[YNàã^àJJJN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹\ôK\]IÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‹]	Àò[YNà	ÃI»JN√Bà€€ú›ôYîŸ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ôK\ôYâ»JN√Bà€€ú›õ›HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹\ôK[õ›IÀ\Nà	›^	ÀXŸZ€\éà	Ÿ\ÿ‹öpÈË€»
+‹⁄[€ò[
+I»JN√Bà€€ú›[[›[ùH[€ô^QöY[
+ù[	‹\ôKX[[›[ù	 N√Bà€€ú›ôYîõ›»H[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K‹ôYîŸ[]WJN√BÉBà€€ú›[ö]€‹›ŸàH
+ÀY
+HOà√BàûH√BàYà
+»OOH	⁄[ú›[[… Hô]\õà›‹ôKò›\úô[ùöXŸJY
+N√BàYà
+»OOH	‹õŸ]… Hô]\õàõŸX›[ö]€‹›
+\ÀY€€ôöYÀ[ú N√BàHÿ]⁄» à[úöXŸY
+ã»CBàô]\õàù[√BàN√Bàù[ò›[€àö[ôYú 
+H√Bà€€ú›»H⁄[ôùò[YN√Bà€€ú›‹»H»OOH	⁄[ú›[[…»»›‹ôKú›]Kö[ô‹ôYY[ù»à»OOH	‹õŸ]…»»›‹ôKú›]KúõŸX›»à◊N√BàôYîŸ[úô\XŸP⁄[ô[äããõ‹ÀõX\
+
+ HOà[
+	€‹[€âÀ»ò[YNàÀöY^àÀõò[YHJJJN√Bà€€ú›ôYòXõHH»OOH	⁄[ú›[[…»»OOH	‹õŸ]…Œ√BàôYîõ›Àú›[Kô\‹^HHôYòXõH»	…»à	€õ€ôIŒ√BàôXÿ[ 
+N√BàCBàù[ò›[€àôXÿ[ 
+H√Bà€€ú›»H⁄[ôùò[YN√BàYà
+»OOH	⁄[ú›[[…»	âà»OOH	‹õŸ]… Hô]\õé»À»	Ÿ[Xò[YŸ[IÀ…€›]õ…»8°§à⁄H\\»H[[›[ùBà€€ú›»H[ö]€‹›ŸäÀôYîŸ[ùò[YJN√Bà€€ú›HH\úŸSù[J]Kùò[YJH√BàYà
+»OHù[
+H[[›[ùö[ú]ùò[YHHõ][€ô^R[ú]
+»
+àJN√BàCBà⁄[ôòY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀö[ôYú N√BàôYîŸ[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀôXÿ[ N√Bà]KòY]ô[ù\›[ô\ä	⁄[ú]	ÀôXÿ[ N√Bàö[ôYú 
+N√BÉBàù[ò›[€àÿ]ôJ
+H√Bà€€ú›HH\úŸSù[J[[›[ùö[ú]ùò[YJN√BàYà
+HOHù[JHà
+JH»[[›[ùö[ú]ôõÿ›\ 
+N»ô]\õé»CBà€€ú›»H⁄[ôùò[YN√Bà€€ú›ôYòXõHH»OOH	⁄[ú›[[…»»OOH	‹õŸ]…Œ√Bà€€ú›ôYàHôYòXõH»›‹ôKôŸ]
+»OOH	⁄[ú›[[…»»	⁄[ô‹ôYY[ù…»à	‹õŸX›…ÀôYîŸ[ùò[YJHàù[√Bà€€ú›HH\úŸSù[J]Kùò[YJN√Bà€€ú›õ›U^Hõ›Kùò[YKùö[J
+H
+ôYà»	‹_H0Â»	‹ôYãõò[Y_Xà	… N√Bà€€ú›]H]Kùò[YH»ô]»]J	Ÿ]Kùò[Y_ULéåå
+Kù“T”‘›ö[ô 
+Hàõ›“\€ 
+N√Bà›òX›[€úÀõ]]]J
+ HOàÀòY\ôJ√BàYà]ZY
+
+K][[›[ùàKôYí⁄[ôàÀBàããäôYòXõH	âàôYà»»ôYíYàôYãöY]NàHHàﬂJKBàããäõ›U^»»õ›Nàõ›U^HàﬂJKBàJJN√BàCBàô]\õà⁄Y]
+√Bà]Nà	‘ôY⁄\›ò\à\ôIÀBàõ›‹ŒàŸöY[
+	—]IÀ]JKöY[
+	’\…À⁄[ô
+KôYîõ›ÀöY[
+	—\ÿ‹öpÈË€»
+‹⁄[€ò[
+IÀõ›JKöY[
+	’ò[‹à\ôY…À[[›[ù
+KBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘\òH[ú›[[»›HõŸ]À»ò[‹à∞ËHô[Hÿ[›[Y»[H]X[ùYYH8†%Zù\›HŸHôX⁄\ÿ\ãâ»JWKBà€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	‹\ôKXY	ÀBàJN√BüCBÉBãÀ»8• 8• ô[]0Ï‹ö[‹»
+\ö[Ÿ	ì»0©ÕçHX›X[ H8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€àô[]‹ö[‹‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›[€ùH›ùöY]Àúô\‹ù[€ù›\úô[ù[€ù
+
+N√Bà€€ú››[HH[€ù›[[X\ûJ›‹ôK[€ù
+N√Bà€€ú›\‹ÿ]H\‹\ÿ\–ûPÿ]Y€‹ûJ›‹ôK[€ù
+N√Bà€€ú›€‹ùŸ^HH›ùöY]ÀúõŸ€‹ù	€X‹õ…Œ√Bà€€ú›ûTõŸX›HõŸX››[[X\ûJ›‹ôK[€ù
+Kú€‹ù
+
+KäHOÉBà€‹ùŸ^HOOH	‹]	»»ãú]HHKú]Hà€‹ùŸ^HOOH	Ÿò]\ò[Y[ù…»»ãôò]\ò[Y[ù»HKôò]\ò[Y[ù»àãõX‹õ—\›[XY»HKõX‹õ—\›[XY N√Bà€€ú›ûP€Y[ùH€Y[ù›[[X\ûJ›‹ôK[€ù
+N√BÉBà€€ú›[€ù[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹ô[[[€ù	À\Nà	€[€ù	Àò[YNà[€ùJN√Bà[€ù[ú]òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà›òX›[€úÀúŸ]ô\‹ù[€ù
+[€ù[ú]ùò[YH›\úô[ù[€ù
+
+JJN√BÉBà€€ú››àH
+Xô[ò[YK€ÀòY
+HOà[
+	›âÀ€»»»€\‹Œà€»HàﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+òY»	»KXòY	»à	… K^àò[YHJWJN√Bà€€ú›[\HH›[KúôXŸXöY»OOH	âà›[Kô\‹\ÿ\»OOH	âà›[Kôò]\òY»OOH√BÉBàÀ»Hÿ\⁄Xò\⁄\»ô\›[ÉBà€€ú›ô\›[Y»H[
+	›XõIÀ»€\‹Œà	‹KZ›â»K√Bà[
+	›âÀ»€\‹Œà	‹KZ›ã\ŸX…»KŸ[
+	›	À»€€‹[éà	ÃâÀ^à	—[ùõ›I»JWJKBà›ä	‘ôXŸXöY…Àúõ
+›[KúôXŸXöY JKBà›[KúôXŸXöY”›]ò\‘ôXŸZ]\»à	âà›ä	”›]ò\»ôXŸZ]\…Àúõ
+›[KúôXŸXöY”›]ò\‘ôXŸZ]\ JKBà›[Kôò]\òY»OOH›[KúôXŸXöY’ô[ô\»	âà›ä	—ò]\òY»
+[ùôY›YJIÀúõ
+›[Kôò]\òY JKBà›[KòTôXŸXô\àà	âà›ä	–HôXŸXô\âÀúõ
+›[KòTôXŸXô\äJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã\ŸX…»KŸ[
+	›	À»€€‹[éà	ÃâÀ^à	‘ÿZ]I»JWJKBà›ä	—\‹\ÿ\»ò\öpË]ôZ\…Àúõ
+›[Kô\‹ò\äJKBà›ä	—\‹\ÿ\»ö^\…Àúõ
+›[Kô\‹ö^
+JKBà›[Kò›\›‹»à	âà›ä	–›\›‹…Àúõ
+›[Kò›\›‹ JKBà›[Kú\ô\»à	âà›ä	‘\ô\…Àúõ
+›[Kú\ô\ JKBà›ä	‘ÿ[»HÿZ^IÀúõ
+›[Kúÿ[–ÿZ^JK	‹KZ›ã]›[	À›[Kúÿ[–ÿZ^H
+KBàÀ»X\ôŸ[H€õH⁄[àH[€ù\»õŸö]XõH8†%€àH›ÿ⁄⁄[ôÀ]\[€ù
+\‹\ÿ\»8¢j»ôXŸXöY HCBàÀ»	H\»^ô[YHõ⁄\ŸN»HôYÿ]]ôHX‹õ»»pÍú»[ôXYH[»H›‹ûKÉBà›[KúôXŸXöY»à	âà›[KõX‹õ»èH	âà›ä	”X\ôŸ[IÀ	 ›[KõX\ôŸ[H
+àL
+Kù—ö^Y
+
+_IX
+KBàKôö[\äõ€€X[äJN√BÉBà€€ú›õŸ€‹ùùàH
+Ÿ^KXô[
+HOà[
+	ÿù]€âÀ»€\‹Œà	‹KX⁄\	»
+»
+€‹ùŸ^HOOHŸ^H»	»KX⁄\[€â»à	… K	Ÿ]K]\›Y	Œàô[\€‹ùI⁄Ÿ^_X€ò€X⁄Œà
+
+HOà›òX›[€úÀúŸ]õŸ€‹ù
+Ÿ^JHKXô[
+N√BÉBàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘ô[]0Ï‹ö[‹…»JKBà[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”pÍú…»JK[€ù[ú]BàJKBà[\CBà»[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”òYHôY⁄\›òY»ô\›HpÍúÀâ»JCBàà[
+	Ÿ]âÀﬂK√Bàô\›[YÀBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ÿ[»HÿZ^HH[öZ\õ»ôXŸXöY»8¢$àYÿ[Y[ù‹»ôX[^òY‹Àà\ô\»Ÿ[HYÿ[Y[ù»õ»[€Y[ù»öXÿ[HŸ\\òY\»\òH∞Ë€»€€ù\à»Y\€[»›\›»X\»ô^ô\Àâ»JKBÉBà\‹ÿ]õ[ô›à	âà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—\‹\ÿ\»‹àÿ]Y€‹öXI»JKBà\‹ÿ]õ[ô›à	âà[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»K\‹ÿ]õX\
+
+
+HOà[
+	›âÀﬂK√Bà[
+	›	À»^àõò[YHJK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ù›[
+HJKBàJJJKBÉBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘ÿ[»HÿZ^Hõ‹»0Óõ[[‹»Y\Ÿ\…»JKBàò\ê⁄\ù
+ô]ô[ùYUô[ô
+›‹ôK[€ùäJKBÉBàûTõŸX›õ[ô›à	âà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KZ‹õ›…»KŸ[
+	⁄…À»€\‹Œà	‹KZ»KY‹õ›…À^à	‘‹àõŸ]…»JKõŸ€‹ùùä	€X‹õ…À	”X‹õ… KõŸ€‹ùùä	‹]	À	‘]	 KõŸ€‹ùùä	Ÿò]\ò[Y[ù…À	—ò]\ò[Y[ù… WJKBàûTõŸX›õ[ô›à	âà[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»K√Bà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	‘õŸ]…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	‘]	»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	—ò]\ãâ»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	”X‹õ â»JWJKBàããòûTõŸX›õX\
+
+äHOà[
+	›âÀﬂK√Bà[
+	›	À»^àãõò[YHJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àõ]ù[Jãú]JHJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ãôò]\ò[Y[ù HJKBà[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+ãõX‹õ—\›[XY»èH»	…»à	»KXòY	 K^àúõ
+ãõX‹õ—\›[XY HJKBàJJKBàJKBàûTõŸX›õ[ô›à	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	 àX‹õ»‹àõŸ]»0ÍH[XH\›[X]]òH
+ôpÈ€»8¢$à›\›»HôXŸZ]JK\òH€€\\ò\àõŸ]‹»8†%∞Ë€»0ÍH»X‹õ»»ÿZ^HX⁄[XKâ»JKBÉBàûP€Y[ùõ[ô›à	âà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘‹à€Y[ùI»JKBàûP€Y[ùõ[ô›à	âà[
+	›XõIÀ»€\‹Œà	‹KZ›àK\ô\‹ù	»K√Bà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	–€Y[ùI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	–€€\õ›I»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	‘ôXŸXöY…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	–HôXŸXô\â»JWJKBàããòûP€Y[ùõX\
+
+ HOà[
+	›âÀﬂK√Bà[
+	›	À»^àÀõò[YHJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+Àù›[
+HJKBà[
+	›	À»€\‹Œà	‹K[ù[IÀ^àúõ
+ÀúôXŸXöY HJKBà[
+	›	À»€\‹Œà	‹K[ù[I»
+»
+Àúÿ[»àåH»	»KXòY	»à	… K^àúõ
+Àúÿ[ HJKBàJJKBàJKBÉBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	‹ô[Y^‹ù	À€ò€X⁄Œà
+
+HOà›€õÿYö[Jô[]‹ö[ÀI€[€ùKò‹›òô\‹ù‹›ä[€ù›[K\‹ÿ]ûTõŸX›ûP€Y[ù
+K	›^ÿ‹›â HK	—^‹ù\à‘’â KBàJKBàKôö[\äõ€€X[äJKBàJN√BüCBÉBã äà[ûHô\õÀY\[ô[òﬁH’ë»ò\à⁄\ùŸà[€ùHõŸö]
+‹ôY[à\»ôY›€äKà
+ã√Bôù[ò›[€àò\ê⁄\ù
+Ÿ\öY\ H√Bà€€ú›»HÃå»€€ú›HLÃé»€€ú›‹HL»€€ú›õ›€HHçé»€€ú›YùHé√Bà€€ú››HH‹Hõ›€N√Bà€€ú›ò[»HŸ\öY\ÀõX\
+
+ HOàÀõX‹õ N√Bà€€ú›\”ôY»Hò[Àú€€YJ
+äHOàà
+N√Bà€€ú›X^Xú»HX]õX^
+Kããùò[ÀõX\
+
+äHOàX]òXú äJJN√Bà€€ú›ô\õ÷HH\”ôY»»‹
+»›»àà‹
+»›√Bà€€ú›ÿÿ[HH
+\”ôY»»›»àà›
+H»X^XúŒ√Bà€€ú›ù»H
+»HYù
+àäH»X]õX^
+KŸ\öY\Àõ[ô›
+N√BÉBà€€ú›⁄Y»H‹›ô—[
+	€[ôIÀ»NàYùLNàô\õ÷Kéà»HYùLéàô\õ÷K›õ⁄ŸNà	›ò\äKX]KXõ‹ô\äI»JWN√BàŸ\öY\Àôõ‹ëXX⁄
+
+ÀJHOà√Bà€€ú›HYù
+»H
+àù»
+»ù»
+àåMé√Bà€€ú›»Hù»
+àçé√Bà€€ú›HX]õX^
+KX]òXú ÀõX‹õ H
+àÿÿ[JN√Bà€€ú›HHÀõX‹õ»èH»ô\õ÷HHàô\õ÷N√Bà⁄YÀú\⁄
+›ô—[
+	‹ôX›	À»K⁄YàÀZY⁄àûàãö[àÀõX‹õ»èH»	›ò\äKX]K[⁄ I»à	»ÿåÃçåYI»JJN√Bà⁄YÀú\⁄
+›ô—[
+	›^	À»à
+»»»ãNàHõ›€H
+»M	›^X[ò⁄‹âŒà	€ZYIÀ	Ÿõ€ù\⁄^ôIŒàKö[à	›ò\äKX]KYôÀ\€Ÿù
+I»K[€ùXô[
+Àõ[€ù
+JJN√Bà⁄YÀú\⁄
+›ô—[
+	›^	À»à
+»»»ãNàÀõX‹õ»èH»HHààH
+»
+»K	›^X[ò⁄‹âŒà	€ZYIÀ	Ÿõ€ù\⁄^ôIŒàö[à	›ò\äKX]KYôÀ\€Ÿù
+I»K	”X]úõ›[ô
+ÀõX‹õ _X
+JN√BàJN√Bàô]\õà›ô—[
+	‹›ô…À»öY]–õﬁà	’ﬂH	“X€\‹Œà	‹KX⁄\ù	À⁄Yà	ÃL	IÀô\Ÿ\ùôP\‹X›ò][Œà	ﬁZYSZYYY]	»K⁄Y N√BüCBÉBò€€ú›‹›êŸ[H
+äHOà»€€ú›»H›ö[ô àœ»	… N»ô]\õà÷»é◊óKÀù\›
+ H»â‹Àúô\XŸJ»ãŸÀ	»àâ _HòàŒ»N√Bôù[ò›[€àô\‹ù‹›ä[€ù›[K\‹ÿ]ûTõŸX›ûP€Y[ù
+H√Bà€€ú›åàH
+
+HOàù—ö^Y
+äKúô\XŸJ	ÀâÀ	À	 N»À»PîàX⁄[X[Œ»	Œ…»Ÿ\\ò]‹ÉBà€€ú›õ›‹»H√Bà…‘ô[]0Ï‹ö[…À[€ùK◊KBà…‘ôXŸXöY…Àåä›[KúôXŸXöY WKBà…—ò]\òY»
+[ùôY›YJIÀåä›[Kôò]\òY WKBà…–HôXŸXô\âÀåä›[KòTôXŸXô\äWKBà…—\‹\ÿ\»ò\öpË]ôZ\…Àåä›[Kô\‹ò\äWKBà…—\‹\ÿ\»ö^\…Àåä›[Kô\‹ö^
+WKBà…–›\›‹…Àåä›[Kò›\›‹»
+WKBà…‘\ô\…Àåä›[Kú\ô\ WKBà…‘ÿ[»HÿZ^IÀåä›[Kúÿ[–ÿZ^JWKBà…”X\ôŸ[H	IÀ
+›[KõX\ôŸ[H
+àL
+Kù—ö^Y
+JKúô\XŸJ	ÀâÀ	À	 WKBà◊KBà…—\‹\ÿH
+ÿ]Y€‹öXJIÀ	’ò[‹â◊KBàããô\‹ÿ]õX\
+
+
+HOàŸõò[YKåäù›[
+WJKBà◊KBà…‘õŸ]…À	‘]	À	—ò]\ò[Y[ù…À	”X‹õ»\›[XY…◊KBàããòûTõŸX›õX\
+
+äHOà‹ãõò[YK›ö[ô ãú]JKåäãôò]\ò[Y[ù KåäãõX‹õ—\›[XY WJKBà◊KBà…–€Y[ùIÀ	–€€\õ›IÀ	‘ôXŸXöY…À	–HôXŸXô\â◊KBàããòûP€Y[ùõX\
+
+ HOàÿÀõò[YKåäÀù›[
+KåäÀúôXŸXöY KåäÀúÿ[ WJKBàN√Bàô]\õàõ›‹ÀõX\
+
+äHOàãõX\
+‹›êŸ[
+Köõ⁄[ä	Œ… JKöõ⁄[ä	◊â N√BüCBÉBãÀ»8• 8• ⁄[][Y‹à
+⁄]ZYéà\ÿÿ[\àHôXŸZ]JH8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BãÀ√BãÀ»ò][XI‹»Y[ùKYX⁄\⁄[€à€€àúŸH]H][Y[ù\àHôXŸZ]H[HL	H»ô[ô[Y[ù»€ÿôHHHpË€»HÿúòCBãÀ»€ÿôH›X€»8°§àX\ôŸ[HXZ[‹ãàôX⁄\€»\‹€»òHX⁄Y\àŸHX[ù[öÀY\»›H\õ»»õŸ]ÀàÉBãÀ»ŸHù[àHëPS[ô⁄[ôH€àHÿÿ[Yõ›ÿ]ÿ^HôX⁄\H
+[ô‹ôYY[ù»
+»ZY[0Â»òX›‹à8°§à[ô‹ôYY[ùBãÀ»€‹››[à\»[ùò\öX[ù»€õHXõ‹ãŸÿ\ÀŸö^Y\à[ö][›ôH⁄]Hô]»ZY[
+»Z[ù]\ K[ÉBãÀ»€€\\ôH€‹›X\ô⁄[à[ôõŸö]YÿZ[ú›HôY⁄\›\ôYò\Ÿ[[ôKÉBÉBã äà\ã][ö]€‹›úôXZŸ›€àŸàôX⁄\HôX⁄\RY\»Yà]»ò]⁄Ÿ\ôHÿÿ[Y⁄]Y]XõH[Y\Àà
+ã√Bôù[ò›[€à⁄[][]TôX⁄\PúôXZŸ›€ä›‹ôKôX⁄\RYòX›‹ãõŸX›[€ãX›]ôK›ô[ã€€ôöY H√Bà€€ú›ôX[H›‹ôKôŸ]
+	‹ôX⁄\\…ÀôX⁄\RY
+N√Bà€€ú›⁄[HH√BàããúôX[BàZY[õ€Z[ò[àôX[ûZY[õ€Z[ò[
+àòX›‹ãBàõŸX›[€ìZ[ù]\ŒàõŸX›[€ãX›]ôSZ[ù]\ŒàX›]ôK›ô[ìZ[ù]\Œà›ô[ãBà€€\€ô[ùŒàôX[ò€€\€ô[ùÀõX\
+
+ HOà
+»ããòÀ]NàÀú]H
+àòX›‹àJJKÀ»[ô‹ôYY[ù»ÿÿ[H⁄]Hò]⁄BàN√Bà€€ú›ò]»H√Bà[ô‹ôYY[ùŒà›‹ôKú›]Kö[ô‹ôYY[ùÀBàôX⁄\\Œà›‹ôKú›]KúôX⁄\\ÀõX\
+
+äHOà
+ãöYOOHôX⁄\RY»⁄[HàäJKBàõŸX›Œà›‹ôKú›]KúõŸX›ÀBàöXŸP⁄[ôŸ\Œà›‹ôKú›]KúöXŸP⁄[ôŸ\Àò]⁄\Œà›‹ôKú›]Kòò]⁄\Àÿ[\Œà›‹ôKú›]Kúÿ[\ÀBàN√Bàô]\õà€‹›úôXZŸ›€ä[ô^›‹ôJò] KôX⁄\RY€€ôöYÀ\›[X]S[ú €€ôöY JN√BüCBãÀ»\ôX›Xõ‹à\»XY€õ‹›X»€õNàÿ[\öY\»[ô^\õ€⁄\ôŸ\»[ôXYH]ôH[àö^Y€‹›ÀÉBò€€ú›úôXZŸ›€ï›[H
+äHOàãö[ô‹ôYY[ù»
+»ãôÿ\»
+»ãôö^Y√BÉBôù[ò›[€à⁄[][Y‹î[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›€€ôöY»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›ôX⁄\\»H›‹ôKú›]KúôX⁄\\Œ√BàYà
+ôX⁄\\Àõ[ô›OOH
+H√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»KŸ[
+	⁄âÀ»^à	‘⁄[][Y‹â»JK[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	–‹öYH[XHôXŸZ]Hö[YZ\õÀâ»JWJN√BàCBà€€ú›Ÿ[H[
+	‹Ÿ[X›	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà	‹⁄[K\ôX⁄\I»KôX⁄\\ÀõX\
+
+äHOà[
+	€‹[€âÀ»ò[YNàãöY^àãõò[YHJJJN√BàYà
+ôX⁄\\Àú€€YJ
+äHOàãöYOOH›ùöY]Àú⁄[TôX⁄\RY
+JHŸ[ùò[YHH›ùöY]Àú⁄[TôX⁄\RY√Bà€€ú›õŸHH[
+	Ÿ]âÀﬂJN√Bà€€ú›ôXùZ[H
+
+HOàõŸKúô\XŸP⁄[ô[ä⁄[][Y‹êõŸJ››‹ôKôŸ]
+	‹ôX⁄\\…ÀŸ[ùò[YJK€€ôöY JN√BàŸ[òY]ô[ù\›[ô\ä	ÿ⁄[ôŸIÀ
+
+HOà»›ùöY]Àú⁄[TôX⁄\RYHŸ[ùò[YN»ôXùZ[
+
+N»JN√BàôXùZ[
+
+N√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	⁄âÀ»€\‹Œà	‹KY‹õ›…À^à	‘⁄[][Y‹â»JWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	’ôZòH»]YHX€€ùXŸH€€H»›\›»HHX\ôŸ[HŸHõÿÍàö^ô\à[H›HXZ[‹à8†%òHX⁄Y\àŸHX[ù0Í[KY\H›H\òH[HõŸ]»»ÿ\ô0Ë\[Àâ»JKBàöY[
+	‘ôXŸZ]IÀŸ[
+KBàõŸKBàJN√BüCBÉBôù[ò›[€à⁄[][Y‹êõŸJ›ôX⁄\K€€ôöY H√Bà€€ú›»›‹ôHHH›√Bà]ò\ŸPúôXZŒ√BàûH»ò\ŸPúôXZ»H€‹›úôXZŸ›€ä›‹ôKù—[ô⁄[ôT›‹ôJ
+KôX⁄\KöY€€ôöYÀ\›[X]S[ú €€ôöY JN»CBàÿ]⁄
+JH»ô]\õà[
+	‹	À»€\‹Œà	‹K\›]\…À^àúöY[ôQ\úõ‹äJHJN»CBà€€ú›ò\ŸTôX⁄\P€‹›HúôXZŸ›€ï›[
+ò\ŸPúôXZ N√Bà€€ú›õŸX›H[öŸYõŸX›õ‹îôX⁄\J›‹ôKôX⁄\KöY
+N√Bà€€ú›ôX⁄\P€€\€ô[ùHõŸX›Àò€€\€ô[ùœÀôö[ô
+
+€€\€ô[ù
+HOà€€\€ô[ùö⁄[ôOOH	‹ôX⁄\I»	âà€€\€ô[ùöYOOHôX⁄\KöY
+N√Bà€€ú›ôX⁄\T]HHù[Xô\äôX⁄\P€€\€ô[ùÀú]JHN√Bà]ôY⁄\›\ôYõŸX›€‹›Hò\ŸTôX⁄\P€‹›
+àôX⁄\T]H
+»
+ù[Xô\äôX⁄\KúX⁄ÿY⁄[ô–€‹›
+H
+N√BàYà
+õŸX›
+H√BàûH»ôY⁄\›\ôYõŸX›€‹›HõŸX›[ö]€‹›
+›‹ôKù—[ô⁄[ôT›‹ôJ
+KõŸX›öY€€ôöYÀ\›[X]S[ú €€ôöY JN»CBàÿ]⁄» àŸY\HôX⁄\K[€õH€‹›
+ã»CBàCBà€€ú›ôY⁄\›\ôY^ò\»HX]õX^
+ôY⁄\›\ôYõŸX›€‹›Hò\ŸTôX⁄\P€‹›
+àôX⁄\T]JN√BÉBà€€ú›ò]\»HYôôX›]ôTÿ[\‘ò]\ õŸX›ôX⁄\K€€ôöY N√Bà€€ú›ÿ[\‘ò]HHò]\Àù›[√Bà€€ú›õ]‹òHH
+äHOà
+àOHù[»	¯†%	»àúõ
+äJN√Bà€€ú›òX›‹àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹⁄[KYòX›‹âÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà	ÃKI»JN√Bà€€ú›õŸX›[€àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹⁄[K\õŸX›[€âÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…Àò[YNà›ö[ô ôX⁄\KúõŸX›[€ìZ[ù]\»œ»
+
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+JJHJN√Bà€€ú›X›]ôHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹⁄[KXX›]ôIÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…Àò[YNà›ö[ô ôX⁄\KòX›]ôSZ[ù]\ HJN√Bà€€ú››ô[àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹⁄[K[›ô[âÀ\Nà	›^	À[ú][ŸNà	€ù[Y\öX…Àò[YNà›ö[ô ôX⁄\Kõ›ô[ìZ[ù]\ HJN√Bà€€ú›X⁄ÿY⁄[ô»H[€ô^QöY[
+ôY⁄\›\ôY^ò\À	‹⁄[K\X⁄ÿY⁄[ô… N√Bà€€ú›[ö]X[X\ô⁄[àHõŸX›Àù\ôŸ]X\ô⁄[î›œ»ôX⁄\Kù\ôŸ]X\ô⁄[î›œ»€€ôöYÀù\ôŸ]X\ô⁄[î›√Bà€€ú›\ôŸ]X\ô⁄[àH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À	Ÿ]K]\›Y	Œà	‹⁄[K[X\ô⁄[âÀ\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNà›ö[ô ›
+[ö]X[X\ô⁄[äJKúô\XŸJ	ÀâÀ	À	 HJN√Bà€€ú›[ö]X[öXŸHHõŸX›	âàõŸX›úÿ[TöXŸHOHù[	âàõŸX›úÿ[TöXŸHOOH	…√Bà»ù[Xô\äõŸX›úÿ[TöXŸJHàöXŸQúõ€P€‹›
+ôY⁄\›\ôYõŸX›€‹›»ããò€€ôöYÀããúò]\À\ôŸ]X\ô⁄[î›à[ö]X[X\ô⁄[àJN√Bà€€ú›öXŸHH[€ô^QöY[
+[ö]X[öXŸK	‹⁄[K\öXŸI N√Bà€€ú›ô\›[»H[
+	Ÿ]âÀ»	Ÿ]K]\›Y	Œà	‹⁄[K\ô\›[…»JN√BàÀ»ÿ\\ôHHôY⁄\›\ôYÿŸ[ò\ö[»€òŸKà[ú]»ô[›»ô[€ô»€õH»H⁄[][]Y€€[[ãÉBà€€ú›ò\ŸTöXŸHH[ö]X[öXŸN√Bà€€ú›ò\ŸU\ôŸ]öXŸHHHHÿ[\‘ò]HH[ö]X[X\ô⁄[ààBà»ôY⁄\›\ôYõŸX›€‹›»
+HHÿ[\‘ò]HH[ö]X[X\ô⁄[äHàù[√BÉBàù[ò›[€àôX€€\]J
+H√Bà]àH\úŸSù[JòX›‹ãùò[YJN»Yà
+Jàà
+JHàHN√Bà€€ú›H\úŸSù[JõŸX›[€ãùò[YJH√Bà€€ú›HH\úŸSù[JX›]ôKùò[YJH√Bà€€ú›»H\úŸSù[J›ô[ãùò[YJH√Bà€€ú›H\úŸSù[JöXŸKö[ú]ùò[YJH√Bà€€ú›^ò\»HX]õX^
+\úŸSù[JX⁄ÿY⁄[ôÀö[ú]ùò[YJH
+N√Bà€€ú›\ôŸ]HX]õX^
+
+\úŸSù[J\ôŸ]X\ô⁄[ãùò[YJH
+H»L
+N√Bà]⁄[PúôXZŒ√BàûH»⁄[PúôXZ»H⁄[][]TôX⁄\PúôXZŸ›€ä›‹ôKôX⁄\KöYãKÀ€€ôöY N»CBàÿ]⁄
+JH»ô\›[Àúô\XŸP⁄[ô[ä[
+	‹	À»€\‹Œà	‹K\›]\…À^àúöY[ôQ\úõ‹äJHJJN»ô]\õé»CBà€€ú›⁄[TôX⁄\P€‹›HúôXZŸ›€ï›[
+⁄[PúôXZ N√Bà€€ú›ò\ŸVZY[Hù[Xô\äôX⁄\KûZY[õ€Z[ò[
+H√Bà€€ú›⁄[VZY[Hò\ŸVZY[
+àé√Bà€€ú›ò\ŸTõŸX›[ö]»HôX⁄\T]Hà»ò\ŸVZY[»ôX⁄\T]Hà√Bà€€ú›⁄[TõŸX›[ö]»HôX⁄\T]Hà»⁄[VZY[»ôX⁄\T]Hà√Bà€€ú›ò\ŸTôX⁄\U›[Hò\ŸTôX⁄\P€‹›
+àò\ŸVZY[√Bà€€ú›⁄[TôX⁄\U›[H⁄[TôX⁄\P€‹›
+à⁄[VZY[√Bà€€ú›ò\ŸR[ô‹ôYY[ù’›[Hò\ŸPúôXZÀö[ô‹ôYY[ù»
+àò\ŸVZY[√Bà€€ú›⁄[R[ô‹ôYY[ù’›[H⁄[PúôXZÀö[ô‹ôYY[ù»
+à⁄[VZY[√Bà€€ú›ò\ŸSXõ‹í[ôXÿ]‹àHò\ŸPúôXZÀõXõ‹à
+àò\ŸVZY[√Bà€€ú›⁄[SXõ‹í[ôXÿ]‹àH⁄[PúôXZÀõXõ‹à
+à⁄[VZY[√BàÀ»HôX⁄\Hõ€]\[ò€Y\»[ô‹ôYY[ùÀÿ\À[ôõ‹‹ù[€ò[ö^Y€‹›ÀàYXX⁄BàÀ»Ÿ[XõHõŸX›	‹»X⁄ÿY⁄[ôÀÿ€€\[Y[ù»€»H\‹^YYò]⁄›[\»ù[HÿYYÉBà€€ú›ò\ŸU›[€‹›Hò\ŸTôX⁄\U›[
+»ôY⁄\›\ôY^ò\»
+àò\ŸTõŸX›[ö]Œ√Bà€€ú›⁄[U›[€‹›H⁄[TôX⁄\U›[
+»^ò\»
+à⁄[TõŸX›[ö]Œ√Bà€€ú›ò\ŸTô]ô[ùYHHò\ŸTöXŸH
+àò\ŸTõŸX›[ö]Œ√Bà€€ú›⁄[Tô]ô[ùYHH
+à⁄[TõŸX›[ö]Œ√Bà€€ú››[õŸö]H
+ô]ô[ùYK€‹›
+HOàô]ô[ùYHH€‹›Hô]ô[ùYH
+àÿ[\‘ò]N√Bà€€ú›ò\ŸTõŸö]H›[õŸö]
+ò\ŸTô]ô[ùYKò\ŸU›[€‹›
+N√Bà€€ú›⁄[TõŸö]H›[õŸö]
+⁄[Tô]ô[ùYK⁄[U›[€‹›
+N√Bà€€ú›X\ô⁄[àH
+ô]ô[ùYK€‹›
+HOàô]ô[ùYHà»›[õŸö]
+ô]ô[ùYK€‹›
+H»ô]ô[ùYHà√Bà€€ú›ò\ŸTõŸX›[€ìZ[ù]\»Hù[Xô\äôX⁄\KúõŸX›[€ìZ[ù]\ H
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+N√Bà€€ú›õŸö]›\àH
+õŸö]Z[ù]\ HOàZ[ù]\»à»õŸö]»
+Z[ù]\»»å
+Hàù[√Bà€€ú›]ö\€‹àHHHÿ[\‘ò]HH\ôŸ]√Bà€€ú›⁄[P€‹›\îõŸX›H⁄[TõŸX›[ö]»à»⁄[U›[€‹›»⁄[TõŸX›[ö]»à√Bà€€ú›ò\ŸP€‹›\îõŸX›Hò\ŸTõŸX›[ö]»à»ò\ŸU›[€‹›»ò\ŸTõŸX›[ö]»à√Bà€€ú›ò\ŸTõŸö]\îõŸX›Hò\ŸTõŸX›[ö]»à»ò\ŸTõŸö]»ò\ŸTõŸX›[ö]»à√Bà€€ú›⁄[TõŸö]\îõŸX›H⁄[TõŸX›[ö]»à»⁄[TõŸö]»⁄[TõŸX›[ö]»à√Bà€€ú›\ôŸ]öXŸHH]ö\€‹àà»⁄[P€‹›\îõŸX›»]ö\€‹ààù[√Bà€€ú›€€H
+]X[⁄[]Kõ]
+HOàŸ[
+	›	À»€\‹Œà	‹K[ù[IÀ^àõ]
+]X[
+HJK[
+	›	À»€\‹Œà	‹K[ù[HK\›õ€ô…À^àõ]
+⁄[]JHJWN√Bà€€ú›ôXX⁄Y\ôŸ]HX\ô⁄[ä⁄[Tô]ô[ùYK⁄[U›[€‹›
+H
+»åHèH\ôŸ]√Bàô\›[Àúô\XŸP⁄[ô[ä[
+	›XõIÀ»€\‹Œà	‹KZ›àK\⁄[I»K√Bà[
+	›âÀ»€\‹Œà	‹K\⁄[KZXY	»KŸ[
+	›	ÀﬂJK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	–]X[	»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à⁄[][Y»
+	Ÿõ]ù[Jä_pÂ XJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	‘ô[ô[Y[ù»HôXŸZ]I»JKããò€€
+ò\ŸVZY[⁄[VZY[
+äHOà	Ÿõ]ù[Jä_H	‹ôX⁄\KûZY[[ö]X
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	’[öYY\»ô[ô0Ë]ôZ\»\›H›I»JKããò€€
+ò\ŸTõŸX›[ö]À⁄[TõŸX›[ö]À
+äHOàõ]ù[JäJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»›[‹»[ô‹ôYY[ù\…»JKããò€€
+ò\ŸR[ô‹ôYY[ù’›[⁄[R[ô‹ôYY[ù’›[úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»HôXŸZ]H
+[ô‹ôYY[ù\ÀË\»Hö^‹ I»JKããò€€
+ò\ŸTôX⁄\U›[⁄[TôX⁄\U›[úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	—[Xò[YŸ[HH€€\[Y[ù‹»»›I»JKããò€€
+ôY⁄\›\ôY^ò\»
+àò\ŸTõŸX›[ö]À^ò\»
+à⁄[TõŸX›[ö]Àúõ
+WJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	–›\›»›[HôXŸZ]H€€H[Xò[YŸ[I»JKããò€€
+ò\ŸU›[€‹›⁄[U›[€‹›úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	–›\›»‹àõŸ]»
+[öYYHô[ôYJI»JKããò€€
+ò\ŸP€‹›\îõŸX›⁄[P€‹›\îõŸX›úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”pË€»HÿúòH\ô]H
+[ôXÿY‹äI»JKããò€€
+ò\ŸSXõ‹í[ôXÿ]‹ã⁄[SXõ‹í[ôXÿ]‹ãúõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	‘ôpÈ€»Hô[ôH‹àõŸ]…»JKããò€€
+ò\ŸTöXŸKúõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	—ò]\ò[Y[ù»ŸHô[ô\à»›H[ùZ\õ…»JKããò€€
+ò\ŸTô]ô[ùYK⁄[Tô]ô[ùYKúõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”X\ôŸ[H\ŸZòYI»JKããò€€
+[ö]X[X\ô⁄[ã\ôŸ]››äWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”X\ôŸ[H0Î\]ZYHõ»ôpÈ€»[ôõ‹õXY…»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à››äX\ô⁄[äò\ŸTô]ô[ùYKò\ŸU›[€‹›
+JHJK[
+	›	À»€\‹ŒàK[ù[HK\›õ€ô…‹ôXX⁄Y\ôŸ]»	»K\‹⁄]]ôI»à	»KXòY	ﬂX^à››äX\ô⁄[ä⁄[Tô]ô[ùYK⁄[U›[€‹›
+JHJWJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”X‹õ»›[HôXŸZ]I»JKããò€€
+ò\ŸTõŸö]⁄[TõŸö]úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”X‹õ»‹àõŸ]…»JKããò€€
+ò\ŸTõŸö]\îõŸX›⁄[TõŸö]\îõŸX›úõ
+WJKBà[
+	›âÀﬂKŸ[
+	›	À»^à	”X‹õ»‹à‹òHHõŸpÈË€…»JKããò€€
+õŸö]›\äò\ŸTõŸö]ò\ŸTõŸX›[€ìZ[ù]\ KõŸö]›\ä⁄[TõŸö]
+Kõ]‹òJWJKBà[
+	›âÀ»€\‹Œà	‹KZ›ã]›[	»KŸ[
+	›	À»^à	‘ôpÈ€»\òHX\ôŸ[H\ŸZòYI»JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^àò\ŸU\ôŸ]öXŸHOHù[»	”X\ôŸ[H[ù∞Ë[YI»àúõ
+ò\ŸU\ôŸ]öXŸJHJK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à\ôŸ]öXŸHOHù[»	”X\ôŸ[H[ù∞Ë[YI»àúõ
+\ôŸ]öXŸJHJWJKBàJK[
+	‹	À»€\‹ŒàôXX⁄Y\ôŸ]»	‹K\›]\…»à	‹KXÿ[›]	À^àôXX⁄Y\ôŸ]»	–H⁄[][pÈË€»[ÿ[∞ÈÿHHX\ôŸ[H\ŸZòYH€€H»ôpÈ€»[ôõ‹õXYÀâ»àHX\ôŸ[HöX€›HXòZ^»HY]Kà€€ú⁄Y\ôHôpÈ€»∞Ïﬁ[[»H	›\ôŸ]öXŸHOHù[»	¯†%	»àúõ
+\ôŸ]öXŸJ_H›Hô]ôZòH[Xò[YŸ[Kô[ô[Y[ù»H[\ÀòJJN√BàCBàŸòX›‹ãõŸX›[€ãX›]ôK›ô[ãX⁄ÿY⁄[ôÀö[ú]\ôŸ]X\ô⁄[ãöXŸKö[ú]Kôõ‹ëXX⁄
+
+JHOàKòY]ô[ù\›[ô\ä	⁄[ú]	ÀôX€€\]JJN√BàôX€€\]J
+N√BÉBàô]\õà[
+	Ÿ]âÀﬂK√Bà[
+	‹	À»€\‹Œà	‹K[]]Y	À^à]X[àô[ôH	Ÿõ]ù[JôX⁄\KûZY[õ€Z[ò[
+_H	‹ôX⁄\KûZY[[ö]H0≠»	‹ôX⁄\KúõŸX›[€ìZ[ù]\»œ»
+
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+J_[Z[àHõŸpÈË€»0≠»	‹ôX⁄\KòX›]ôSZ[ù]\ﬂ[Z[à]]õ‹»0≠»	‹ôX⁄\Kõ›ô[ìZ[ù]\ﬂ[Z[àõ‹õõ…‹õŸX›»0≠»õŸ]»	‹õŸX›õò[Y_Xà	…ﬂXJKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	—HŸH]Hö^ô\à[H›HXZ[‹è…»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	—\ÿÿ[I»JKòX›‹ã[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	Â»HôXŸZ]I»JWJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	’[\»›[HõŸpÈË€»
+Z[äI»JKõŸX›[€óJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”Z[ù]‹»]]õ‹…»JKX›]ôK[
+	‹‹[âÀ»€\‹Œà	‹K[XâÀ^à	”Z[ù]‹»Hõ‹õõ…»JK›ô[óJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»›\›»›[[ò€ZH[ô‹ôYY[ù\ÀË\»»õ‹õõÀ›\›‹»ö^‹»õ‹‹ò⁄[€òZ\»[»[\»HõŸpÈË€»H[Xò[YŸ[Kÿ€€\[Y[ù‹»‹àõŸ]ÀàZ[ù]‹»]]õ‹»[‹›ò[HHpË€»HÿúòH€€[»[ôXÿY‹ãŸ[H\Xÿ\àÿ[0Ë\ö[‹»]YH∞ËH\›0Ë€»õ‹»›\›‹»ö^‹Àâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYö[\ô‹öY	»KŸöY[
+	—[Xò[YŸ[HH€€\[Y[ù‹»‹àõŸ]…ÀX⁄ÿY⁄[ô KöY[
+	”X\ôŸ[H\ŸZòYHõ»Ÿ[∞Ë\ö[»
+	JIÀ\ôŸ]X\ô⁄[äKöY[
+	‘ôpÈ€»Hô[ôH\òH\›\âÀöXŸJWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–H€€[òH]X[\ÿH‹»ò[‹ô\»ÿY\›òY‹»H\õX[ôXŸHö^KàHX\ôŸ[H\ŸZòYH[\òH»ôpÈ€»ôX€€Y[ôYŒ»»X‹õ»»Ÿ[∞Ë\ö[»\[ôH»ôpÈ€»Hô[ôH[ôõ‹õXYÀàX‹õ»›HX\ôŸ[HôYÿ]]õ‹»[ôXÿ[H]YH\›HôpÈ€»∞Ë€»€ÿúôH»›\›»H‹»\òŸ[ùXZ\»Hô[ôKâ»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^àõŸX›»	—[Xò[YŸ[HH€€\[Y[ù‹»€€YpÈÿ[H€€HHYô\ô[∞ÈÿH[ùôH»›\›»›[»õŸ]»HH\ùHHôXŸZ]KàõÿÍàŸH[\ò\à]úô[Y[ùH\òH€€\\ò\àŸ[∞Ë\ö[‹Àâ»à	—\›HôXŸZ]HZ[ôH∞Ë€»\›0ËHö[ò›[YHH[HõŸ]Àà[ôõ‹õYHX[ùX[Y[ùH[Xò[YŸ[HHôpÈ€»\òHò^ô\àH⁄[][pÈË€Àâ»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à^HHYÿ[Y[ù»
+»€€Z\‹Ë€»€€ú⁄Y\òY\»õ‹»⁄\»Ÿ[∞Ë\ö[‹Œà	‹››äÿ[\‘ò]J_KòJKBàô\›[ÀBàJN√BüCBÉBãÀ»8• 8• Zù\›\»
+€€ôöY»
+»õ‹õﬁ
+H8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• 8• BÉBôù[ò›[€à]]€X]X–€€ôöY‘›YŸŸ\›[€ú ›‹ôJH√Bà€€ú›Ÿ^HHô]»]J
+N√Bà€€ú›[€ù»H◊N√BàÀ»[à[ôö[ö\⁄Y[€ù[ô\ú›]\»ôX›\úö[ô»^[úŸ\»[ôõŸX›[€àÿ\X⁄]KÉBàÀ»\ŸH\»H\›ôYH€€\]Yÿ[[ô\à[€ù»õ‹à]ô\ûH›YŸŸ\›[€ãÉBàõ‹à
+]HHŒ»HèHN»KKJH√Bà€€ú›Hô]»]JŸ^KôŸ]ù[YX\ä
+KŸ^KôŸ][€ù
+
+HHKJN√Bà[€ùÀú\⁄
+	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _X
+N√BàCBà€€ú››\ùH	€[€ù÷Ã_KLX√Bà€€ú›\›€€\]Q^HHô]»]JŸ^KôŸ]ù[YX\ä
+KŸ^KôŸ][€ù
+
+K
+N√Bà€€ú›[ôH	€\›€€\]Q^KôŸ]ù[YX\ä
+_KI‘›ö[ô \›€€\]Q^KôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KI‘›ö[ô \›€€\]Q^KôŸ]]J
+JKúY›\ù
+ã	Ã	 _X√Bà€€ú›X›X[Hÿ\⁄[›ô[Y[ù ›‹ôJKôö[\ä
+JHOà[Kùò[úŸô\à	âà]S€õJKò]
+HèH›\ù	âà]S€õJKò]
+HH[ô
+N√Bà€€ú›ÿ]Y€‹ûHH
+JHOàKòÿ]Y€‹ûRY»›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…ÀKòÿ]Y€‹ûRY
+Hàù[√Bà€€ú›ö^Y^€YYHô]»Ÿ]
+…›\öYò\…◊JN√BàÀ»\ŸHôX›\úö[ô»‹\ò][ô»€‹›»]ôHõ»Ÿ\\ò]H\ã\ôX⁄\Hò]H[àH[ô⁄[ôKÉBàÀ»[ò€YHZ\à[€ùH]ô\òYŸH[àHÿ[YHõŸX›[€ã][YH[ÿÿ][€à\»›ô\öXYÉBà€€ú›[€ùS›ô\öXYHô]»Ÿ]
+…Ÿ[ô\ô⁄XK\õŸXÿ[…À	€[\^òIÀ	€X[ù][òÿ[…◊JN√Bà€€ú›\”[€ùS›ô\öXYH
+ÿ]Y€‹ûJHOà√Bà€€ú›ŸY[àHô]»Ÿ]
+
+N√Bàõ‹à
+]›\úô[ùHÿ]Y€‹ûN»›\úô[ù	âà\ŸY[ãö\ ›\úô[ùöY
+N»›\úô[ùH›\úô[ùú\ô[ùY»›‹ôKôŸ]
+	ÿÿ]Y€‹öY\…À›\úô[ùú\ô[ùY
+Hàù[
+H√BàYà
+[€ùS›ô\öXYö\ ›\úô[ùúﬁ\›[RŸ^JJHô]\õàùYN√BàŸY[ãòY
+›\úô[ùöY
+N√BàCBàô]\õàò[ŸN√BàN√Bà€€ú›ö^YHX›X[ôö[\ä
+JHOà√Bà€€ú›»Hÿ]Y€‹ûJJN√Bàô]\õàKô\ôX›[€àOOH	‹ÿZYI»	âà»	âÉBà
+Àö⁄[ôOOH	Ÿ\‹\ÿQö^I»ÀòôZ]ö[‹àOOH	Ÿö^I»\”[€ùS›ô\öXY
+ JH	âÉBàYö^Y^€YYö\ Àúﬁ\›[RŸ^JN√BàJN√Bà€€ú›ö^Y[€ù»Hô]»Ÿ]
+ö^YõX\
+
+JHOà]S€õJKò]
+Kú€XŸJ JJN√Bà€€ú›ö^Y›[Hö^YúôYXŸJ
+›[KJHOà›[H
+»
+ù[Xô\äKò[[›[ù
+H
+K
+N√Bà€€ú›ÿ\’›[HX›X[ôö[\ä
+JHOàKô\ôX›[€àOOH	‹ÿZYI»	âàÿ]Y€‹ûJJOÀúﬁ\›[RŸ^HOOH	Ÿÿ\À\õŸXÿ[… KúôYXŸJ
+›[KJHOà›[H
+»
+ù[Xô\äKò[[›[ù
+H
+K
+N√Bà€€ú›Xõ‹ï›[HX›X[ôö[\ä
+JHOàKô\ôX›[€àOOH	‹ÿZYI»	âà…‹õÀ[Xõ‹ôIÀ	‹ÿ[\ö[‹…◊Kö[ò€Y\ ÿ]Y€‹ûJJOÀúﬁ\›[RŸ^JJKúôYXŸJ
+›[KJHOà›[H
+»
+ù[Xô\äKò[[›[ù
+H
+K
+N√Bà€€ú›\öYôï›[HX›X[ôö[\ä
+JHOàKô\ôX›[€àOOH	‹ÿZYI»	âàÿ]Y€‹ûJJOÀúﬁ\›[RŸ^HOOH	›\öYò\… KúôYXŸJ
+›[KJHOà›[H
+»
+ù[Xô\äKò[[›[ù
+H
+K
+N√Bà€€ú›ÿ[\‘ôXŸZ]ôYHX›X[ôö[\ä
+JHOàKô\ôX›[€àOOH	Ÿ[ùòYI»	âàÿ]Y€‹ûJJOÀúﬁ\›[RŸ^HOOH	›ô[ô\… KúôYXŸJ
+›[KJHOà›[H
+»
+ù[Xô\äKò[[›[ù
+H
+K
+N√Bà€€ú›ò]⁄\»H›‹ôKú›]Kòò]⁄\Àôö[\ä
+äHOà]S€õJãò]
+HèH›\ù	âà]S€õJãò]
+HH[ô
+N√Bà€€ú›€€ùô\ù⁄[\HH
+ò[YKúõ€K HOà√BàYà
+úõ€HOOH Hô]\õàò[YN√BàYà
+úõ€HOOH	⁄Ÿ…»	âà»OOH	Ÿ… Hô]\õàò[YH
+àL√BàYà
+úõ€HOOH	Ÿ…»	âà»OOH	⁄Ÿ… Hô]\õàò[YH»L√BàYà
+úõ€HOOH	€	»	âà»OOH	€[	 Hô]\õàò[YH
+àL√BàYà
+úõ€HOOH	€[	»	âà»OOH	€	 Hô]\õàò[YH»L√Bàô]\õàò[YN√BàN√Bà€€ú›ôX⁄\SZ[ù]\‘\ï[ö]H
+ôX⁄\RY\ŸK›X⁄»Hô]»Ÿ]
+
+JHOà√Bà€€ú›ôX⁄\HH›‹ôKôŸ]
+	‹ôX⁄\\…ÀôX⁄\RY
+N√BàYà
+\ôX⁄\H›X⁄Àö\ ôX⁄\RY
+HJù[Xô\äôX⁄\KûZY[õ€Z[ò[
+Hà
+JHô]\õà√Bà›X⁄ÀòY
+ôX⁄\RY
+N√Bà€€ú›ôX⁄\T\ŸHH\ŸHOOH	‹õŸX›[€ìZ[ù]\…√Bà»
+ù[Xô\äôX⁄\KúõŸX›[€ìZ[ù]\ H
+ù[Xô\äôX⁄\KòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äôX⁄\Kõ›ô[ìZ[ù]\ H
+JCBàà
+ù[Xô\äôX⁄\V‹\ŸWJH
+N√Bà]›[HôX⁄\T\ŸH»ù[Xô\äôX⁄\KûZY[õ€Z[ò[
+N√Bàõ‹à
+€€ú›€€\€ô[ùŸàôX⁄\Kò€€\€ô[ù»◊JHYà
+€€\€ô[ùúôYèÀö⁄[ôOOH	‹ôX⁄\I H√Bà€€ú››XàH›‹ôKôŸ]
+	‹ôX⁄\\…À€€\€ô[ùúôYãöY
+N√BàYà
+›XäH›[
+œH€€ùô\ù⁄[\Jù[Xô\ä€€\€ô[ùú]JH€€\€ô[ùù[ö]›XãûZY[[ö]
+H
+àôX⁄\SZ[ù]\‘\ï[ö]
+›XãöY\ŸK›X⁄ N√BàCBà›X⁄Àô[]JôX⁄\RY
+N√Bàô]\õà›[√BàN√Bà€€ú›õŸX›Z[ù]\‘\ï[ö]H
+õŸX›Y\ŸK›X⁄»Hô]»Ÿ]
+
+JHOà√Bà€€ú›õŸX›H›‹ôKôŸ]
+	‹õŸX›…ÀõŸX›Y
+N√BàYà
+\õŸX››X⁄Àö\ õŸX›Y
+JHô]\õà√Bà›X⁄ÀòY
+õŸX›Y
+N√Bà]›[H√Bàõ‹à
+€€ú›€€\€ô[ùŸàõŸX›ò€€\€ô[ù»◊JH√BàYà
+€€\€ô[ùö⁄[ôOOH	‹ôX⁄\I H›[
+œH
+ù[Xô\ä€€\€ô[ùú]JH
+H
+àôX⁄\SZ[ù]\‘\ï[ö]
+€€\€ô[ùöY\ŸJN√Bà[ŸHYà
+€€\€ô[ùö⁄[ôOOH	‹õŸX›	»	âàZ\–ù[ôTõŸX›
+õŸX›
+JH›[
+œH
+ù[Xô\ä€€\€ô[ùú]JH
+H
+àõŸX›Z[ù]\‘\ï[ö]
+€€\€ô[ùöY\ŸK›X⁄ N√BàCBà›X⁄Àô[]JõŸX›Y
+N√Bàô]\õà›[√BàN√Bà€€ú›€€[X[ô\»H›‹ôKú›]Kò€€X[ô\Àôö[\ä
+ HOà]S€õJÀô]HÀöY
+HèH›\ù	âà]S€õJÀô]HÀöY
+HH[ô
+N√Bà€€ú›\›[X]Yúõ€P€€[X[ô\»H
+\ŸJHOà€€[X[ô\ÀúôYXŸJ
+›[K€€[X[ô
+HOà›[H
+»
+€€[X[ôö][ú»◊JKúôYXŸJ
+][T›[K][JHOà][T›[H
+»
+ù[Xô\ä][KúôX[^òY H
+H
+àõŸX›Z[ù]\‘\ï[ö]
+][KúõŸX›Y\ŸJK
+K
+N√Bà€€ú›\–ò]⁄\»Hò]⁄\Àõ[ô›à√Bà€€ú›X›]ôSZ[ù]\»H\–ò]⁄\√Bà»ò]⁄\ÀúôYXŸJ
+›[KäHOà›[H
+»
+ù[Xô\äãòX›]ôSZ[ù]\ Hù[Xô\ä›‹ôKôŸ]
+	‹ôX⁄\\…ÀãúôX⁄\RY
+OÀòX›]ôSZ[ù]\ H
+K
+CBàà\›[X]Yúõ€P€€[X[ô\ 	ÿX›]ôSZ[ù]\… N√Bà€€ú››ô[ìZ[ù]\»H\–ò]⁄\√Bà»ò]⁄\ÀúôYXŸJ
+›[KäHOà›[H
+»
+ù[Xô\äãõ›ô[ìZ[ù]\ Hù[Xô\ä›‹ôKôŸ]
+	‹ôX⁄\\…ÀãúôX⁄\RY
+OÀõ›ô[ìZ[ù]\ H
+K
+CBàà\›[X]Yúõ€P€€[X[ô\ 	€›ô[ìZ[ù]\… N√Bà€€ú›õŸX›[€ìZ[ù]\»H\–ò]⁄\√Bà»ò]⁄\ÀúôYXŸJ
+›[KäHOà√Bà€€ú›ôX⁄\HH›‹ôKôŸ]
+	‹ôX⁄\\…ÀãúôX⁄\RY
+N√Bàô]\õà›[H
+»
+ù[Xô\äãúõŸX›[€ìZ[ù]\ Hù[Xô\äôX⁄\OÀúõŸX›[€ìZ[ù]\ H
+ù[Xô\äãòX›]ôSZ[ù]\»œ»ôX⁄\OÀòX›]ôSZ[ù]\ H
+H
+»
+ù[Xô\äãõ›ô[ìZ[ù]\»œ»ôX⁄\OÀõ›ô[ìZ[ù]\ H
+JN√BàK
+CBàà\›[X]Yúõ€P€€[X[ô\ 	‹õŸX›[€ìZ[ù]\… N√Bà€€ú›õŸX›[€ì[€ù»Hô]»Ÿ]
+
+\–ò]⁄\»»ò]⁄\ÀõX\
+
+äHOàãò]
+Hà€€[X[ô\Àôö[\ä
+ HOà
+Àö][ú»◊JKú€€YJ
+]
+HOà
+ù[Xô\ä]úôX[^òY H
+Hà
+JKõX\
+
+ HOàÀô]HÀöY
+JKõX\
+
+\€ HOà]S€õJ\€ Kú€XŸJ JJN√Bà€€ú›€ÿ⁄‘Ÿ\‹⁄[€ú»H€‹ö–€ÿ⁄‘Ÿ\‹⁄[€ú ›‹ôJKúŸ\‹⁄[€úÀôö[\ä
+Ÿ\‹⁄[€äHOà]S€õJŸ\‹⁄[€ãú›\ùò]
+HèH›\ù	âà]S€õJŸ\‹⁄[€ãú›\ùò]
+HH[ô
+N√Bà€€ú›€ÿ⁄“›\ú»H€ÿ⁄‘Ÿ\‹⁄[€úÀúôYXŸJ
+›[KŸ\‹⁄[€äHOà›[H
+»Ÿ\‹⁄[€ãõZ[ù]\»»å
+N√Bàô]\õà√Bà\ö[Ÿà	Ÿõ]]J	‹›\ùULéåå
+_HH	Ÿõ]]J	Ÿ[ôULéåå
+_XBàò[Y\Œà√Bà›\›‹—ö^‹”Y\Œàö^Y[€ùÀú⁄^ôH»ö^Y›[»ö^Y[€ùÀú⁄^ôHàù[Bà^Qÿ\Œàÿ\’›[à	âà›ô[ìZ[ù]\»à»ÿ\’›[»›ô[ìZ[ù]\»àù[Bàò[‹í‹òNàXõ‹ï›[à	âà
+€ÿ⁄“›\ú»àX›]ôSZ[ù]\»à
+H»Xõ‹ï›[»
+€ÿ⁄“›\ú»
+X›]ôSZ[ù]\»»å
+JHàù[Bà^X›YõŸX›[€ìZ[ù]\”[€ùàõŸX›[€ì[€ùÀú⁄^ôH	âàõŸX›[€ìZ[ù]\»à»õŸX›[€ìZ[ù]\»»õŸX›[€ì[€ùÀú⁄^ôHàù[BàKBàÿúŸ\ùôYôYT›à\öYôï›[à	âàÿ[\‘ôXŸZ]ôYà»\öYôï›[»ÿ[\‘ôXŸZ]ôYàù[BàòX›Œà»ö^Y[€ùŒàö^Y[€ùÀú⁄^ôKÿ\’›[Xõ‹ï›[\öYôï›[ÿ[\‘ôXŸZ]ôYõŸX›[€úŒà\–ò]⁄\»»ò]⁄\Àõ[ô›à€€[X[ô\Àõ[ô›õŸX›[€î€›\òŸNà\–ò]⁄\»»	›[\‹»ôXZ\…»à	Ÿ\›[X]]òH\»€€X[ô\…ÀX›]ôSZ[ù]\À›ô[ìZ[ù]\ÀõŸX›[€ìZ[ù]\À€ÿ⁄“›\úÀ€ÿ⁄‘Ÿ\‹⁄[€úŒà€ÿ⁄‘Ÿ\‹⁄[€úÀõ[ô›KBàN√BüCBÉBò€€ú›—USë‘◊“STî»H√Bàò[‹í‹òNà√Bà]Nà	–ÿ[›[\à»ò[‹àH›XH‹òIÀ€€ôöY“Ÿ^Nà	›ò[‹í‹òIÀ›Yôö^à	‘â⁄	ÀBà[ùõŒà	—\›Hò[‹àŸ\ùôH€€[»[ôXÿY‹àH\Ÿõ‹∞È€Ààÿ[0Ë\ö[‹À∞ÏÀ[Xõ‹ôHH[òÿ\ô€‹»€€ù[ùX[Hõ‹»›\›‹»ö^‹»H∞Ë€»Ÿ\∞Ë€»€€XY‹»X\»ô^ô\ÀâÀBàöY[Œà÷…€[€ùT^IÀ	‘ÿ[0Ë\ö[‹»
+»∞ÏÀ[Xõ‹ôH
+»[òÿ\ô€‹»õ»pÍú»
+â
+I◊K…€[€ùR›\ú…À	“‹ò\»]]ò\»HòXò[»õ»pÍú…◊WKBàÿ[›[]Nà
+äHOàãõ[€ùT^Hà	âàãõ[€ùR›\ú»à»ãõ[€ùT^H»ãõ[€ùR›\ú»àù[Bà^[ò][€éà	‹ÿ[0Ë\ö[‹À∞ÏÀ[Xõ‹ôHH[òÿ\ô€‹»0Ì»‹ò\»]]ò\…ÀBàKBà^Qÿ\Œà√Bà]Nà	–ÿ[›[\à»Ë\»‹àZ[ù]…À€€ôöY“Ÿ^Nà	›^Qÿ\…À›Yôö^à	‘â€Z[âÀBà[ùõŒà	’\ŸH»ò[‹àY€»õ»õ›Z∞Ë€»›HòHôXÿ\ôÿHH[XH\›[X]]òHH]X[ù‹»Z[ù]‹»Hõ‹õõ»[H\òKâÀBàöY[Œà÷…Ÿÿ\–€‹›	À	’ò[‹à»õ›Z∞Ë€»›HôXÿ\ôÿH
+â
+I◊K…Ÿÿ\”Z[ù]\…À	—\òpÈË€»\›[XYH[HZ[ù]‹»Hõ‹õõ…◊WKBàÿ[›[]Nà
+äHOàãôÿ\–€‹›à	âàãôÿ\”Z[ù]\»à»ãôÿ\–€‹›»ãôÿ\”Z[ù]\»àù[Bà^[ò][€éà	›ò[‹à»Ë\»0Ì»Z[ù]‹»H\€»»õ‹õõ…ÀBàKBà›\›‹—ö^‹”Y\Œà√Bà]Nà	‘€€X\à‹»›\›‹»ö^‹»»pÍú…À€€ôöY“Ÿ^Nà	ÿ›\›‹—ö^‹”Y\…À›Yôö^à	‘â€pÍú…ÀBà[ùõŒà	“[ôõ‹õYHHpÍYXHY[úÿ[HÿYHÿ\›»\[ò\»[XHô^ãà[ò€XH[ô\ô⁄XHHõŸpÈË€»\]ZHŸH[HZ[ôH∞Ë€»[ùò\à[H›]õ»›\›Ààÿ[\‹»ò^ö[‹»€€ù[H€€[»ô\õÀâÀBàöY[Œà÷…‹ô[ù	À	–[Y›Y[€€ô€pÎ[ö[»HTI◊K…›][]Y\…À	‡Y›XHH[ô\ô⁄XHHŸHH‹\òpÈË€…◊K…⁄[ù\õô]	À	“[ù\õô]H[Yõ€ôI◊K…‹^\õ€	À	‘ÿ[0Ë\ö[‹À∞ÏÀ[Xõ‹ôKX\ö\›\»H[òÿ\ô€‹…◊K…ÿXÿ€›[ù[ô…À	–€€ùY‹â◊K…›^\…À	—TÀXŸ[∞Èÿ\»H^\»ö^\…◊K…ÿ€X[ö[ô…À	”[\^òHHY⁄Y[ôI◊K…€XZ[ù[ò[òŸIÀ	”X[ù][∞ÈË€»Hô\‹⁄pÈË€»H\]Z\[Y[ù‹…◊K…‹ﬁ\›[\…À	‘⁄\›[X\»H\‹⁄[ò]\ò\…◊K…€›\âÀ	”›]õ‹»›\›‹»ö^‹…◊WKBàÿ[›[]Nà
+äHOàÿöôX›ùò[Y\ äKúôYXŸJ
+›[Kò[YJHOà›[H
+»X]õX^
+ò[YH
+K
+KBà^[ò][€éà	‹€€XH‹»›\›‹»ö^‹»[ôõ‹õXY‹…ÀBàKBà^X›Yà√Bà]Nà	–ÿ[›[\à»[\»›[HõŸpÈË€»Y[úÿ[	À€€ôöY“Ÿ^Nà	Ÿ^X›YõŸX›[€ìZ[ù]\”[€ù	À›Yôö^à	€Z[ã€pÍú…ÀBà[ùõŒà	–€€ú⁄Y\ôH»[\»›[[H]YHH\›ù]\òHH€€ôôZ]\öXHöXÿHYXÿYH0ËõŸpÈË€ÀâÀBàöY[Œà÷…›€‹ö—^\…À	—X\»HõŸpÈË€»‹àpÍú…◊K…⁄›\ú‘\ë^IÀ	“‹ò\»HõŸpÈË€»‹àXI◊WKBàÿ[›[]Nà
+äHOàãù€‹ö—^\»à	âàãö›\ú‘\ë^Hà»ãù€‹ö—^\»
+àãö›\ú‘\ë^H
+àåàù[Bà^[ò][€éà	ŸX\»HõŸpÈË€»0Â»‹ò\»õŸ]]ò\»0Â»å	ÀBàKBàX\ô⁄[éà√Bà]Nà	—\›[X\à[XHX\ôŸ[KX[õ…À€€ôöY“Ÿ^Nà	›\ôŸ]X\ô⁄[î›	À›Yôö^à	…IÀ\òŸ[ùàùYKBà[ùõŒà	–HX\ôŸ[H0ÍH[XHX⁄\Ë€»»ôYÏÿ⁄[Àà\›H€€ùHZùYHH\ù\à»ò]\ò[Y[ù»H»X‹õ»]YHõÿÍà€‹›\öXHH[ÿ[∞Èÿ\ãâÀBàöY[Œà÷…‹ô]ô[ùYIÀ	—ò]\ò[Y[ù»Y[úÿ[\‹\òY»
+â
+I◊K…‹õŸö]	À	”X‹õ»]YH\ŸZòH\àõ»pÍú»
+â
+I◊WKBàÿ[›[]Nà
+äHOàãúô]ô[ùYHà	âàãúõŸö]èH»
+ãúõŸö]»ãúô]ô[ùYJH
+àLàù[Bà^[ò][€éà	€X‹õ»\ŸZòY»0Ì»ò]\ò[Y[ù»\‹\òY…ÀBàKBàôYNà√Bà]Nà	–ÿ[›[\àH^HpÍYXHHYÿ[Y[ù…À€€ôöY“Ÿ^Nà	‹^[Y[ùôYT›	À›Yôö^à	…IÀ\òŸ[ùàùYKBà[ùõŒà	’\ŸH[HpÍú»€€][Nà€€YH\»^\»Hÿ\ù0Ë€ÀX\]Z[ö[öHH]Yõ‹õX\»H€€\\ôH€€H»]YHôXŸXô]KâÀBàöY[Œà÷…ŸôY\…À	’›[H^\»Yÿ\»õ»pÍú»
+â
+I◊K…‹ôXŸZ]ôY	À	’›[ôXŸXöY»õ»pÍú»
+â
+I◊WKBàÿ[›[]Nà
+äHOàãúôXŸZ]ôYà	âàãôôY\»èH»
+ãôôY\»»ãúôXŸZ]ôY
+H
+àLàù[Bà^[ò][€éà	›^\»Yÿ\»0Ì»›[ôXŸXöY…ÀBàKBà€€[Z\‹⁄[€éà√Bà]Nà	–ÿ[›[\àH€€Z\‹Ë€»pÍYXH€ÿúôHô[ô\…À€€ôöY“Ÿ^Nà	ÿ€€[Z\‹⁄[€î›	À›Yôö^à	…IÀ\òŸ[ùàùYKBà[ùõŒà	“[ôõ‹õYH»›[H€€Z\‹ÌY\»Yÿ\»H»ò[‹à\»ô[ô\»]YHŸ\ò\ò[H\‹ÿ\»€€Z\‹ÌY\ÀâÀBàöY[Œà÷…ÿ€€[Z\‹⁄[€ú…À	’›[H€€Z\‹ÌY\»õ»\∞Î[Ÿ»
+â
+I◊K…‹ÿ[\…À	’›[Hô[ô\»õ»\∞Î[Ÿ»
+â
+I◊WKBàÿ[›[]Nà
+äHOàãúÿ[\»à	âàãò€€[Z\‹⁄[€ú»èH»
+ãò€€[Z\‹⁄[€ú»»ãúÿ[\ H
+àLàù[Bà^[ò][€éà	ÿ€€Z\‹ÌY\»Yÿ\»0Ì»ô[ô\»€‹úô\‹€ô[ù\…ÀBàKBüN√BÉBìS—S÷…‹Ÿ][ô‹ÀZ[\â◊HH
+›[Ÿ[
+HOàŸ][ô‹“[\î⁄Y]
+›[Ÿ[öŸ^JN√Bôù[ò›[€àŸ][ô‹“[\î⁄Y]
+›Ÿ^JH√Bà€€ú›‹X»H—USë‘◊“STî÷⁄Ÿ^WN√BàYà
+\‹X Hô]\õà⁄Y]
+»]Nà	–ZùYHHË[›[…Àõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	—\›HË[›[»∞Ë€»\›0ËH\‹€∞Î]ô[â»JWHJN√Bà€€ú›ÿ]ôY[ú]»H›ú›‹ôKôŸ]€€ôöY 
+KúŸ][ô‹“[\í[ú]œÀñ⁄Ÿ^WHﬂN√Bà€€ú›[ú]»HÿöôX›ôúõ€Q[ùöY\ ‹XÀôöY[ÀõX\
+
+ŸöY[Ÿ^WJHOàŸöY[Ÿ^K[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	Ã	Àò[YNàÿ]ôY[ú]÷ŸöY[Ÿ^WHœ»	…»JWJJN√Bà€€ú›ô\›[H[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ[›]	»JN√Bà]ÿ[›[]YHù[√Bà€€ú›ôX€€\]HH
+
+HOà√Bà€€ú›ò[Y\»HÿöôX›ôúõ€Q[ùöY\ ÿöôX›ô[ùöY\ [ú] KõX\
+
+ŸöY[Ÿ^K[ú]JHOàŸöY[Ÿ^K\úŸSù[J[ú]ùò[YJHJJN√Bàÿ[›[]YH‹XÀòÿ[›[]Jò[Y\ N√Bàô\›[úô\XŸP⁄[ô[äÿ[›[]YOHù[Sù[Xô\ãö\—ö[ö]Jÿ[›[]Y
+CBà»[
+	‹‹[âÀ»^à	‘ôY[ò⁄H‹»Y‹»X⁄[XH\òHô\à»ô\›[YÀâ»JCBàà[
+	Ÿ]âÀﬂKŸ[
+	‹‹[âÀ»^à	‘ô\›[Y»›YŸ\öYŒà	»JK[
+	‹›õ€ô…À»^à	Ÿõ]ù[Jÿ[›[]Y
+_H	‹‹XÀú›Yôö^XJK[
+	‹	À»€\‹Œà	‹KZ[ù	À^àË[›[Œà	‹‹XÀô^[ò][€üKòJWJJN√BàN√BàÿöôX›ùò[Y\ [ú] Kôõ‹ëXX⁄
+
+[ú]
+HOà[ú]òY]ô[ù\›[ô\ä	⁄[ú]	ÀôX€€\]JJN√BàôX€€\]J
+N√Bà€€ú›ÿ]ôHH
+
+HOà√BàYà
+ÿ[›[]YOHù[Sù[Xô\ãö\—ö[ö]Jÿ[›[]Y
+Hÿ[›[]Y
+H»ÿöôX›ùò[Y\ [ú] VÃKôõÿ›\ 
+N»ô]\õé»CBà€€ú››‹ôYH‹XÀú\òŸ[ù»ÿ[›[]Y»Làÿ[›[]Y√Bà€€ú››\úô[ùH›ú›‹ôKôŸ]€€ôöY 
+N√Bà€€ú››\îò]\»H…›\ôŸ]X\ô⁄[î›	À	‹^[Y[ùôYT›	À	ÿ€€[Z\‹⁄[€î›	À	‹ÿ[\’^›	◊CBàôö[\ä
+ò]RŸ^JHOàò]RŸ^HOOH‹XÀò€€ôöY“Ÿ^JCBàúôYXŸJ
+›[Kò]RŸ^JHOà›[H
+»
+ù[Xô\ä›\úô[ù‹ò]RŸ^WJH
+K
+N√BàYà
+‹XÀú\òŸ[ù	âà›‹ôY
+»›\îò]\»èHJH»⁄[ô›Àò[\ù
+	”»ô\›[Y»ôX⁄\ÿHöXÿ\àXòZ^»HL	H]X[ô»€€XY»0ËX\ôŸ[K0Ë^K0Ë€€Z\‹Ë€»H[»[\‹›»€ÿúôHHô[ôKâ N»ô]\õé»CBà€€ú›[ù\ôYHÿöôX›ôúõ€Q[ùöY\ ÿöôX›ô[ùöY\ [ú] KõX\
+
+ŸöY[Ÿ^K[ú]JHOàŸöY[Ÿ^K[ú]ùò[YKùö[J
+WJJN√Bà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKúŸ]€€ôöY √Bà‹‹XÀò€€ôöY“Ÿ^WNà›‹ôYBàŸ][ô‹“[\í[ú]Œà»ããä›‹ôKôŸ]€€ôöY 
+KúŸ][ô‹“[\í[ú]»ﬂJK⁄Ÿ^WNà[ù\ôYKBàJJN√BàN√Bàô]\õà⁄Y]
+»]Nà‹XÀù]Kõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹KZ[ù	À^à‹XÀö[ùõ»JKÿöôX›öŸ^\ ÿ]ôY[ú] Kõ[ô›à	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—Y‹»»0Óõ[[»Ë[›[»\XÿYÀàõÿÍàŸH[\∞ËK[‹»H\ÿ\à[Hõ›õ»ô\›[YÀâ»JKããú‹XÀôöY[ÀõX\
+
+ŸöY[Ÿ^KXô[JHOàöY[
+Xô[[ú]÷ŸöY[Ÿ^WJJKô\›[Kôö[\äõ€€X[äK€îÿ]ôNàÿ]ôKÿ]ôSXô[à	’\ÿ\à\›Hô\›[Y…Àÿ]ôU\›YàŸ][ô‹ÀZ[\ãI⁄Ÿ^_XJN√BüCBÉBôù[ò›[€àZù\›\‘[ô[
+›
+H√Bà€€ú›»›‹ôHHH›√Bà€€ú›»H›‹ôKôŸ]€€ôöY 
+N√Bà€€ú›]]€X]X»H]]€X]X–€€ôöY‘›YŸŸ\›[€ú ›‹ôJN√Bà€€ú›àHﬂN√Bà€€ú›òYùH›ùöY]ÀúŸ][ô‹—òYù
+›ùöY]ÀúŸ][ô‹—òYùHﬂJN√Bà€€ú›öY[H
+Ÿ^KXô[ò[YK[ù[\íŸ^JHOà√Bà€€ú›[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	Àò[YNàòYù⁄Ÿ^WHœ»›ö[ô ò[YJKúô\XŸJ	ÀâÀ	À	 HJN√Bà[ú]òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà»òYù⁄Ÿ^WHH[ú]ùò[YN»JN√Bàñ⁄Ÿ^WHH[ú]√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»KŸ[
+	€Xô[	À»^àXô[JK[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K⁄[ú][\íŸ^H	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ\Nà	ÿù]€âÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	‹Ÿ][ô‹ÀZ[\âÀŸ^Nà[\íŸ^HJHK	–ÿ[›[\à€€ZY€… WKôö[\äõ€€X[äJK[ù	âà[
+	‹‹[âÀ»€\‹Œà	‹KZ[ù	À^à[ùJWJN√BàN√BÉBàù[ò›[€àÿ]ôJ
+H√Bà€€ú›Xô[»H√Bàò[‹í‹òNà	›ò[‹àH‹òIÀ^Qÿ\Œà	ŸË\»‹àZ[ù]…À›\›‹—ö^‹”Y\Œà	ÿ›\›‹»ö^‹…ÀBà^X›Yà	€Z[ù]‹»HõŸpÈË€…ÀX\ô⁄[éà	€X\ôŸ[IÀôYNà	›^HHYÿ[Y[ù…À€€[Z\‹⁄[€éà	ÿ€€Z\‹Ë€…Àÿ[\’^à	⁄[\‹›»€ÿúôHHô[ôIÀBàN√Bàõ‹à
+€€ú›⁄Ÿ^KXô[HŸàÿöôX›ô[ùöY\ Xô[ JH√BàYà
+SÿöôX›ö\”›€äòYùŸ^JJH€€ù[ùYN√Bà€€ú›ò[YHH\úŸSù[Jñ⁄Ÿ^WKùò[YJN√BàYà
+ò[YHOHù[ò[YH
+Ÿ^HOOH	Ÿ^X›Y	»	âàò[YHOOH
+JH√Bà⁄[ô›Àò[\ù
+[ôõ‹õYH[Hò[‹à∞Ë[Y»\òH	€Xô[I⁄Ÿ^HOOH	Ÿ^X›Y	»»	»
+XZ[‹à]YHô\õ I»à	…ﬂKò
+N√Bàñ⁄Ÿ^WKôõÿ›\ 
+N√Bàô]\õé√BàCBàCBà€€ú›ô^H√Bàò[‹í‹òNà\úŸSù[Jãùò[‹í‹òKùò[YJHœ»Àùò[‹í‹òKBà^Qÿ\Œà\úŸSù[Jãù^Qÿ\Àùò[YJHœ»Àù^Qÿ\ÀBà›\›‹—ö^‹”Y\Œà\úŸSù[Jãò›\›‹—ö^‹”Y\Àùò[YJHœ»Àò›\›‹—ö^‹”Y\ÀBà^X›YõŸX›[€ìZ[ù]\”[€ùà\úŸSù[Jãô^X›Yùò[YJHœ»Àô^X›YõŸX›[€ìZ[ù]\”[€ùœ»Àô^X›YX›]ôSZ[ù]\”[€ùBà\ôŸ]X\ô⁄[î›à
+\úŸSù[JãõX\ô⁄[ãùò[YJHœ»›
+Àù\ôŸ]X\ô⁄[î›
+JH»LBà^[Y[ùôYT›à
+\úŸSù[JãôôYKùò[YJHœ»›
+Àú^[Y[ùôYT›
+JH»LBà€€[Z\‹⁄[€î›à
+\úŸSù[Jãò€€[Z\‹⁄[€ãùò[YJHœ»›
+Àò€€[Z\‹⁄[€î›
+JH»LBàÿ[\’^›à
+\úŸSù[Jãúÿ[\’^ùò[YJHœ»›
+Àúÿ[\’^›
+JH»LBàN√Bà€€ú›Ÿ^\»H»ò[‹í‹òNà	›ò[‹í‹òIÀ^Qÿ\Œà	›^Qÿ\…À›\›‹—ö^‹”Y\Œà	ÿ›\›‹—ö^‹”Y\…À^X›Yà	Ÿ^X›YõŸX›[€ìZ[ù]\”[€ù	ÀX\ô⁄[éà	›\ôŸ]X\ô⁄[î›	ÀôYNà	‹^[Y[ùôYT›	À€€[Z\‹⁄[€éà	ÿ€€[Z\‹⁄[€î›	Àÿ[\’^à	‹ÿ[\’^›	»N√Bà€€ú›⁄[ôŸYHÿöôX›ôúõ€Q[ùöY\ ÿöôX›ô[ùöY\ Ÿ^\ Kôö[\ä
+⁄[ú]Ÿ^WJHOàÿöôX›ö\”›€äòYù[ú]Ÿ^JJKõX\
+
+⁄[ú]Ÿ^K€€ôöY“Ÿ^WJHOàÿ€€ôöY“Ÿ^Kô^ÿ€€ôöY“Ÿ^WWJJN√Bà€€ú›õ‹‹X›]ôHH»ããú›‹ôKôŸ]€€ôöY 
+Kããò⁄[ôŸYN√BàYà
+õ‹‹X›]ôKù\ôŸ]X\ô⁄[î›
+»õ‹‹X›]ôKú^[Y[ùôYT›
+»õ‹‹X›]ôKò€€[Z\‹⁄[€î›
+»
+õ‹‹X›]ôKúÿ[\’^›
+HèHJH√Bà⁄[ô›Àò[\ù
+	”X\ôŸ[K^HHYÿ[Y[ùÀ€€Z\‹Ë€»H[\‹›»€ÿúôHHô[ôHôX⁄\ÿ[H€€X\àY[õ‹»HL	Kâ N√Bàô]\õé√BàCBà›ùöY]ÀúŸ][ô‹—òYùHù[√Bà›òX›[€úÀúŸ]€€ôöY ⁄[ôŸY
+N√BàCBÉBà€€ú›]]‘õ›‹»H√Bà…’ò[‹àH‹òIÀ]]€X]XÀùò[Y\Àùò[‹í‹òK	‘â⁄	À]]€X]XÀôòX›Àò€ÿ⁄“›\ú»à»	Ÿõ]ù[J]]€X]XÀôòX›Àò€ÿ⁄“›\ú _HÿúŸ\ùòY\»õ»€ùÿà]]€X]XÀôòX›ÀòX›]ôSZ[ù]\»à»	Ÿõ]ù[J]]€X]XÀôòX›ÀòX›]ôSZ[ù]\»»å
+_H0≠»	ÿ]]€X]XÀôòX›ÀúõŸX›[€î€›\òŸ_Xà	‹ôY⁄\›ôH‹∞Ë\ö[‹»›HõŸpÈË€…◊KBà…“‹ò\»ôY⁄\›òY\»õ»€ù…À]]€X]XÀôòX›Àò€ÿ⁄“›\ú»ù[	⁄	À]]€X]XÀôòX›Àò€ÿ⁄‘Ÿ\‹⁄[€ú»»	ÿ]]€X]XÀôòX›Àò€ÿ⁄‘Ÿ\‹⁄[€úﬂH\∞Î[Ÿ  H[òŸ\úòY  Xà	⁄[öX⁄YHH[òŸ\úôH›X\»]]öYY\»[H[∞ÎX⁄[…◊KBà…—Ë\»‹àZ[ù]…À]]€X]XÀùò[Y\Àù^Qÿ\À	‘â€Z[âÀ]]€X]XÀôòX›Àõ›ô[ìZ[ù]\»à»	Ÿõ]ù[J]]€X]XÀôòX›Àõ›ô[ìZ[ù]\ _HZ[à0≠»	ÿ]]€X]XÀôòX›ÀúõŸX›[€î€›\òŸ_Xà	‹ôY⁄\›ôHõŸpÈË€»H[\»Hõ‹õõ…◊KBà…–›\›‹»ö^‹»‹àpÍú…À]]€X]XÀùò[Y\Àò›\›‹—ö^‹”Y\À	‘â	À]]€X]XÀôòX›Àôö^Y[€ù»»	ÿ]]€X]XÀôòX›Àôö^Y[€ùﬂHpÍú \ H€€H[∞Èÿ[Y[ù‹ÿà	€[òŸH\‹\ÿ\»ö^\»Yÿ\…◊KBà…”Z[ù]‹»HõŸpÈË€»‹àpÍú…À]]€X]XÀùò[Y\Àô^X›YõŸX›[€ìZ[ù]\”[€ù	€Z[âÀ]]€X]XÀôòX›ÀúõŸX›[€ú»»	ÿ]]€X]XÀôòX›ÀúõŸX›[€úﬂHôY⁄\›õ  H0≠»	ÿ]]€X]XÀôòX›ÀúõŸX›[€î€›\òŸ_Xà	‹ôY⁄\›ôHõŸpÈË€»ò\»€€X[ô\…◊KBàKõX\
+
+€Xô[ò[YK[ö]€›\òŸWJHOà[
+	Ÿ]âÀ»€\‹Œà	‹KX]]À\õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^àXô[JK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à€›\òŸHJWJKBà[
+	‹›õ€ô…À»€\‹Œàò[YHOHù[»	‹K[]]Y	»à	‹K\‹⁄]]ôIÀ^àò[YHOHù[»	ŸY‹»[ú›YöX⁄Y[ù\…»à
+[ö]OOH	‘â	»»úõ
+ò[YJHà	Ÿõ]ù[Jò[YJ_H	›[ö]X
+HJKBàJJN√Bà€€ú›\XÿXõHHÿöôX›ôúõ€Q[ùöY\ ÿöôX›ô[ùöY\ ]]€X]XÀùò[Y\ Kôö[\ä
+Àò[YWJHOàò[YHOHù[	âàù[Xô\ãö\—ö[ö]Jò[YJJJN√Bà€€ú›\P]]€X]X»H
+
+HOà√Bà›ùöY]ÀúŸ][ô‹—òYùHù[√Bà›òX›[€úÀúŸ]€€ôöY »ããò\XÿXõHJN√BàN√BÉBàô]\õà[
+	‹ŸX›[€âÀﬂK√Bà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–›\›‹»Hõ‹õXpÈË€»HôpÈ€…»JK[
+	⁄âÀ»^à	–Zù\›\…»JWJWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”‹»ò[‹ô\»ÿ[õ‹»0Ë\‹]Y\ôH∞ËHË€»\ÿY‹»\òHÿ[›[\à›\›‹»HôpÈ€‹Àà€€\\ôH€€H‹»Y‹»ôY⁄\›òY‹»[ù\»HX⁄Y\àŸH]Y\à›Xú›]pÎK[‹Àâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\Ÿ][ô‹ÀY‹öY	»K√Bà[
+	‹ŸX›[€âÀ»€\‹Œà	‹K\Ÿ][ô‹ÀX€€[[â»K√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘Ÿ]\»ò[‹ô\»]XZ\…»JKBàöY[
+	›ò[‹í‹òIÀ	’ò[‹àH‹òHHpË€»HÿúòH
+[ôXÿY‹äIÀÀùò[‹í‹òK	’\ÿY»\òH[ò[\ÿ\à»\Ÿõ‹∞È€»‹»Z[ù]‹»]]õ‹Œ»∞Ë€»0ÍH€€XY»õ›ò[Y[ùH[»›\›ÀâÀ	›ò[‹í‹òI KBàöY[
+	›^Qÿ\…À	—Ë\»‹àZ[ù]»Hõ‹õõ»
+â€Z[äIÀÀù^Qÿ\Àù[	›^Qÿ\… KBàöY[
+	ÿ›\›‹—ö^‹”Y\…À	–›\›‹»ö^‹»õ»pÍú»
+â[ò€ZHT IÀÀò›\›‹—ö^‹”Y\Àù[	ÿ›\›‹—ö^‹”Y\… KBàöY[
+	Ÿ^X›Y	À	”Z[ù]‹»›Z\»HõŸpÈË€»\‹\òY‹»õ»pÍú…ÀÀô^X›YõŸX›[€ìZ[ù]\”[€ùœ»Àô^X›YX›]ôSZ[ù]\”[€ùù[	Ÿ^X›Y	 KBàöY[
+	€X\ô⁄[âÀ	”X\ôŸ[H[õ»
+	JIÀ›
+Àù\ôŸ]X\ô⁄[î›
+Kù[	€X\ô⁄[â KBàöY[
+	ŸôYIÀ	’^HHYÿ[Y[ù»
+	JIÀ›
+Àú^[Y[ùôYT›
+Kù[	ŸôYI KBàöY[
+	ÿ€€[Z\‹⁄[€âÀ	–€€Z\‹Ë€»€ÿúôHô[ô\»
+	JIÀ›
+Àò€€[Z\‹⁄[€î›
+K	—[ùòHòHõ‹õXpÈË€»»ôpÈ€»HY\€XHõ‹õXH]YHH^HHYÿ[Y[ùÀâÀ	ÿ€€[Z\‹⁄[€â KBàöY[
+	‹ÿ[\’^	À	“[\‹›»õ‹‹ò⁄[€ò[€ÿúôHHô[ôH
+	JIÀ›
+Àúÿ[\’^›
+K	’\ŸH\[ò\»]X[ô»[ò⁄Y\à€ÿúôH»ò]\ò[Y[ùÀà»T»»QRH∞ËH\›0ËHõ‹»›\›‹»ö^‹»X⁄[XKâ KBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ€ò€X⁄Œàÿ]ôHK	‘ÿ[ò\àH\ÿ\àò[‹ô\»X[ùXZ\… WJKBàJKBà[
+	ÿ\⁄YIÀ»€\‹Œà	‹K\Ÿ][ô‹ÀX€€[[àKX]]ÀXÿ\ô	À	Ÿ]K]\›Y	Œà	ÿ]]€X]XÀ\Ÿ][ô‹…»K√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–ÿ[›[Y»[»⁄\›[XI»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à\›[X]]ò\»H\ù\à‹»Yÿ[Y[ù‹»HHõŸpÈË€»ôY⁄\›òY‹»[ùôH	ÿ]]€X]XÀú\ö[ŸH
+Y\Ÿ\»€€\]‹ Kà€€ôö\òHŸHŸ‹»‹»ÿ\›‹»õ‹ò[H[∞ÈÿY‹ÀòJKBàããò]]‘õ›‹ÀBà[
+	Ÿ]âÀ»€\‹Œà	‹KX]]À\õ›…»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^à	’^Hö[ò[òŸZ\òHÿúŸ\ùòYI»JK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	›\öYò\»0Ì»ôXŸXö[Y[ù‹Œ»\[ò\»€€\\òpÈË€…»JWJK[
+	‹›õ€ô…À»€\‹Œà]]€X]XÀõÿúŸ\ùôYôYT›OHù[»	‹K[]]Y	»à	…À^à]]€X]XÀõÿúŸ\ùôYôYT›OHù[»	ŸY‹»[ú›YöX⁄Y[ù\…»à››ä]]€X]XÀõÿúŸ\ùôYôYT›
+HJWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	ÿ\KX]]€X]XÀ\Ÿ][ô‹…À\ÿXõYàÿöôX›öŸ^\ \XÿXõJKõ[ô›OOH€ò€X⁄Œà\P]]€X]X»K	–Y›\àò[‹ô\»ÿ[›[Y‹»òHôX⁄YöXÿpÈË€… KBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—\›Hõ›0Ë€»›Xú›]ZH\[ò\»‹»ò[‹ô\»ÿ[›[0Ë]ôZ\»X⁄[XNà›\›»ö^»Y[úÿ[Ë\À[\»HõŸpÈË€»Hò[‹àH‹òH
+[ôXÿY‹äKàHX\ôŸ[KH^HHYÿ[Y[ùÀH€€Z\‹Ë€»H»[\‹›»€ÿúôHHô[ôH€€ù[ùX[H€€[»õÿÍàÿ[õ›H0Ë\‹]Y\ôKâ»JKBàJKBàJKBàJKBà‹ô\î^[Y[ùYPÿ\ô
+›
+KBàõ›YöXÿ][€îŸ][ô‹–ÿ\ô
+›
+KBà⁄‹[ô‘Ÿ][ô‹–ÿ\ô
+›
+KBà[\ô\ÿPÿ\ô
+›
+KBàY‹–ÿ\ô
+›
+KBàò\⁄[ô[
+›
+KBàõ‹õﬁ[ô[
+›
+KBàJN√BüCBÉBôù[ò›[€à‹ô\î^[Y[ùYPÿ\ô
+›
+H√Bà€€ú›€€ôöY›\ôY^\»Hù[Xô\ä›ú›‹ôKôŸ]€€ôöY 
+Kõ‹ô\î^[Y[ùYQ^\ N√Bà€€ú››\úô[ù^\»Hù[Xô\ãö\‘ÿYôR[ùYŸ\ä€€ôöY›\ôY^\ H	âà€€ôöY›\ôY^\»èH»€€ôöY›\ôY^\»à√Bà€€ú›[ú]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	€ù[Xô\âÀZ[éà	Ã	À›\à	ÃIÀò[YNà›ö[ô ›\úô[ù^\ K	Ÿ]K]\›Y	Œà	€‹ô\ã\^[Y[ùYYKY^\…»JN√Bà€€ú››ô\ôYHH\›]\ ›ú›‹ôK»\ôX›[€éà	‹ôXŸXô\âÀ›]\Œà	›ô[ò⁄Y…»JKôö[\ä
+õ› HOà\õ›Àù]Kòÿ[òŸ[Y]
+N√Bà€€ú››ô\ôYU›[H›ô\ôYKúôYXŸJ
+›[Kõ› HOà›[H
+»õ›Àòò[[òŸK
+N√Bà€€ú›ÿ]ôHH
+
+HOà√Bà€€ú›^\»Hù[Xô\ä[ú]ùò[YJN√BàYà
+[ú]ùò[YKùö[J
+HOOH	…»Sù[Xô\ãö\‘ÿYôR[ùYŸ\ä^\ H^\»
+H√Bà[ú]úŸ]›\›€Uò[Y]J	“[ôõ‹õYH[H∞ÓõY\õ»[ùZ\õ»HX\»Y›X[›HXZ[‹à]YHô\õÀâ N√Bà[ú]úô\‹ùò[Y]J
+N√Bàô]\õé√BàCBà[ú]úŸ]›\›€Uò[Y]J	… N√Bà›òX›[€úÀúŸ]€€ôöY »‹ô\î^[Y[ùYQ^\Œà^\»JN√BàN√Bà[ú]òY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà[ú]úŸ]›\›€Uò[Y]J	… JN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	€‹ô\ã\^[Y[ùYYK\Ÿ][ô‹…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–€€ù\»HôXŸXô\â»JK[
+	⁄âÀ»^à	’ô[ò⁄[Y[ù»\»[ò€€Y[ô\…»JWJWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	—Yö[òH]X[ù‹»X\»\0Ï‹»H[ùôYÿH»Yÿ[Y[ù»]ôHô[òŸ\ãàô\õ»XH⁄Y€öYöXÿHô[ò⁄[Y[ù»òH∞Ï‹öXH]HH[ùôYÿKà[XH[ò€€Y[ôH€€Hÿ[»[ô[ùH\‹ÿHH€€ú›\à€€[»ô[ò⁄YHõ»XHŸY›Z[ùH[»ô[ò⁄[Y[ùÀâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»KŸ[
+	€Xô[	À»^à	‘ò^õ»Y∞Ë€»\0Ï‹»H[ùôYÿH
+X\ I»JK[ú]JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»ò^õ»ò[H\òH[ò€€Y[ô\»^\›[ù\»Hù]\ò\Àà]\»Hô[ò⁄[Y[ù»[\òY\»X[ùX[Y[ùHòH€€ùHHôXŸXô\àË€»ô\Ÿ\ùòY\Àâ»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ\Nà	ÿù]€âÀ€ò€X⁄Œàÿ]ôHK	‘ÿ[ò\àò^õ… WJKBà[
+	‹	À»^à	€›ô\ôYKõ[ô›H€€ùJ HHôXŸXô\àô[ò⁄YJ H0≠»ÿ[»	ÿúõ
+›ô\ôYU›[
+_XJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›	À\Nà	ÿù]€âÀ€ò€X⁄Œà
+
+HOà»›òX›[€úÀúŸ]ö[ò[òŸUöY] »ö[î›]\Œà	›ô[ò⁄Y…Àö[î\ùRYà	…Àö[ìY]Ÿà	…Àö[îôXŸZ]ôT\ö[Ÿà	ÿ[	Àö[îôXŸZ]ôT›\ùà	…Àö[îôXŸZ]ôQ[ôà	…»JN»›òX›[€úÀúŸ]Xä	Ÿö[ã\ôXŸXô\â N»HK	’ô\à€€ù\»ô[ò⁄Y\… KBàJN√BüCBÉBãÀ»Y‹»H[\ô\ÿH
+ô]àäH8†%ôX⁄Xõ»XY\ãà›‹ôY[à€€ôöY»
+ﬁ[òŸYÿòX⁄ŸY\
+Kô]ô\à[à€›\òŸKÉBôù[ò›[€à[\ô\ÿPÿ\ô
+›
+H√Bà€€ú›[\H›ú›‹ôKôŸ]€€ôöY 
+Kô[\ô\ÿHﬂN√Bà€€ú›òYùH›ùöY]Àò€€\[ûQòYù
+›ùöY]Àò€€\[ûQòYùHﬂJN√Bà]Ÿ€»HòYùõŸ€»œ»[\õŸ€»œ»	…Œ√Bà€€ú›àHﬂN√Bà€€ú›àH
+Ÿ^KXô[
+HOà√Bà€€ú›HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À	Ÿ]K]\›Y	Œà[\I⁄Ÿ^_X\Nà	›^	ÀXŸZ€\éà	…Àò[YNàòYù⁄Ÿ^WHœ»[\⁄Ÿ^WHœ»	…»JN√BàKòY]ô[ù\›[ô\ä	⁄[ú]	À
+
+HOà»òYù⁄Ÿ^WHHKùò[YN»JN√Bàñ⁄Ÿ^WHHN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»KŸ[
+	€Xô[	À»^àXô[JKWJN√BàN√Bà€€ú›ô]öY]»H[
+	Ÿ]âÀ»€\‹Œà	‹K[Ÿ€À\ô]öY]…»JN√Bà€€ú›ô[ô\îô]öY]»H
+
+HOàô]öY]Àúô\XŸP⁄[ô[äŸ€√Bà»[
+	⁄[Y…À»‹òŒàŸ€À[à	€Ÿ€…À€\‹Œà	‹K[Ÿ€ÀZ[Y…»JCBàà[
+	‹‹[âÀ»€\‹Œà	‹KZ[ù	À^à	‘Ÿ[HŸ€»Z[ôKâ»JJN√Bàô[ô\îô]öY] 
+N√Bà€€ú›ö[R[ú]H[
+	⁄[ú]	À√Bà\Nà	Ÿö[IÀXÿŸ\à	⁄[XYŸK‹ôÀ[XYŸK⁄úY…À›[Nà	Ÿ\‹^Nõõ€ôIÀ	Ÿ]K]\›Y	Œà	Ÿ[\[Ÿ€ÀYö[IÀBà€ò⁄[ôŸNà
+JHOà√Bà€€ú›ö[HHKù\ôŸ]ôö[\»	âàKù\ôŸ]ôö[\÷ÃN√BàYà
+Yö[JHô]\õé√Bà€€ú›ôXY\àHô]»ö[TôXY\ä
+N√BàôXY\ãõ€õÿYH
+
+HOà»Ÿ€»H›ö[ô ôXY\ãúô\›[
+N»òYùõŸ€»HŸ€Œ»ô[ô\îô]öY] 
+N»N√BàôXY\ãúôXY\—]UTì
+ö[JN√BàKù\ôŸ]ùò[YHH	…Œ√BàKBàJN√Bàù[ò›[€àÿ]ôJ
+H√Bà›ùöY]Àò€€\[ûQòYùHù[√Bà›òX›[€úÀúŸ]€€ôöY »[\ô\ÿNà√Bàõ€YNàãõõ€YKùò[YKùö[J
+K€úéàãò€úãùò[YKùö[J
+K[ô\ôX€Œàãô[ô\ôX€Àùò[YKùö[J
+KBà[Yõ€ôNàãù[Yõ€ôKùò[YKùö[J
+Kô\‹€úÿ]ô[àãúô\‹€úÿ]ô[ùò[YKùö[J
+KŸ€ÀBàHJN√BàCBàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	⁄âÀ»^à	—Y‹»H[\ô\ÿI»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–\\ôXŸ[Hõ»ÿXôpÈÿ[»»ôX⁄XõÀàöXÿ[HÏ»õ»Ÿ]H\\ô[»Hõ»òX⁄›\8†%∞Ë€»∞Ë€»õ»ÏŸY€Àâ»JKBàä	€õ€YIÀ	”õ€YIÀ	‘]Z]]\»»Z[€	 KBàä	ÿ€úâÀ	–”îà»QRIÀ	ÃååÃKL	 KBàä	Ÿ[ô\ôX€…À	—[ô\ôpÈ€… KBàä	›[Yõ€ôIÀ	’[Yõ€ôH»€€ù]… KBàä	‹ô\‹€úÿ]ô[	À	‘ô\‹€úË]ô[	 KBà[
+	Ÿ]âÀ»€\‹Œà	‹KYöY[	»K√Bà[
+	€Xô[	À»^à	”Ÿ€…»JKBàô]öY]ÀBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ	Ÿ]K]\›Y	Œà	Ÿ[\[Ÿ€ÀXùâÀ€ò€X⁄Œà
+
+HOàö[R[ú]ò€X⁄ 
+HK	—\ÿ€€\à[XYŸ[I KBàŸ€»	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà»Ÿ€»H	…Œ»òYùõŸ€»H	…Œ»ô[ô\îô]öY] 
+N»HK	‘ô[[›ô\â KBàKôö[\äõ€€X[äJKBàö[R[ú]BàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»KŸ[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	Ÿ[\\ÿ]ôIÀ€ò€X⁄Œàÿ]ôHK	‘ÿ[ò\àY‹»H[\ô\ÿI WJKBàJN√BüCBÉBôù[ò›[€àY‹–ÿ\ô
+›
+H√Bà€€ú›ö[R[ú]H[
+	⁄[ú]	À√Bà\Nà	Ÿö[IÀXÿŸ\à	ÀûX[[û[[ù	À›[Nà	Ÿ\‹^Nõõ€ôIÀ	Ÿ]K]\›Y	Œà	⁄[\‹ùYö[IÀBà€ò⁄[ôŸNà\ﬁ[ò»
+JHOà√Bà€€ú›àHKù\ôŸ]ôö[\»	âàKù\ôŸ]ôö[\÷ÃN√BàYà
+YäHô]\õé√BàûH»›òX›[€úÀö[\‹ù]J]ÿZ]ãù^
+
+JN»CBàÿ]⁄
+\úäH»›òX›[€úÀö[\‹ùòZ[Y
+›ö[ô \úà	âà\úãõY\‹ÿYŸH»\úãõY\‹ÿYŸHà\úäJN»CBàKù\ôŸ]ùò[YHH	…Œ√BàKBàJN√BàÀ»^Ÿ[
+ûﬁ
+H8†%HúöY[ôKõ‹õX]YòXŸHŸàHÿ[YHò[YKXò\ŸY[ù\ò⁄[ôŸKÉBà€€ú›ﬁ[ú]H[
+	⁄[ú]	À√Bà\Nà	Ÿö[IÀXÿŸ\à	Àûﬁ	À›[Nà	Ÿ\‹^Nõõ€ôIÀ	Ÿ]K]\›Y	Œà	ﬁﬁYö[IÀBà€ò⁄[ôŸNà\ﬁ[ò»
+JHOà√Bà€€ú›ö[HHKù\ôŸ]ôö[\»	âàKù\ôŸ]ôö[\÷ÃN√BàYà
+Yö[JHô]\õé√BàûH√Bà€€ú›û]\»Hô]»Z[ù\úò^J]ÿZ]ö[Kò\úò^PùYôô\ä
+JN√Bà€€ú›]HH]ÿZ]\úŸR[ù\ò⁄[ôŸJû]\ N√Bà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	⁄[\‹ù^ﬁ	À]Kô]öY]Œàô]öY]—^⁄[ôŸJ›ú›‹ôK]JKö[[ò[YNàö[Kõò[YHJN√BàHÿ]⁄
+\úäH»›òX›[€úÀö[\‹ùòZ[Y
+›ö[ô 
+\úà	âà\úãõY\‹ÿYŸJH\úäJN»CBàKù\ôŸ]ùò[YHH	…Œ√BàKBàJN√Bà€€ú›ﬁ^‹ùùàH[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	ﬁﬁY^‹ù	»K	¸'ÁËà^‹ù\à[ö[I N√Bàﬁ^‹ùùãòY]ô[ù\›[ô\ä	ÿ€X⁄…À\ﬁ[ò»
+
+HOà√Bà€€ú›‹öY»Hﬁ^‹ùùãù^€€ù[ù»ﬁ^‹ùùãù^€€ù[ùH	—Ÿ\ò[ô¯†)âŒ»ﬁ^‹ùùãô\ÿXõYHùYN√BàûH»›€õÿYö[J	‹Z[€\[ö[Kûﬁ	À]ÿZ]€‹öÿõ€⁄–û]\ ›ú›‹ôJK	ÿ\Xÿ][€ã›õôõ‹[û[õ‹õX]À[ŸôöXŸYÿ›[Y[ùú‹ôXY⁄Y][ú⁄Y]	 N»CBàÿ]⁄
+JH»⁄[ô›Àò[\ù
+	”∞Ë€»õ⁄H‹‹Î]ô[Ÿ\ò\àH[ö[Nà	»
+»
+
+H	âàKõY\‹ÿYŸJHJJN»CBàö[ò[H»ﬁ^‹ùùãù^€€ù[ùH‹öYŒ»ﬁ^‹ùùãô\ÿXõYHò[ŸN»CBàJN√BÉBàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	⁄âÀ»^à	—Y‹…»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	‘[ö[H
+^Ÿ[
+I»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bàﬁ^‹ùùãBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	ﬁﬁZ[\‹ù	À€ò€X⁄Œà
+
+HOàﬁ[ú]ò€X⁄ 
+HK	¸'ÁËà[\‹ù\à[ö[I KBàﬁ[ú]BàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–òZ^HŸ]\»[ú›[[‹ÀôXŸZ]\»HõŸ]‹»ù[XH[ö[Hõ€ö]H
+[XHXòH‹àôXŸZ]JKàY]Hõ»^Ÿ[H[\‹ùHHõ€H8†%[‹›òH[Hô\›[[»[ù\ÀY\ÿ€H[‹»õ€Y\»H∞Ë€»\YÿHòYKâ»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–òX⁄›\€€\]…»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ√Bà€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	ÿòX⁄›\Y^òIÀ\ÿXõYà›ùöY]ÀòòX⁄›\ù\ﬁKBà€ò€X⁄Œà
+
+HOà√Bà›€õÿYö[JZ[€XòX⁄›\IÿòX⁄›\ö[T›[\
+
+_KûX[[›ú›‹ôKù÷X[[
+
+JN√Bàõ⁄Y›òX›[€úÀòòX⁄›\^òJ
+N√BàKBàK›ùöY]ÀòòX⁄›\ù\ﬁH»	–‹öX[ô»òX⁄›\8†)â»à	–‹öX\àòX⁄›\^òHY€‹òI KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ	Ÿ]K]\›Y	Œà	⁄[\‹ùXùâÀ€ò€X⁄Œà
+
+HOàö[R[ú]ò€X⁄ 
+HK	“[\‹ù\àY‹… KBàö[R[ú]BàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–òZ^HŸ‹»‹»Y‹»\›HôYÏÿ⁄[»ô\›H\\ô[ÀàŸH»õ‹õﬁ\›]ô\à€€ôX›YÀ[X∞Í[H‹öXH[XHÏ‹XH^òHòH\›HHòX⁄›\»Hù]ô[KàH‹0ÈË€»[\‹ù\àY‹»X⁄[XH[\‹ùH\[ò\»»ÿ]0Ë[Ÿ€Àâ»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	”[\^òH‹»ôY⁄\›õ‹»H\›I»JKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ô[[›ôHŸ‹»‹»YY‹»H\›‹õòH\»\‹\ÿ\ÀYÿ[Y[ù‹»Hô[ô\»∞Ë\Y\»^\›[ù\Àà\»€€ù\»YÿY\»H\‹Ÿ\»ôY⁄\›õ‹»Ÿ\∞Ë€»ÿ[òŸ[Y\Àà›X\ôH[HòX⁄›\€€\]»[ù\»H€€ù[ùX\ãâ»JKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›	À	Ÿ]K]\›Y	Œà	ÿ€X\ã[‹ô\úÀY^[úŸ\…À€ò€X⁄Œà
+
+HOà√Bà€€ú›‹ô\ú»H›ú›‹ôKú›]Kô[ò€€Y[ô\Àõ[ô›√Bà€€ú›^[úŸ\»H›ú›‹ôKú›]Kô\‹\ÿ\Àôö[\ä
+][JHOàX›ú›‹ôKö\‘ô]ô\úŸY
+	Ÿ\‹\ÿIÀ][KöY
+JKõ[ô›Bà
+»›ú›‹ôKú›]Kùò\öXXõP€‹›Àôö[\ä
+][JHOàX›ú›‹ôKö\‘ô]ô\úŸY
+	›ò\öXXõP€‹›	À][KöY
+JKõ[ô›√Bà€€ú›^XXõ\»H›ú›‹ôKú›]Kôö[ò[òŸU]\Àôö[\ä
+][JHOà][Kô\ôX›[€àOOH	‹Yÿ\â»	âàZ][Kòÿ[òŸ[Y]
+Kõ[ô›√BàYà
+]⁄[ô›Àò€€ôö\õJ[\\à	€‹ô\úﬂHYY  K	Ÿ^[úŸ\ﬂH\‹\ÿJ HHÿ[òŸ[\à	‹^XXõ\ﬂH€€ùJ HHYÿ\è»‹»YY‹»Ÿ\∞Ë€»Ÿ\àôX›\\òY‹»H^Z\òH‹àÃX\Àà€€ôö\õYH€€Y[ùH\⁄\»HòZ^\à»òX⁄›\€€\]Àò
+JHô]\õé√Bà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKò€X\ì‹ô\ú–[ô^[úŸ\ õ›“\€ 
+K]ZY
+JN√Bà⁄[ô›Àò[\ù
+	”[\^òH€€ò€pÎYKàYY‹»òH^Z\òHH[∞Èÿ[Y[ù‹»ö[ò[òŸZ\õ‹»\›‹õòY‹Àâ N√BàHK	”[\\àYY‹»H\‹\ÿ\… KBàJN√BüCBÉBôù[ò›[€àõ›YöXÿ][€îŸ][ô‹–ÿ\ô
+›
+H√Bà€€ú›õ›XŸ\»H›ú›‹ôKú›]Kõõ›YöXÿ][€úÀú€XŸJ
+Kú€‹ù
+
+KäHOà›ö[ô ãô]H	… Kõÿÿ[P€€\\ôJ›ö[ô Kô]H	… JH›ö[ô ãò‹ôX]Y]	… Kõÿÿ[P€€\\ôJ›ö[ô Kò‹ôX]Y]	… JJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ã\Ÿ][ô‹…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	–YŸ[ôHH[Xúô]\…»JK[
+	⁄âÀ»^à	”õ›YöXÿpÈÌY\…»JWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ã[ô]…À€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	€õ›YöXÿ][€ãXY	»JHK	 »õ›YöXÿpÈË€… KBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–Hõ›YöXÿpÈË€»\\ôXŸHõ»[∞ÎX⁄[»€€Y[ùHòH]HX\òÿYHHÿZHH0ËH]X[ô»õÿÍà[ôXÿ\à]YHõ⁄HôZ]Kà»\›0Ï‹öX€»€€\]»\õX[ôXŸH\]ZKâ»JKBàããäõ›XŸ\Àõ[ô›»õ›XŸ\ÀõX\
+
+õ›XŸJHOà[
+	Ÿ]âÀ»€\‹ŒàKY]Z[Xÿ\ô	€õ›XŸKô€ôH»	»K\ô]ô\úŸY	»à	…ﬂX	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ãZ\›‹ûKZ][I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^àõ›XŸKù]H	”[Xúô]I»JK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	Ÿõ]]J	€õ›XŸKô]_ULéåå
+_I€õ›XŸKõõ›\»»0≠»	€õ›XŸKõõ›\ﬂXà	…ﬂXJWJKBà[
+	‹‹[âÀ»€\‹Œàõ›XŸKô€ôH»	‹KXòYŸI»à	‹KXòYŸHK]ÿ\õâÀ^àõ›XŸKô€ôH»	—ôZ]…»à	‘[ô[ùI»JKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ùõ›YöXÿ][€ä»ããõõ›XŸK€ôNà[õ›XŸKô€ôK€ôP]à[õ›XŸKô€ôH»õ›“\€ 
+Hà[ôYö[ôYJJHKõ›XŸKô€ôH»	‘ôXXúö\â»à	”X\òÿ\àôZ]… KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ‹[ì[Ÿ[
+»⁄[ôà	€õ›YöXÿ][€ãYY]	ÀYàõ›XŸKöYJHK	—Y]\â KBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà»Yà
+⁄[ô›Àò€€ôö\õJ	—[ùöX\à\›Hõ›YöXÿpÈË€»\òHH^Z\òO… JH›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKúô[[›ôSõ›YöXÿ][€äõ›XŸKöYõ›“\€ 
+JJN»HK	—^€Z\â KBàJKBàJJHàŸ[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[XHõ›YöXÿpÈË€»‹öXYKâ»JWJKBàJN√BüCBÉBìS—S÷…€õ›YöXÿ][€ãXY	◊HH
+›
+HOàõ›YöXÿ][€î⁄Y]
+›
+N√BìS—S÷…€õ›YöXÿ][€ãYY]	◊HH
+›[Ÿ[
+HOàõ›YöXÿ][€î⁄Y]
+››ú›‹ôKôŸ]
+	€õ›YöXÿ][€ú…À[Ÿ[öY
+JN√Bôù[ò›[€àõ›YöXÿ][€î⁄Y]
+›õ›XŸHHù[
+H√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	Ÿ]IÀò[YNàõ›XŸOÀô]HŸ^R[ú]
+
+K	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ãY]I»JN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]	À\Nà	›^	Àò[YNàõ›XŸOÀù]H	…ÀXŸZ€\éà	—^éà€€ôö\õX\à[ò€€Y[ôHHX\öXIÀ	Ÿ]K]\›Y	Œà	€õ›YöXÿ][€ã]]I»JN√Bà€€ú›õ›\»H[
+	›^\ôXIÀ»€\‹Œà	‹KZ[ú]	Àõ›‹Œà	Ã…Àò[YNàõ›XŸOÀõõ›\»	…ÀXŸZ€\éà	—][\»‹⁄[€òZ\…»JN√Bà€€ú›ÿ]ôHH
+
+HOà√BàYà
+Y]Kùò[YJH»]Kôõÿ›\ 
+N»ô]\õé»CBàYà
+]]Kùò[YKùö[J
+JH»]Kôõÿ›\ 
+N»ô]\õé»CBà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ùõ›YöXÿ][€ä»ããäõ›XŸHﬂJKYàõ›XŸOÀöY]ZY
+
+K]Nà]Kùò[YK]Nà]Kùò[YKùö[J
+Kõ›\Œàõ›\Àùò[YKùö[J
+H[ôYö[ôY€ôNàõ€€X[äõ›XŸOÀô€ôJK‹ôX]Y]àõ›XŸOÀò‹ôX]Y]õ›“\€ 
+HJJN√BàN√Bàô]\õà⁄Y]
+»]Nàõ›XŸH»	—Y]\àõ›YöXÿpÈË€…»à	”õ›òHõ›YöXÿpÈË€…Àõ›‹ŒàŸöY[
+	—]H[H]YH]ôH\\ôXŸ\âÀ]JKöY[
+	”[Xúô]IÀ]JKöY[
+	—][\…Àõ›\ WK€îÿ]ôNàÿ]ôKÿ]ôU\›Yà	€õ›YöXÿ][€ã\ÿ]ôI»JN√BüCBÉBôù[ò›[€à⁄‹[ô‘Ÿ][ô‹–ÿ\ô
+›
+H√Bà€€ú›]]€X]X»H[ùô[ù‹ûT›[[X\ûJ›ú›‹ôJKôö[\ä
+õ› HOàõ›Àõ›»	âà\õ›Àö[ô‹ôYY[ùú⁄‹[ô“Y[äN√Bà€€ú›X[ùX[H›ú›‹ôKú›]Kú⁄‹[ô“][\Àôö[\ä
+][JHOàZ][Kô€ôJKú€XŸJ
+Kú€‹ù
+
+KäHOà›ö[ô Kõò[YH	… Kõÿÿ[P€€\\ôJ›ö[ô ãõò[YH	… K	‹Pîâ JN√Bà€€ú›ò[YHH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]KY‹õ›…À\Nà	›^	ÀXŸZ€\éà	—^éà\[X[ùZYÿIÀ	Ÿ]K]\›Y	Œà	‹⁄‹[ôÀ[ò[YI»JN√Bà€€ú›]HH[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	›^	À[ú][ŸNà	ŸX⁄[X[	ÀXŸZ€\éà	‘]â»JN√Bà€€ú›[ö]H[
+	⁄[ú]	À»€\‹Œà	‹KZ[ú]K[ò\úõ›…À\Nà	›^	ÀXŸZ€\éà	›[ãŸ¯†)â»JN√Bà€€ú›YH
+
+HOà√BàYà
+[ò[YKùò[YKùö[J
+JH»ò[YKôõÿ›\ 
+N»ô]\õé»CBà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ù⁄‹[ô“][J»Yà]ZY
+
+Kò[YNàò[YKùò[YKùö[J
+K]NàX]õX^
+\úŸSù[J]Kùò[YJH
+H[ôYö[ôY[ö]à[ö]ùò[YKùö[J
+H[ôYö[ôY‹ôX]Y]àõ›“\€ 
+K€ôNàò[ŸHJJN√BàN√Bà€€ú›]]€X]X‘õ›‹»H]]€X]XÀõX\
+
+õ› HOà[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	‹⁄‹[ôÀX]]ÀZ][I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^àõ›Àö[ô‹ôYY[ùõò[YHJK[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à\›‹]YH	Ÿõ]ù[Jõ›Àò›\úô[ù
+_H	‹õ›Àö[ô‹ôYY[ùú›ÿ⁄’[ö]H0≠»pÎ[ö[[»	Ÿõ]ù[Jõ›ÀõZ[ö[][J_H	‹õ›Àö[ô‹ôYY[ùú›ÿ⁄’[ö]XJWJK[
+	‹‹[âÀ»€\‹Œà	‹KXòYŸHK]ÿ\õâÀ^à	—\›‹]YHòZ^…»JWJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKù\Ÿ\ù[ô‹ôYY[ù
+»ããúõ›Àö[ô‹ôYY[ù⁄‹[ô“Y[éàùYHJJHK	”ÿ›[\à\›H\›I KBàJJN√Bà€€ú›X[ùX[õ›‹»HX[ùX[õX\
+
+][JHOà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	‹⁄‹[ôÀ[X[ùX[Z][I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹›õ€ô…À»^à][Kõò[YHJK
+][Kú]H][Kù[ö]
+H	âà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à⁄][Kú]H	âàõ]ù[J][Kú]JK][Kù[ö]Kôö[\äõ€€X[äKöõ⁄[ä	»	 HJWKôö[\äõ€€X[äJKBà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›K\€IÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀõ]]]J
+›‹ôJHOà›‹ôKúô[[›ôT⁄‹[ô“][J][KöYõ›“\€ 
+JJHK	—^€Z\â KBàJJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	‹⁄‹[ôÀ\Ÿ][ô‹…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»KŸ[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	‘ô\‹⁄pÈË€»HX]\öXZ\…»JK[
+	⁄âÀ»^à	”\›HH€€\ò\…»JWJWJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	”»⁄\›[XH[ò€ZH]]€X]Xÿ[Y[ùH[ú›[[‹»]YH][ô⁄\ò[H»\›‹]YHpÎ[ö[[ÀàõÿÍà[X∞Í[HŸHX‹ô\ÿŸ[ù\à][ú»]úô\Àâ»JKBàããò]]€X]X‘õ›‹ÀBàããõX[ùX[õ›‹ÀBà
+X]]€X]X‘õ›‹Àõ[ô›	âà[X[ùX[õ›‹Àõ[ô›
+H	âà[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	”ô[ö[H][HY›X\ô[ô»€€\òKâ»JKBà[
+	⁄…À»€\‹Œà	‹KZ…À^à	–YX⁄[€ò\à][HX[ùX[	»JKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K€ò[YK]K[ö][
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ	Ÿ]K]\›Y	Œà	‹⁄‹[ôÀXY	À€ò€X⁄ŒàYK	–YX⁄[€ò\â WJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	–H\›H]]€pË]XÿH\ÿ\\ôXŸH]X[ô»H€€\òH[]òH»\›‹]YHX⁄[XH»pÎ[ö[[Ààÿ›[\à∞Ë€»[\òH»\›‹]YN»\[ò\»\‹[úÿH\]Y[H]ö\€Àâ»JKBàKôö[\äõ€€X[äJN√BüCBÉBôù[ò›[€àòX⁄›\ö[T›[\
+
+H√Bà€€ú›Hô]»]J
+N√Bàô]\õà	ŸôŸ]ù[YX\ä
+_KI‘›ö[ô ôŸ][€ù
+
+H
+»JKúY›\ù
+ã	Ã	 _KI‘›ö[ô ôŸ]]J
+JKúY›\ù
+ã	Ã	 _KI‘›ö[ô ôŸ]›\ú 
+JKúY›\ù
+ã	Ã	 _I‘›ö[ô ôŸ]Z[ù]\ 
+JKúY›\ù
+ã	Ã	 _I‘›ö[ô ôŸ]ŸX€€ô 
+JKúY›\ù
+ã	Ã	 _X√BüCBÉBôù[ò›[€àò\⁄[ô[
+›
+H√Bà€€ú›][\»H›ú›‹ôKòX›]ôUò\⁄
+
+N√Bà€€ú›\Sò[Y\»H√Bà[ô‹ôYY[ùŒà	“[ú›[[…ÀôX⁄\\Œà	‘ôXŸZ]IÀõŸX›Œà	‘õŸ]…À€Y[ùŒà	–€Y[ùIÀ[\ﬁYY\Œà	—ù[ò⁄[€∞Ë\ö[…À[ò€€Y[ô\Œà	—[ò€€Y[ôIÀBà€€X[ô\Œà	–€€X[ôIÀÿ]Y€‹öY\Œà	–ÿ]Y€‹öXIÀ›\Y\úŒà	—õ‹õôXŸY‹âÀÿ\⁄Xÿ€›[ùŒà	–€€ùHö[ò[òŸZ\òIÀBàö[ò[òŸU]\Œà	”[∞Èÿ[Y[ù»ö[ò[òŸZ\õ…À\ò⁄\Ÿ\Œà	–€€\òIÀõ›YöXÿ][€úŒà	”õ›YöXÿpÈË€…À⁄‹[ô“][\Œà	“][HH\›HH€€\ò\…ÀBàN√Bà€€ú›õ›‹»H][\ÀõX\
+
+][JHOà√Bà€€ú›ô[XZ[ö[ô»HX]õX^
+X]òŸZ[
+
+ô]»]J][Kô^\ô\–]
+KôŸ][YJ
+HH]Kõõ› 
+JH»ç
+JN√Bàô]\õà[
+	Ÿ]âÀ»€\‹Œà	‹KY]Z[Xÿ\ô	À	Ÿ]K]\›Y	Œà	›ò\⁄Z][I»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»K√Bà[
+	‹›õ€ô…À»^à][KõXô[][KúôX€‹ôYJKBà[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à	›\Sò[Y\÷⁄][Kò€€X›[€óH	‘ôY⁄\›õ…ﬂH0≠»^€pÎY»[H	Ÿõ]]U[YJ][Kô[]Y]
+_XJKBàJKBà[
+	‹‹[âÀ»€\‹Œàô[XZ[ö[ô»HH»	‹KXòYŸHK]ÿ\õâ»à	‹KXòYŸIÀ^àô[XZ[ö[ô»OOHH»	ÃHXHô\›[ùI»à	‹ô[XZ[ö[ôﬂHX\»ô\›[ù\ÿJKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›»KYõ‹õI»K√Bà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûHK\€IÀ	Ÿ]K]\›Y	Œà	›ò\⁄\ô\›‹ôIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀúô\›‹ôUò\⁄
+][KöY
+HK	‘ô\›]\ò\â KBàJKBàJN√BàJN√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	À	Ÿ]K]\›Y	Œà	›ò\⁄\[ô[	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KXÿ\ôXY	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹KY‹õ›…»KŸ[
+	‹‹[âÀ»€\‹Œà	‹KY^YXúõ›…À^à	‘õ›pÈË€»€€ùòH^€\ÌY\»X⁄Y[ùZ\…»JK[
+	⁄âÀ»^à^Z\òI⁄][\Àõ[ô›»
+	⁄][\Àõ[ô›JXà	…ﬂXJWJKBàJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘ôY⁄\›õ‹»^€pÎY‹»öXÿ[H\]ZH‹àÃX\»HŸ[HŸ\àô\›]\òY‹Àà\⁄\»\‹ŸHò^õÀ»€€ùpÓô»0ÍH[[Z[òY»]]€X]Xÿ[Y[ùKâ»JKBàããäõ›‹Àõ[ô›»õ›‹»àŸ[
+	‹	À»€\‹Œà	‹KY[\IÀ^à	–H^Z\òH\›0ËHò^öXKâ»JWJKBàJN√BüCBÉBìS—S÷…⁄[\‹ù^ﬁ	◊HH
+›JHOà[\‹ùﬁ⁄Y]
+›JN√BÉBãÀ»ô]öY]ÀXôYõ‹ôKX\Hõ‹àHﬁ[\‹ùà⁄›»⁄]⁄[ôH‹ôX]Y›\]Y
+»ÿ\õö[ô‹Œ»€€ôö\õCBãÀ»\Y\»
+ò[YKXò\ŸYY\ôŸKô]ô\à[]\ Kÿ[òŸ[\à\ÿÿ\ôÀÉBôù[ò›[€à[\‹ùﬁ⁄Y]
+›JH√Bà€€ú›»]Kô]öY]Àö[[ò[YHHHN√BàYà
+ô]öY]Àô\úõ‹äH√Bàô]\õà⁄Y]
+»]Nà	“[\‹ù\à[ö[IÀõ›‹ŒàŸ[
+	‹	À»€\‹Œà	‹K\›]\»KXòY	À^à	”∞Ë€»õ⁄H‹‹Î]ô[\àH[ö[Nà	»
+»ô]öY]Àô\úõ‹àJWHJN√BàCBà€€ú›[ôHH
+Xô[ HOà[
+	›âÀﬂKŸ[
+	›	À»^àXô[JK[
+	›	À»€\‹Œà	‹K[ù[IÀ^à	ÿÀõõ›õ‹ﬂHõ›õ  H0≠»	ÿÀò]H]X[^òY  XJWJN√Bà€€ú›õ›‹»H√Bà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à\ú]Z]õŒà	Ÿö[[ò[Y_Kà€€ôö\òH[ù\»H[\‹ù\à8†%Y\ÿ€H[‹»õ€Y\»H∞‡”»\YÿHòYH»]YH∞ËH^\›KòJKBà[
+	›XõIÀ»€\‹Œà	‹KZ›âÀ	Ÿ]K]\›Y	Œà	ﬁﬁ\ô]öY]…»K√Bà[ôJ	“[ú›[[‹…Àô]öY]Àö[ú›[[‹ K[ôJ	‘ôXŸZ]\…Àô]öY]ÀúôXŸZ]\ K[ôJ	‘õŸ]‹…Àô]öY]ÀúõŸ]‹ KBàJKBàô]öY]Àùÿ\õö[ô‹Àõ[ô›à	âà[
+	Ÿ]âÀﬂK√Bà[
+	⁄…À»€\‹Œà	‹KZ…À^à]ö\€‹»
+	‹ô]öY]Àùÿ\õö[ô‹Àõ[ô›JXJKBà[
+	›[	À»€\‹Œà	‹K[\›K]Y⁄	»Kô]öY]Àùÿ\õö[ô‹Àú€XŸJMJKõX\
+
+ HOà[
+	€IÀ»€\‹Œà	‹K[\›Z][I»K[
+	‹‹[âÀ»€\‹Œà	‹K[]]Y	À^à»JJJJKBàô]öY]Àùÿ\õö[ô‹Àõ[ô›àMH	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à8†)àHXZ\»	‹ô]öY]Àùÿ\õö[ô‹Àõ[ô›HM_KòJKBàKôö[\äõ€€X[äJKBàKôö[\äõ€€X[äN√Bàô]\õà⁄Y]
+√Bà]Nà	“[\‹ù\à[ö[IÀBàõ›‹ÀBà€îÿ]ôNà
+
+HOà›òX›[€úÀö[\‹ù\úŸY
+]JKBàÿ]ôU\›Yà	ﬁﬁX\IÀÿ]ôSXô[à	“[\‹ù\âÀBàJN√BüCBÉBôù[ò›[€à›€õÿYö[Jò[YK^Z[YHH	›^ﬁX[[	 H√Bà€€ú›\õHTìò‹ôX]SÿöôX›Tì
+ô]»õÿä›^K»\NàZ[YHJJN√Bà€€ú›HH[
+	ÿIÀ»ôYéà\õ›€õÿYàò[YHJN√Bàÿ›[Y[ùòõŸKò\[ô
+JN√BàKò€X⁄ 
+N√BàKúô[[›ôJ
+N√BàŸ][Y[›]
+
+
+HOàTìúô]õ⁄ŸSÿöôX›Tì
+\õ
+KL
+N√BüCBÉBôù[ò›[€àõ‹õﬁ[ô[
+›
+H√Bà€€ú›»[öŸYù\ﬁK›]\À\›ﬁ[ò–]\›òX⁄›\]ﬁ[ò—\úõ‹àHH›ùöY]Œ√Bàô]\õà[
+	‹ŸX›[€âÀ»€\‹Œà	‹KXÿ\ô	»K√Bà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[
+	‹›õ€ô…À»^à	—õ‹õﬁ	»JKBà[
+	‹‹[âÀ»€\‹Œà[öŸY»	‹KXòYŸHK[⁄…»à	‹KXòYŸIÀ^à[öŸY»	–€€ôX›Y…»à	”∞Ë€»€€ôX›Y…»JKBàJKBà[
+	Ÿ]âÀ»€\‹Œà	‹K\õ›…»K√Bà[öŸYBà»[
+	ÿù]€âÀ»€\‹Œà	‹KXùâÀ\ÿXõYàù\ﬁK€ò€X⁄Œà
+
+HOà›òX›[€úÀúﬁ[ò 
+HKù\ﬁH»	‘⁄[ò‹õ€ö^ò[ô¯†)â»à	‘⁄[ò‹õ€ö^ò\àY€‹òI CBàà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàK\ö[X\ûIÀ€ò€X⁄Œà
+
+HOà›òX›[€úÀò€€õôX›
+
+HK	–€€ôX›\à[»õ‹õﬁ	 KBà[öŸY	âà[
+	ÿù]€âÀ»€\‹Œà	‹KXùàKY⁄‹›	À€ò€X⁄Œà
+
+HOà›òX›[€úÀô\ÿ€€õôX›
+
+HK	—\ÿ€€ôX›\â KBàJKBà›]\»	âà[
+	‹	À»€\‹Œà	‹K\›]\…À^à›]\»JKBàÀ»ﬁ[ò»ù[ú»]]€X]Xÿ[H
+€àXúö\ã[»]Y\à[€À[»ÿZ\à»\
+Kà⁄›»H\›ô\›[€»CBàÀ»⁄[[ùòZ[\ôHÿ[â›YHH›[HòX⁄›\ÉBà[öŸY	âàﬁ[ò—\úõ‹ÉBà»[
+	‹	À»€\‹Œà	‹K\›]\»KXòY	»KŸ[
+	‹›õ€ô…À»^à	¯¶®òX⁄›\ŸH\›\à\ÿ]X[^òYÀà	»JK	‘Ÿ]\»Y‹»\›0Ë€»ÿ[õ‹»õ»\\ô[Œ»[ù\ô[[‹»⁄[ò‹õ€ö^ò\àHõ›õ»]]€X]Xÿ[Y[ùKâ◊JCBàà[öŸY	âà\›ﬁ[ò–]	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à⁄[ò‹õ€ö^òY»]]€X]Xÿ[Y[ùH0≠»0Óõ[XHô^à	Ÿõ]]U[YJ\›ﬁ[ò–]
+_KòJKBà\›òX⁄›\]	âà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à0Êõ[[»òX⁄›\^òH€€X⁄]Y»[H	Ÿõ]]U[YJ\›òX⁄›\]
+_KòJKBà[
+	‹	À»€\‹Œà	‹KZ[ù	À^à	‘Ÿ]\»Y‹»öXÿ[Hö[YZ\õ»ô\›H\\ô[Àà»õ‹õﬁX[ù0Í[H[XHÏ‹XH⁄[ò‹õ€ö^òYHH\õZ]HôX›\\ò\à‹»Y‹»[H›]õ»\\ô[Àâ»JKBàJN√BüCB

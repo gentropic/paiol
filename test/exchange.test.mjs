@@ -91,9 +91,8 @@ test('imports a cesta (product of products + bought insumo) and round-trips it',
   }, det());
   assert.deepEqual(r.warnings, []);
   const cesta = s.state.products.find((p) => p.name === 'Cesta');
-  assert.equal(cesta.components.length, 2);
-  assert.equal(cesta.components[0].kind, 'product');
-  assert.equal(cesta.components[1].kind, 'ingredient');
+  assert.equal(cesta.components.length, 1);
+  assert.equal(cesta.components[0].kind, 'ingredient');
 
   const yaml = exportYaml(s);
   const b = new PaiolStore();

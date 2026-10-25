@@ -89,7 +89,7 @@ export function monthSummary(store, month) {
 
   // Reference (accrual): what you sold/delivered this month, and what is still owed (current total).
   let faturado = recebidoVendas; // walk-up sales are also "faturado" in their month
-  for (const e of store.state.encomendas) if (!e.desistenciaAt && ym(e.deliveryDate) === month) faturado += e.total || 0;
+  for (const e of store.state.encomendas) if (!e.desistenciaAt && ym(e.quickSale ? e.at : e.deliveryDate) === month) faturado += e.total || 0;
   let aReceber = 0;
   for (const e of store.state.encomendas) {
     if (e.desistenciaAt) continue;
@@ -156,7 +156,7 @@ export function productSummary(store, month) {
     add(s.productId, s.qty, saleNet(s));
   }
   for (const e of store.state.encomendas) {
-    if (e.desistenciaAt || ym(e.deliveryDate) !== month) continue;
+    if (e.desistenciaAt || ym(e.quickSale ? e.at : e.deliveryDate) !== month) continue;
     for (const it of e.itens || []) for (const line of orderItemSaleLines(it)) add(line.productId, line.qty, line.total);
   }
   return [...map.entries()].map(([id, e]) => ({
@@ -169,7 +169,7 @@ export function productSummary(store, month) {
 export function clientSummary(store, month) {
   const map = new Map();
   for (const e of store.state.encomendas) {
-    if (e.desistenciaAt || ym(e.deliveryDate) !== month) continue;
+    if (e.desistenciaAt || ym(e.quickSale ? e.at : e.deliveryDate) !== month) continue;
     const key = e.clienteId || '__sem__';
     const c = map.get(key) || { total: 0, recebido: 0, n: 0 };
     c.total += e.total || 0; c.recebido += store.paidFor(e.id); c.n += 1;
@@ -273,7 +273,7 @@ export function businessPeriodSummary(store, start, end) {
       (sale.paymentFeePct ?? rates.paymentFeePct) + (sale.commissionPct ?? rates.commissionPct) + (sale.salesTaxPct ?? 0));
   }
   for (const order of store.state.encomendas) {
-    if (order.desistenciaAt || !inPeriod(order.deliveryDate, start, end)) continue;
+    if (order.desistenciaAt || !inPeriod(order.quickSale ? order.at : order.deliveryDate, start, end)) continue;
     const clientId = order.clienteId || '__sem__';
     const client = clients.get(clientId) || { id: clientId, orders: 0, total: 0 };
     client.orders += 1; client.total += Number(order.total) || 0; clients.set(clientId, client);
@@ -340,7 +340,7 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
 
   const rows = [];
   for (const e of store.state.encomendas) {
-    if (e.desistenciaAt || !inPeriod(e.deliveryDate, start, end)) continue;
+    if (e.desistenciaAt || !inPeriod(e.quickSale ? e.at : e.deliveryDate, start, end)) continue;
     const total = Number(e.total) || 0;
     const title = store.state.financeTitles.find((t) => t.sourceType === 'encomenda' && t.sourceId === e.id);
     const finance = title ? titleState(store, title) : null;
@@ -350,7 +350,7 @@ export function salesPeriodSummary(store, start, end, status = 'todos') {
     const paid = pending <= 0.005;
     if (status === 'recebidos' && !paid) continue;
     if (status === 'naorecebidos' && paid) continue;
-    rows.push({ kind: 'encomenda', id: e.id, at: e.deliveryDate, order: e, clientId: e.clienteId || '__sem__', total, received, discounted, pending, paid });
+    rows.push({ kind: 'encomenda', id: e.id, at: e.quickSale ? e.at : e.deliveryDate, order: e, clientId: e.clienteId || '__sem__', total, received, discounted, pending, paid });
   }
   for (const s of store.state.sales) {
     if (store.isReversed('sale', s.id) || !inPeriod(s.at, start, end) || status === 'naorecebidos') continue;

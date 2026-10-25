@@ -53,7 +53,9 @@ test('financial reconciliation preserves essential order and comanda data', () =
   const { updatedAt, ...savedOrder } = s.get('encomendas', 'e1');
   assert.ok(updatedAt);
   assert.deepEqual(savedOrder, order);
-  assert.deepEqual(s.get('comandas', '2026-07-20'), command);
+  const { updatedAt: comandaUpdatedAt, ...savedComanda } = s.get('comandas', '2026-07-20');
+  assert.ok(comandaUpdatedAt);
+  assert.deepEqual(savedComanda, command);
 });
 
 test('legacy data is upgraded without deleting existing operational collections', () => {

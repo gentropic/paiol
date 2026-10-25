@@ -26,6 +26,34 @@ test('empty state has all collections', () => {
   assert.ok(st.config.paymentMethods.some((method) => method.name === 'Pix' && method.active !== false));
 });
 
+test('clearing test orders and expenses keeps the catalog and audit history, without stale sync resurrection', () => {
+  const store = new PaiolStore();
+  store.upsertProduct({ id: 'p', name: 'Broinha', components: [] });
+  store.upsertEncomenda({ id: 'o', at: '2026-10-01T10:00:00.000Z', deliveryDate: '2026-10-02', total: 20, itens: [{ productId: 'p', qty: 1 }] });
+  store.upsertFinanceTitle({ id: 'r', direction: 'receber', sourceType: 'encomenda', sourceId: 'o', amount: 20 });
+  store.upsertFinanceTitle({ id: 'd', direction: 'pagar', sourceType: 'manual', amount: 10 });
+  store.addPayment({ id: 'pay', at: '2026-10-02T10:00:00.000Z', encomendaId: 'o', valor: 5 });
+  store.addDespesa({ id: 'exp', at: '2026-10-02T10:00:00.000Z', valor: 10 });
+  const before = store.clone();
+  let next = 0;
+  const result = store.clearOrdersAndExpenses('2026-10-25T12:00:00.000Z', () => `new-${++next}`);
+  assert.equal(result.orders, 1);
+  assert.equal(store.state.encomendas.length, 0);
+  assert.equal(store.state.products.length, 1);
+  assert.equal(store.activeTrash()[0].collection, 'encomendas');
+  assert.equal(store.isReversed('payment', 'pay'), true);
+  assert.equal(store.isReversed('despesa', 'exp'), true);
+  assert.ok(store.get('financeTitles', 'r').cancelledAt);
+  assert.ok(store.get('financeTitles', 'd').cancelledAt);
+  store.merge(before);
+  assert.equal(store.state.encomendas.length, 0);
+  assert.ok(store.get('financeTitles', 'r').cancelledAt);
+  assert.ok(store.get('financeTitles', 'd').cancelledAt);
+  const restored = PaiolStore.fromYaml(store.toYaml());
+  assert.equal(restored.state.encomendas.length, 0);
+  assert.equal(restored.isReversed('despesa', 'exp'), true);
+});
+
 test('upsert replaces by id; remove deletes', () => {
   const s = new PaiolStore();
   s.upsertIngredient({ id: 'a', name: 'A', stockUnit: 'kg' });

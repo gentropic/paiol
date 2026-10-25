@@ -24,7 +24,13 @@ const A4 = [595.28, 841.89];           // pt, portrait
 const M = 36;                          // margin
 const SLOT_H = (A4[1] - 2 * M) / 3;    // 3 fichas per page
 const money = (n) => 'R$ ' + (Number(n) || 0).toFixed(2).replace('.', ',');
-const trunc = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+// Standard PDF fonts use WinAnsi. Customer names copied from messaging apps may contain
+// invisible bidirectional controls (for example U+202A), which otherwise abort the PDF.
+const pdfText = (value) => String(value ?? '')
+  .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+  .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+  .replace(/[^\u0020-\u007e\u00a0-\u00ff\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u2014\u2018-\u201a\u201c-\u201e\u2020-\u2022\u2026\u2030\u2039-\u203a\u20ac\u2122]/g, '?');
+const trunc = (value, n) => { const s = pdfText(value); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
 /**
  * Build a PDF of client fichas, 3 per A4 page (print-cut-file). Each ficha: business header, client
@@ -329,7 +335,7 @@ export async function generateComandaPdf(spec) {
   for (const item of spec.production || []) {
     ensure(22);
     page.drawText(trunc(item.name, 54), { x: M, y, size: 10, font: bold, color: navy });
-    page.drawText(`previsto ${item.prevista}   produzido ${item.produzido}`, { x: A4[0] - 205, y, size: 9.5, font, color: soft });
+    page.drawText(`encomendado + avulso ${item.prevista}   produzido ${item.produzido}`, { x: A4[0] - 240, y, size: 9.5, font, color: soft });
     y -= 20;
   }
   if (!(spec.production || []).length) page.drawText('Sem itens de producao no periodo.', { x: M, y, size: 10, font, color: soft });
@@ -413,7 +419,7 @@ export async function generateClientStatementPdf(statement) {
 
     ensure(55);
     page.drawLine({ start: { x: M, y: y + 5 }, end: { x: right, y: y + 5 }, thickness: 0.5, color: line });
-    const kind = movement.type === 'purchase' ? 'COMPRA / ENCOMENDA' : 'LANÇAMENTO A RECEBER';
+    const kind = movement.type === 'purchase' ? (movement.description === 'Venda rápida' ? 'VENDA RÁPIDA' : 'COMPRA / ENCOMENDA') : 'LANÇAMENTO A RECEBER';
     page.drawText(`${ptDate(movement.at)}  ${kind}`, { x: M, y: y - 8, size: 9, font: bold, color: navy });
     rightText(page, money(movement.amount), right, y - 8, 10, bold, navy);
     y -= 22;

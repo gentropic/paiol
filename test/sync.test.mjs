@@ -80,6 +80,26 @@ test('a newer remote product edit still updates an older local copy', () => {
   assert.equal(local.get('products', 'pao').salePrice, 22);
 });
 
+test('stock, recipe yield and comanda edits survive a stale Dropbox snapshot', async () => {
+  const v = await remote();
+  const original = new PaiolStore({
+    ingredients: [{ id: 'flour', name: 'Farinha', stockUnit: 'kg', stockQty: 1, minStockQty: 1 }],
+    recipes: [{ id: 'bread', name: 'Broinha', yieldNominal: 10, yieldUnit: 'un', activeMinutes: 20, ovenMinutes: 20, components: [] }],
+    comandas: [{ id: '2026-10-25', date: '2026-10-25', itens: [{ productId: 'p1', realizado: 1 }] }],
+  });
+  await syncOnce(original, v);
+  const local = PaiolStore.fromYaml(original.toYaml());
+  local.upsertIngredient({ ...local.get('ingredients', 'flour'), stockQty: 5, minStockQty: 2 });
+  local.upsertRecipe({ ...local.get('recipes', 'bread'), yieldNominal: 12 });
+  local.upsertComanda({ ...local.get('comandas', '2026-10-25'), itens: [{ productId: 'p1', realizado: 4 }] });
+  await syncOnce(local, v);
+  const fresh = new PaiolStore(); await syncOnce(fresh, v);
+  assert.equal(fresh.get('ingredients', 'flour').stockQty, 5);
+  assert.equal(fresh.get('ingredients', 'flour').minStockQty, 2);
+  assert.equal(fresh.get('recipes', 'bread').yieldNominal, 12);
+  assert.equal(fresh.get('comandas', '2026-10-25').itens[0].realizado, 4);
+});
+
 test('saved Ajustes survive an older Dropbox copy and reach another device', async () => {
   const v = await remote();
   const old = new PaiolStore({ config: { valorHora: 30, empresa: { nome: 'Paiol antigo' } } });
