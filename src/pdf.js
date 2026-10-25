@@ -106,8 +106,8 @@ export async function generateReciboPdf(r) {
   const page = doc.addPage(A4);
   const right = A4[0] - M;
   const padL = M + 22, padR = right - 22;
-  const textW = (t, s, f = font) => f.widthOfTextAtSize(t, s);
-  const rightText = (t, x, y, s, f = font, color = fg) => page.drawText(t, { x: x - textW(t, s, f), y, size: s, font: f, color });
+  const textW = (t, s, f = font) => f.widthOfTextAtSize(pdfText(t), s);
+  const rightText = (t, x, y, s, f = font, color = fg) => page.drawText(pdfText(t), { x: x - textW(t, s, f), y, size: s, font: f, color });
 
   // Content is drawn first (tracking y); the framing rectangle is drawn LAST, sized to the content,
   // so a short recibo doesn't leave a big empty box.
@@ -133,7 +133,7 @@ export async function generateReciboPdf(r) {
   for (const ln of [emp.cnpj && `CNPJ ${emp.cnpj}`, emp.endereco, emp.telefone].filter(Boolean)) {
     page.drawText(trunc(ln, 84), { x: padL, y, size: 8.5, font, color: soft }); y -= 11;
   }
-  page.drawText(`Data: ${r.date}`, { x: padL, y: y - 2, size: 9, font, color: soft });
+  page.drawText(pdfText(`Data: ${r.date}`), { x: padL, y: y - 2, size: 9, font, color: soft });
   if (r.numero) rightText(r.numero, padR, y - 2, 9, font, soft);
   y -= 11;
   page.drawLine({ start: { x: padL, y }, end: { x: padR, y }, thickness: 2, color: terr });
@@ -167,7 +167,7 @@ export async function generateReciboPdf(r) {
   // Totals block.
   page.drawLine({ start: { x: padL, y: y + 4 }, end: { x: padR, y: y + 4 }, thickness: 0.5, color: line });
   y -= 12;
-  const kv = (label, val, b = false, color = fg) => { page.drawText(label, { x: padR - 200, y, size: 10, font: b ? bold : font, color }); rightText(val, padR, y, 10, b ? bold : font, color); y -= 16; };
+  const kv = (label, val, b = false, color = fg) => { page.drawText(pdfText(label), { x: padR - 200, y, size: 10, font: b ? bold : font, color }); rightText(val, padR, y, 10, b ? bold : font, color); y -= 16; };
   if (r.desconto > 0.005) { kv('Subtotal', money(r.subtotal)); kv('Desconto da venda', `- ${money(r.desconto)}`, false, rgb(0.18, 0.45, 0.20)); }
   if (r.total && Math.abs(r.total - r.pago) > 0.005) kv('Total do pedido', money(r.total));
   kv('Valor pago' + (r.forma ? ` (${r.forma})` : ''), money(r.pago), true);
@@ -216,13 +216,13 @@ export async function generateCommercialDocumentPdf(spec) {
   const right = A4[0] - M; const emp = spec.empresa || {};
   const isBudget = spec.type === 'orcamento'; const title = isBudget ? 'ORÇAMENTO' : 'RECIBO NÃO FISCAL';
   const ptDate = (value) => { const [yy, mm, dd] = String(value || '').slice(0, 10).split('-'); return yy && mm && dd ? `${dd}/${mm}/${yy}` : String(value || ''); };
-  const width = (text, size, face = font) => face.widthOfTextAtSize(String(text), size);
+  const width = (text, size, face = font) => face.widthOfTextAtSize(pdfText(text), size);
   let page; let y; let pageNo = 0; let logo = null;
   if (emp.logo) {
     try { logo = /^data:image\/jpe?g/i.test(emp.logo) ? await doc.embedJpg(emp.logo) : await doc.embedPng(emp.logo); }
     catch { logo = null; }
   }
-  const rightText = (text, valueY, size = 9, face = font, color = navy) => page.drawText(String(text), { x: right - width(text, size, face), y: valueY, size, font: face, color });
+  const rightText = (text, valueY, size = 9, face = font, color = navy) => page.drawText(pdfText(text), { x: right - width(text, size, face), y: valueY, size, font: face, color });
   const tableHeader = () => {
     page.drawRectangle({ x: M, y: y - 17, width: right - M, height: 22, color: rgb(0.95, 0.97, 0.96) });
     page.drawText('ITEM', { x: M + 7, y: y - 10, size: 8, font: bold, color: navy });
@@ -322,8 +322,8 @@ export async function generateComandaPdf(spec) {
   const newPage = () => {
     page = doc.addPage(A4); y = A4[1] - M;
     page.drawText('Quitutes do Paiol', { x: M, y: y - 12, size: 16, font: bold, color: navy });
-    page.drawText(`COMANDA DE PRODUCAO  ${spec.period || spec.date || ''}`, { x: M, y: y - 34, size: 10, font: bold, color: teal });
-    if (spec.generatedAt) page.drawText(`Gerada em ${spec.generatedAt}`, { x: A4[0] - M - 145, y: y - 34, size: 8, font, color: soft });
+    page.drawText(pdfText(`COMANDA DE PRODUCAO  ${spec.period || spec.date || ''}`), { x: M, y: y - 34, size: 10, font: bold, color: teal });
+    if (spec.generatedAt) page.drawText(pdfText(`Gerada em ${spec.generatedAt}`), { x: A4[0] - M - 145, y: y - 34, size: 8, font, color: soft });
     page.drawLine({ start: { x: M, y: y - 43 }, end: { x: A4[0] - M, y: y - 43 }, thickness: 2, color: teal });
     y -= 62;
   };
@@ -361,8 +361,8 @@ export async function generateClientStatementPdf(statement) {
   const good = rgb(0.18, 0.45, 0.20);
   const bad = rgb(0.70, 0.15, 0.12);
   const right = A4[0] - M;
-  const textWidth = (text, size, face = font) => face.widthOfTextAtSize(text, size);
-  const rightText = (page, text, x, y, size, face = font, color = navy) => page.drawText(text, { x: x - textWidth(text, size, face), y, size, font: face, color });
+  const textWidth = (text, size, face = font) => face.widthOfTextAtSize(pdfText(text), size);
+  const rightText = (page, text, x, y, size, face = font, color = navy) => page.drawText(pdfText(text), { x: x - textWidth(text, size, face), y, size, font: face, color });
   const ptDate = (value) => { const [y, m, d] = String(value || '').slice(0, 10).split('-'); return y && m && d ? `${d}/${m}/${y}` : ''; };
   const period = statement.start || statement.end
     ? `${statement.start ? ptDate(statement.start) : 'início'} até ${statement.end ? ptDate(statement.end) : 'hoje'}`
@@ -380,7 +380,7 @@ export async function generateClientStatementPdf(statement) {
     y -= 14;
     const contact = [statement.client?.phone, statement.client?.address].filter(Boolean).join(' - ');
     if (contact) { page.drawText(trunc(contact, 88), { x: M, y, size: 8.5, font, color: soft }); y -= 13; }
-    page.drawText(`Período: ${period}`, { x: M, y, size: 8.5, font, color: soft });
+    page.drawText(pdfText(`Período: ${period}`), { x: M, y, size: 8.5, font, color: soft });
     y -= 21;
   };
   const ensure = (height) => { if (!page || y - height < M + 24) newPage(); };
@@ -483,8 +483,8 @@ export async function generateDrePdf(dre) {
   const good = rgb(0.18, 0.45, 0.20); const bad = rgb(0.70, 0.15, 0.12);
   const right = A4[0] - M; let page; let y;
   const ptDate = (value) => { const [yy, mm, dd] = String(value || '').slice(0, 10).split('-'); return yy && mm && dd ? `${dd}/${mm}/${yy}` : ''; };
-  const width = (text, size, face = font) => face.widthOfTextAtSize(text, size);
-  const rightText = (text, valueY, size = 9, face = font, color = navy) => page.drawText(text, { x: right - width(text, size, face), y: valueY, size, font: face, color });
+  const width = (text, size, face = font) => face.widthOfTextAtSize(pdfText(text), size);
+  const rightText = (text, valueY, size = 9, face = font, color = navy) => page.drawText(pdfText(text), { x: right - width(text, size, face), y: valueY, size, font: face, color });
   const newPage = () => {
     page = doc.addPage(A4); y = A4[1] - M;
     page.drawText('Quitutes do Paiol', { x: M, y: y - 12, size: 15, font: bold, color: navy });
