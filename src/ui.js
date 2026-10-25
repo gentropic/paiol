@@ -42,7 +42,7 @@ const SECTIONS = [
 ];
 const SECTION_OF = {};
 for (const sec of SECTIONS) for (const [sid] of sec.screens) SECTION_OF[sid] = sec;
-for (const sid of ['fin-compras', 'fin-plano', 'fin-relatorios', 'precos', 'relatorios']) SECTION_OF[sid] = SECTIONS.find((s) => s.id === 'financeiro');
+for (const sid of ['fin-compras', 'fin-plano', 'fin-relatorios', 'fin-dre', 'precos', 'relatorios']) SECTION_OF[sid] = SECTIONS.find((s) => s.id === 'financeiro');
 
 // Built-in help (PT-BR, Nayara's voice). One friendly entry per screen + a few plain-language
 // concept answers. The ? button opens it with the current screen's topic expanded.
@@ -105,6 +105,10 @@ const HELP_SCREENS = [
   ] },
   { id: 'relatorios', icon: '📊', label: 'Relatórios', paras: [
     'Seu balanço por mês: faturamento, custos, taxas, lucro e margem, com gráfico e o resultado por produto. Dá pra exportar.',
+  ] },
+  { id: 'fin-dre', icon: '📈', label: 'DRE gerencial', paras: [
+    'Mostra receitas, custos e despesas pelo período a que pertencem, mesmo que ainda não tenham sido pagos ou recebidos. Escolha mês, ano ou datas específicas e gere o PDF A4.',
+    'Depois da limpeza dos registros de teste, períodos sem lançamentos aparecem zerados. A DRE gerencial não substitui a demonstração contábil formal.',
   ] },
   { id: 'simulador', icon: '⚖️', label: 'Simulador', paras: [
     'Faça contas de “e se…”. Escolha uma receita e veja o que acontece com o custo e a margem se você fizer um lote maior — os ingredientes crescem junto, mas a mão de obra costuma subir pouco, então o custo por unidade cai.',
@@ -276,7 +280,7 @@ export function renderApp(root, ctx) {
     precos: precosPanel, vendas: vendasPanel,
     encomendas: encomendasPanel, comanda: comandaPeriodPanel, fiado: fiadoPanel, financeiro: financeiroPanel, despesas: financeiroPanel, perdas: perdasPanel,
     'fin-inicio': financeHomePanel, 'fin-dashboard': financeDashboardPanel, 'fin-receber': financeReceivablePanel, 'fin-ficha': financeClientStatementPanel, 'fin-pagar': financePayablePanel,
-    'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel,
+    'fin-fluxo': financeCashFlowPanel, 'fin-documentos': financeCommercialDocumentsPanel, 'fin-compras': financePurchasesPanel, 'fin-plano': financeChartPanel, 'fin-relatorios': financeReportsPanel, 'fin-dre': financeDrePanel,
     relatorios: relatoriosPanel, simulador: simuladorPanel, ajustes: ajustesPanel,
   };
   const section = SECTION_OF[ctx.view.tab] || SECTIONS[0];
@@ -2934,7 +2938,7 @@ function financeHomePanel(ctx) {
       quick('▦', 'Dashboard', 'fin-dashboard', 'pa-fin-home-primary'), quick('↓', 'Contas a receber', 'fin-receber'), quick('👤', 'Ficha do cliente', 'fin-ficha'), quick('↑', 'Contas a pagar', 'fin-pagar'),
       quick('↔', 'Fluxo de caixa', 'fin-fluxo'), quick('＋', 'Lançamentos', 'financeiro'), quick('▤', 'Recibo / Orçamento', 'fin-documentos'),
       quick('🛒', 'Compras', 'fin-compras'), quick('☷', 'Plano de Contas', 'fin-plano'), quick('▥', 'Relatórios financeiros', 'fin-relatorios'),
-      quick('⌁', 'Relatório gerencial', 'relatorios'), quick('R$', 'Preços e custos', 'precos'), quick('≈', 'Simular preço', 'simulador'),
+      quick('📈', 'DRE gerencial', 'fin-dre'), quick('⌁', 'Relatório gerencial', 'relatorios'), quick('R$', 'Preços e custos', 'precos'), quick('≈', 'Simular preço', 'simulador'),
     ]),
   ]);
 }
@@ -3736,8 +3740,7 @@ function financeCashFlowPanel(ctx) {
 
 MODALS['dre-preview'] = (ctx, modal) => drePreviewSheet(ctx, modal);
 
-function drePreviewSheet(ctx, modal = {}) {
-  const start = modal.start || ctx.view.finStart; const end = modal.end || ctx.view.finEnd;
+function dreReportRows(ctx, start, end) {
   const dre = managerialDre(ctx.store, start, end);
   const line = (label, amount, options = {}) => el('tr', options.total ? { class: 'pa-kv-total' } : {}, [
     el('td', { class: options.detail ? 'pa-muted' : '', text: `${options.detail ? '— ' : ''}${label}` }),
@@ -3751,8 +3754,9 @@ function drePreviewSheet(ctx, modal = {}) {
     catch (error) { window.alert('Não foi possível gerar a DRE: ' + ((error && error.message) || error)); }
     finally { pdf.textContent = original; pdf.disabled = false; }
   });
-  return sheet({ title: 'DRE gerencial do período', rows: [
+  return [
     el('p', { class: 'pa-callout', text: `Competência de ${fmtDate(`${start}T12:00:00`)} até ${fmtDate(`${end}T12:00:00`)}. Valores quitados e pendentes entram integralmente; investimentos e transferências ficam fora.` }),
+    dre.grossRevenue === 0 && dre.directCosts === 0 && dre.operatingExpenses === 0 && el('p', { class: 'pa-empty', text: 'Nenhum registro financeiro neste período. Selecione outras datas para consultar a DRE.' }),
     el('table', { class: 'pa-kv pa-report', 'data-testid': 'dre-table' }, [
       line('Receita de vendas', dre.salesRevenue), line('Outras receitas operacionais', dre.otherRevenue), line('Receita operacional', dre.grossRevenue, { total: true }),
       ...dre.costRows.map((row) => line(row.name, row.amount, { detail: true, negative: true })), line('Custos diretos', dre.directCosts, { total: true, negative: true }),
@@ -3764,7 +3768,28 @@ function drePreviewSheet(ctx, modal = {}) {
     el('h3', { class: 'pa-h3', text: 'Diagnóstico automático' }), ...diagnosis,
     el('p', { class: 'pa-hint', text: 'Esta é uma DRE gerencial simplificada para decisão. Para obrigações fiscais e contábeis formais, valide a classificação com seu contador.' }),
     el('div', { class: 'pa-sheet-actions' }, [pdf]),
-  ] });
+  ].filter(Boolean);
+}
+
+function drePreviewSheet(ctx, modal = {}) {
+  const start = modal.start || ctx.view.finStart; const end = modal.end || ctx.view.finEnd;
+  return sheet({ title: 'DRE gerencial do período', rows: dreReportRows(ctx, start, end) });
+}
+
+function financeDrePanel(ctx) {
+  const { view } = ctx;
+  const start = view.finDreStart; const end = view.finDreEnd;
+  const preset = (key, label) => el('button', { class: `pa-chip${view.finDrePreset === key ? ' pa-chip-on' : ''}`, 'data-testid': `fin-dre-${key}`, onclick: () => {
+    if (key === 'personalizado') ctx.actions.setFinanceView({ finDrePreset: key });
+    else { const [s, e] = presetRange(key); ctx.actions.setFinanceView({ finDrePreset: key, finDreStart: s, finDreEnd: e }); }
+  } }, label);
+  return el('section', { class: 'pa-card' }, [
+    el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Resultado por competência' }), el('h2', { text: 'DRE gerencial' })])]),
+    el('p', { class: 'pa-hint', text: 'Veja receitas, custos e despesas do período, inclusive valores ainda a receber ou pagar. A DRE mede o resultado; o Fluxo de Caixa mostra quando o dinheiro entrou ou saiu.' }),
+    el('div', { class: 'pa-chiprow' }, [preset('hoje', 'Hoje'), preset('semana', 'Semana'), preset('mes', 'Mês'), preset('ano', 'Ano'), preset('personalizado', 'Período específico')]),
+    view.finDrePreset === 'personalizado' ? periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setFinanceView({ finDreStart: s, finDreEnd: e }), 'fin-dre-period') : el('p', { class: 'pa-hint', text: `Período selecionado: ${fmtDate(`${start}T12:00:00`)} até ${fmtDate(`${end}T12:00:00`)}` }),
+    ...(start > end ? [el('p', { class: 'pa-empty', text: 'A data inicial deve ser anterior ou igual à data final.' })] : dreReportRows(ctx, start, end)),
+  ]);
 }
 
 function financePurchasesPanel(ctx) {
