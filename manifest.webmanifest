@@ -1,6 +1,7 @@
 {
   "name": "Quitutes do Paiol",
   "short_name": "Paiol",
+  "id": "./",
   "description": "Custos, receitas e vendas da confeitaria — quanto custa, quanto cobrar, e se está lucrando.",
   "lang": "pt-BR",
   "dir": "ltr",

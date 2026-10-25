@@ -7205,7 +7205,7 @@ class DropboxAuthError extends Error {
 // Dropbox App Console; we pick by origin.
 
 const DROPBOX_APP_KEY = 'co3pz3u3sqx84m2';
-const APP_VERSION = '0.3.34';
+const APP_VERSION = '0.3.35';
 
 // Where Dropbox stores everything (App-folder app → relative to /Apps/Paiol/).
 const REMOTE_BUSINESS_PATH = '/business.yaml';
@@ -10074,6 +10074,32 @@ MODALS.help = (ctx) => {
   ];
 };
 
+MODALS['install-app'] = (ctx) => {
+  const instructions = [
+    ['Android', 'Abra o Paiol no Chrome. Toque em ⋮ e escolha “Instalar aplicativo” ou “Adicionar à tela inicial”. Confirme em Instalar.'],
+    ['iPhone ou iPad', 'Abra o Paiol no Safari. Toque em Compartilhar, depois “Adicionar à Tela de Início” e em Adicionar. Se aparecer “Abrir como app”, ative essa opção.'],
+    ['Computador', 'Abra o Paiol no Chrome ou Edge. Use o ícone de instalação na barra de endereços ou o menu ⋮ para instalar o site como aplicativo.'],
+  ];
+  const agent = navigator.userAgent;
+  const suggested = /iPhone|iPad|iPod/.test(agent) ? 'iPhone ou iPad' : /Android/.test(agent) ? 'Android' : 'Computador';
+  const address = 'https://gentropic.org/paiol/';
+  const copy = el('button', { class: 'pa-btn', type: 'button', 'data-testid': 'install-copy' }, 'Copiar endereço');
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(address); copy.textContent = 'Endereço copiado'; }
+    catch { window.prompt('Copie o endereço do Paiol:', address); }
+  });
+  return sheet({ title: 'Paiol na tela inicial', rows: [
+    el('p', { class: 'pa-hint', text: 'Instale um atalho com o ícone do Paiol para abrir o sistema sem procurar o link.' }),
+    ctx.view.install?.available && el('button', { class: 'pa-btn pa-primary', type: 'button', 'data-testid': 'install-native', onclick: () => void ctx.actions.installApp() }, 'Instalar aplicativo agora'),
+    el('p', { class: 'pa-hint', text: 'Se a opção de instalar não abrir aqui, use o navegador do seu aparelho:' }),
+    ...instructions.map(([label, steps]) => el('details', { class: 'pa-help-det', ...(label === suggested ? { open: 'open' } : {}) }, [
+      el('summary', { text: label }), el('p', { class: 'pa-help-p', text: steps }),
+    ])),
+    el('div', { class: 'pa-row pa-form' }, [el('a', { href: address, target: '_blank', rel: 'noopener', text: address }), copy]),
+    el('p', { class: 'pa-hint', text: 'Se você abrir em outro navegador, conecte o Dropbox em Ajustes para ver nele os mesmos dados.' }),
+  ].filter(Boolean) });
+};
+
 // ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
 
 const birthdayMatches = (birthday, date = todayInput()) => String(birthday || '').slice(5, 10) === String(date).slice(5, 10);
@@ -10206,6 +10232,11 @@ function inicioPanel(ctx) {
         el('button', { class: 'pa-btn', 'data-testid': 'home-comanda', onclick: () => ctx.actions.setTab('comanda') }, 'Comanda do dia'),
       ]),
       vazio && el('p', { class: 'pa-hint', text: 'Comece cadastrando seus insumos e receitas em Cadastro.' }),
+    ]),
+    !ctx.view.install?.installed && el('section', { class: 'pa-card', 'data-testid': 'home-install' }, [
+      el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Paiol na sua tela inicial' })]),
+      el('p', { class: 'pa-hint', text: 'Acesse o sistema pelo ícone, como um aplicativo.' }),
+      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-install-open', onclick: () => ctx.actions.openModal({ kind: 'install-app' }) }, 'Adicionar à tela inicial'),
     ]),
   ]);
 }
@@ -15244,6 +15275,51 @@ function registerGcuSw(opts = {}) {
 
 
 
+let pendingInstallPrompt = null;
+const installListeners = new Set();
+const notifyInstallChange = () => { for (const listener of installListeners) listener(); };
+
+// Capture this as soon as the module loads: IndexedDB boot and cloud sync may take longer
+// than the browser waits before offering its one-use installation prompt.
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  pendingInstallPrompt = event;
+  notifyInstallChange();
+});
+window.addEventListener('appinstalled', () => {
+  pendingInstallPrompt = null;
+  notifyInstallChange();
+});
+
+function installState() {
+  return {
+    available: !!pendingInstallPrompt,
+    installed: window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
+  };
+}
+
+function watchInstall(onChange) {
+  installListeners.add(onChange);
+  return () => installListeners.delete(onChange);
+}
+
+async function requestInstall() {
+  const prompt = pendingInstallPrompt;
+  if (!prompt) return 'unavailable';
+  try {
+    const opened = prompt.prompt(); // call directly within the user's click gesture
+    pendingInstallPrompt = null;
+    notifyInstallChange();
+    await opened;
+    const choice = await prompt.userChoice;
+    return choice?.outcome === 'accepted' ? 'accepted' : 'dismissed';
+  } catch {
+    pendingInstallPrompt = null;
+    notifyInstallChange();
+    return 'unavailable';
+  }
+}
+
 /**
  * Register the service worker and request persistent storage. No-op in local dev (a SW would cache
  * the shell and fight live-reload / the e2e harness, both on localhost). Safe everywhere else: the
@@ -15301,7 +15377,7 @@ async function boot(root) {
     finReportMode: 'realizado', finReportOpenPeriod: 'all', finReportDirection: 'todos', finReportCategoryId: '', finHideReversals: true,
     finDrePreset: 'mes', finDreStart: initialStart, finDreEnd: initialMonthEnd,
     finPartyId: '', finMethod: '', finTitleCategory: '', finStatementClientId: '',
-    modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
+    modal: null, updateReady: false, install: installState(), lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
   };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
@@ -15454,6 +15530,12 @@ async function boot(root) {
     },
     importFailed(msg) { view.status = `Falha ao importar: ${msg}`; rerender(); },
     applyUpdate() { if (sw) sw.applyUpdate(); }, // coordinated reload of all tabs onto the new shell
+    async installApp() {
+      const outcome = await requestInstall();
+      view.install = installState();
+      if (outcome === 'accepted') { view.modal = null; rerender(); }
+      else if (view.modal?.kind === 'install-app') rerenderModal();
+    },
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
       sync.cancel();
@@ -15496,6 +15578,12 @@ async function boot(root) {
     },
   };
 
+  watchInstall(() => {
+    view.install = installState();
+    if (view.install.installed && view.modal?.kind === 'install-app') view.modal = null;
+    rerender();
+    if (view.modal?.kind === 'install-app') rerenderModal();
+  });
   rerender();
 }
 

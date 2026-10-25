@@ -467,6 +467,32 @@ MODALS.help = (ctx) => {
   ];
 };
 
+MODALS['install-app'] = (ctx) => {
+  const instructions = [
+    ['Android', 'Abra o Paiol no Chrome. Toque em ⋮ e escolha “Instalar aplicativo” ou “Adicionar à tela inicial”. Confirme em Instalar.'],
+    ['iPhone ou iPad', 'Abra o Paiol no Safari. Toque em Compartilhar, depois “Adicionar à Tela de Início” e em Adicionar. Se aparecer “Abrir como app”, ative essa opção.'],
+    ['Computador', 'Abra o Paiol no Chrome ou Edge. Use o ícone de instalação na barra de endereços ou o menu ⋮ para instalar o site como aplicativo.'],
+  ];
+  const agent = navigator.userAgent;
+  const suggested = /iPhone|iPad|iPod/.test(agent) ? 'iPhone ou iPad' : /Android/.test(agent) ? 'Android' : 'Computador';
+  const address = 'https://gentropic.org/paiol/';
+  const copy = el('button', { class: 'pa-btn', type: 'button', 'data-testid': 'install-copy' }, 'Copiar endereço');
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(address); copy.textContent = 'Endereço copiado'; }
+    catch { window.prompt('Copie o endereço do Paiol:', address); }
+  });
+  return sheet({ title: 'Paiol na tela inicial', rows: [
+    el('p', { class: 'pa-hint', text: 'Instale um atalho com o ícone do Paiol para abrir o sistema sem procurar o link.' }),
+    ctx.view.install?.available && el('button', { class: 'pa-btn pa-primary', type: 'button', 'data-testid': 'install-native', onclick: () => void ctx.actions.installApp() }, 'Instalar aplicativo agora'),
+    el('p', { class: 'pa-hint', text: 'Se a opção de instalar não abrir aqui, use o navegador do seu aparelho:' }),
+    ...instructions.map(([label, steps]) => el('details', { class: 'pa-help-det', ...(label === suggested ? { open: 'open' } : {}) }, [
+      el('summary', { text: label }), el('p', { class: 'pa-help-p', text: steps }),
+    ])),
+    el('div', { class: 'pa-row pa-form' }, [el('a', { href: address, target: '_blank', rel: 'noopener', text: address }), copy]),
+    el('p', { class: 'pa-hint', text: 'Se você abrir em outro navegador, conecte o Dropbox em Ajustes para ver nele os mesmos dados.' }),
+  ].filter(Boolean) });
+};
+
 // ── Início (dashboard / cockpit) ─────────────────────────────────────────────────
 
 const birthdayMatches = (birthday, date = todayInput()) => String(birthday || '').slice(5, 10) === String(date).slice(5, 10);
@@ -599,6 +625,11 @@ function inicioPanel(ctx) {
         el('button', { class: 'pa-btn', 'data-testid': 'home-comanda', onclick: () => ctx.actions.setTab('comanda') }, 'Comanda do dia'),
       ]),
       vazio && el('p', { class: 'pa-hint', text: 'Comece cadastrando seus insumos e receitas em Cadastro.' }),
+    ]),
+    !ctx.view.install?.installed && el('section', { class: 'pa-card', 'data-testid': 'home-install' }, [
+      el('div', { class: 'pa-cardhead' }, [el('h2', { class: 'pa-grow', text: 'Paiol na sua tela inicial' })]),
+      el('p', { class: 'pa-hint', text: 'Acesse o sistema pelo ícone, como um aplicativo.' }),
+      el('button', { class: 'pa-btn pa-primary', 'data-testid': 'home-install-open', onclick: () => ctx.actions.openModal({ kind: 'install-app' }) }, 'Adicionar à tela inicial'),
     ]),
   ]);
 }

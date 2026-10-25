@@ -2,7 +2,7 @@
 // generating build script, or sw-core.js for engine changes. Do not hand-edit.
 const GCU_SW_CONFIG = {
   "app": "paiol",
-  "cache": "paiol-shell-v29",
+  "cache": "paiol-shell-v30",
   "precache": [
     "./",
     "./index.html",

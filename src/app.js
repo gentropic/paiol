@@ -6,7 +6,7 @@ import { loadStore, createDebouncedSaver, snapshotStore } from './persist.js';
 import { createSyncController, openDropboxVfs } from './sync.js';
 import { handleRedirectIfPresent, startDropboxLink, dropboxTokenManager, isLinked, forgetToken } from './auth-flow.js';
 import { renderApp, renderModal } from './ui.js';
-import { setupPwa } from './pwa.js';
+import { setupPwa, installState, watchInstall, requestInstall } from './pwa.js';
 import { importYaml, applyExchange } from './exchange.js';
 import { DEFAULT_CATEGORIES } from './store.js';
 import { ensureFinanceFoundation } from './finance.js';
@@ -36,7 +36,7 @@ export async function boot(root) {
     finReportMode: 'realizado', finReportOpenPeriod: 'all', finReportDirection: 'todos', finReportCategoryId: '', finHideReversals: true,
     finDrePreset: 'mes', finDreStart: initialStart, finDreEnd: initialMonthEnd,
     finPartyId: '', finMethod: '', finTitleCategory: '', finStatementClientId: '',
-    modal: null, updateReady: false, lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
+    modal: null, updateReady: false, install: installState(), lastSyncAt: null, syncError: null, backupBusy: false, lastBackupAt: null,
   };
 
   // 1. Complete an OAuth redirect if we just came back from Dropbox.
@@ -189,6 +189,12 @@ export async function boot(root) {
     },
     importFailed(msg) { view.status = `Falha ao importar: ${msg}`; rerender(); },
     applyUpdate() { if (sw) sw.applyUpdate(); }, // coordinated reload of all tabs onto the new shell
+    async installApp() {
+      const outcome = await requestInstall();
+      view.install = installState();
+      if (outcome === 'accepted') { view.modal = null; rerender(); }
+      else if (view.modal?.kind === 'install-app') rerenderModal();
+    },
     connect: () => startDropboxLink(),       // navigates away; nothing after resolves
     disconnect() {
       sync.cancel();
@@ -231,6 +237,12 @@ export async function boot(root) {
     },
   };
 
+  watchInstall(() => {
+    view.install = installState();
+    if (view.install.installed && view.modal?.kind === 'install-app') view.modal = null;
+    rerender();
+    if (view.modal?.kind === 'install-app') rerenderModal();
+  });
   rerender();
 }
 
