@@ -3352,32 +3352,50 @@ function clientStatementPaymentSheet(ctx, clientId) {
   const totalOpen = Math.round(openTitles.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
   const date = el('input', { class: 'pa-input', type: 'date', value: todayInput(), 'data-testid': 'client-payment-date' });
   const amount = moneyField(totalOpen || null, 'client-payment-amount');
+  const discount = moneyField(null, 'client-payment-discount');
   const method = paymentMethodSelect(store, 'client-payment-method');
   const account = el('select', { class: 'pa-input', 'data-testid': 'client-payment-account' }, accountOptions(store).map((a) => el('option', { value: a.id, text: a.name })));
   const notes = el('input', { class: 'pa-input', type: 'text', placeholder: 'Observação (opcional)' });
+  discount.input.addEventListener('input', () => {
+    const value = Math.max(0, parseNum(discount.input.value) || 0);
+    amount.input.value = fmtMoneyInput(Math.max(0, Math.round((totalOpen - value) * 100) / 100));
+    discount.input.setCustomValidity(''); amount.input.setCustomValidity('');
+  });
   amount.input.addEventListener('input', () => amount.input.setCustomValidity(''));
   function save() {
     const value = Math.round((parseNum(amount.input.value) || 0) * 100) / 100;
-    if (value <= 0) { amount.input.focus(); return; }
+    const discountValue = Math.round(Math.max(0, parseNum(discount.input.value) || 0) * 100) / 100;
+    if (value < 0 || (value <= 0 && discountValue <= 0)) { amount.input.focus(); return; }
     const latestOpen = store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyId === clientId && !t.cancelledAt)
       .map((title) => ({ title, balance: titleState(store, title).balance }))
       .filter((row) => row.balance > 0.005)
       .sort((a, b) => String(a.title.issuedAt || '').localeCompare(String(b.title.issuedAt || '')));
     const currentTotal = Math.round(latestOpen.reduce((sum, row) => sum + row.balance, 0) * 100) / 100;
-    if (value + 0.005 < currentTotal) {
-      amount.input.setCustomValidity(`Para quitar todas as faturas, informe pelo menos ${brl(currentTotal)}. Para uma fatura, use “Quitar esta fatura” na ficha.`);
+    if (discountValue > currentTotal + 0.005) {
+      discount.input.setCustomValidity('O desconto não pode ultrapassar o saldo total em aberto.'); discount.input.reportValidity(); return;
+    }
+    const due = Math.max(0, Math.round((currentTotal - discountValue) * 100) / 100);
+    if (value + 0.005 < due) {
+      amount.input.setCustomValidity(`Para quitar todas as faturas com esse desconto, informe pelo menos ${brl(due)}. Para uma fatura, use “Quitar esta fatura” na ficha.`);
       amount.input.reportValidity(); return;
     }
     const at = dateIso(date.value);
     ctx.actions.mutate((s) => {
       const paymentId = uuid();
-      const creditAmount = Math.max(0, Math.round((value - currentTotal) * 100) / 100);
-      s.addCashAdjustment({ id: paymentId, at, kind: 'client-payment', direction: 'entrada', clientId, amount: value, creditAmount, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Pagamento total de ${clientLabel(client)}` });
-      for (const row of latestOpen) s.addFinanceSettlement({ id: uuid(), at, titleId: row.title.id, amount: row.balance, kind: 'client-payment-allocation', paymentId, method: method.value, notes: 'Quitação pelo pagamento total do cliente' });
+      const creditAmount = Math.max(0, Math.round((value - due) * 100) / 100);
+      if (value > 0) s.addCashAdjustment({ id: paymentId, at, kind: 'client-payment', direction: 'entrada', clientId, amount: value, creditAmount, method: method.value, accountId: account.value || undefined, description: notes.value.trim() || `Pagamento total de ${clientLabel(client)}` });
+      let remainingDiscount = discountValue;
+      for (const row of latestOpen) {
+        const granted = Math.min(Math.round(row.balance * 100) / 100, remainingDiscount);
+        remainingDiscount = Math.round((remainingDiscount - granted) * 100) / 100;
+        if (granted > 0) s.addFinanceSettlement({ id: uuid(), at, titleId: row.title.id, amount: granted, kind: 'discount', notes: notes.value.trim() || 'Desconto na quitação total do cliente' });
+        const allocated = Math.round((row.balance - granted) * 100) / 100;
+        if (allocated > 0) s.addFinanceSettlement({ id: uuid(), at, titleId: row.title.id, amount: allocated, kind: 'client-payment-allocation', paymentId, method: method.value, notes: 'Quitação pelo pagamento total do cliente' });
+      }
     });
     if (ctx.view.tab !== 'fin-ficha') ctx.actions.openModal({ kind: 'client-statement', clientId });
   }
-  return sheet({ title: 'Registrar pagamento total', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. Registre um único recebimento para quitar todas as faturas em aberto. O excedente vira crédito para a próxima compra.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Total em aberto: ' }), el('strong', { text: brl(totalOpen) })]), field('Data', date), field('Valor recebido', amount), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
+  return sheet({ title: 'Registrar pagamento total', rows: [el('p', { class: 'pa-hint', text: `Cliente: ${clientLabel(client)}. Quite todas as faturas com um único recebimento. O desconto é aplicado primeiro às faturas mais antigas; o valor pago a mais vira crédito para a próxima compra.` }), el('div', { class: 'pa-callout' }, [el('span', { text: 'Total em aberto: ' }), el('strong', { text: brl(totalOpen) })]), field('Data', date), field('Desconto total concedido (opcional)', discount), field('Valor recebido de fato', amount), el('p', { class: 'pa-hint', text: 'Só o valor recebido entra no caixa. O desconto aparece na ficha do cliente e reduz a receita na DRE do período da concessão.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)], onSave: save, saveTestid: 'client-payment-save' });
 }
 
 function financeClientStatementPanel(ctx) {
@@ -3651,11 +3669,21 @@ function financeSettleSheet(ctx, id, fullOnly = false) {
   const isReceivable = title.direction === 'receber';
   const canCredit = isReceivable && title.partyId && ctx.store.get('clients', title.partyId);
   if (fullOnly) amount.input.readOnly = true;
+  if (fullOnly && isReceivable) discount.input.addEventListener('input', () => {
+    const requested = parseNum(discount.input.value);
+    const value = requested == null ? 0 : Math.max(0, requested);
+    amount.input.value = fmtMoneyInput(Math.max(0, Math.round((state.balance - value) * 100) / 100));
+    discount.input.setCustomValidity('');
+  });
   function save() {
-    const value = Math.max(0, parseNum(amount.input.value) || 0); const discountValue = isReceivable ? Math.max(0, parseNum(discount.input.value) || 0) : 0;
+    const value = Math.round(Math.max(0, parseNum(amount.input.value) || 0) * 100) / 100;
+    const discountValue = isReceivable ? Math.round(Math.max(0, parseNum(discount.input.value) || 0) * 100) / 100 : 0;
     const currentBalance = titleState(ctx.store, title).balance;
-    if (fullOnly && (Math.abs(value - currentBalance) > 0.005 || currentBalance <= 0.005)) {
-      amount.input.setCustomValidity('O saldo desta fatura mudou. Reabra a quitação para conferir o valor atual.'); amount.input.reportValidity(); return;
+    if (isReceivable && discountValue > currentBalance + 0.005) {
+      discount.input.setCustomValidity('O desconto não pode ultrapassar o saldo desta fatura.'); discount.input.reportValidity(); return;
+    }
+    if (fullOnly && (Math.abs(currentBalance - state.balance) > 0.005 || Math.abs(value + discountValue - currentBalance) > 0.005 || currentBalance <= 0.005)) {
+      discount.input.setCustomValidity('O saldo desta fatura mudou. Reabra a quitação para conferir o valor atual.'); discount.input.reportValidity(); return;
     }
     if (!fullOnly && (!(value + discountValue > 0) || discountValue > currentBalance + 0.005 || (!canCredit && value + discountValue > currentBalance + 0.005))) { amount.input.focus(); return; }
     ctx.actions.mutate((s) => {
@@ -3664,7 +3692,7 @@ function financeSettleSheet(ctx, id, fullOnly = false) {
       if (discountValue > 0) s.addFinanceSettlement({ id: uuid(), at: dateIso(date.value), titleId: title.id, amount: discountValue, kind: 'discount', notes: notes.value.trim() || 'Desconto concedido na quitação' });
     });
   }
-  return sheet({ title: fullOnly ? 'Quitar esta fatura' : isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && !fullOnly && field('Desconto concedido na quitação (opcional)', discount), isReceivable && !fullOnly && el('p', { class: 'pa-hint', text: canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save', saveLabel: fullOnly ? 'Quitar fatura' : undefined });
+  return sheet({ title: fullOnly ? 'Quitar esta fatura' : isReceivable ? 'Registrar recebimento' : 'Registrar pagamento', rows: [el('div', { class: 'pa-callout' }, [el('span', { text: 'Saldo atual ' }), el('strong', { text: brl(state.balance) })]), field('Data', date), isReceivable && field('Desconto concedido na quitação (opcional)', discount), field(isReceivable ? 'Valor recebido de fato' : 'Valor pago', amount), isReceivable && el('p', { class: 'pa-hint', text: fullOnly ? 'O valor recebido é o saldo menos o desconto. Apenas o recebido entra no caixa; o desconto aparece separadamente na ficha e na DRE do período em que foi concedido.' : canCredit ? 'O valor recebido entra no caixa. Se for maior que o saldo, o excedente vira crédito para a próxima compra. O desconto reduz apenas o saldo.' : 'O valor recebido entra no caixa. O desconto reduz apenas o saldo.' }), field('Forma', method), field('Conta financeira', account), field('Observação', notes)].filter(Boolean), onSave: save, saveTestid: 'fin-settle-save', saveLabel: fullOnly ? 'Quitar fatura' : undefined });
 }
 
 MODALS['finance-title-loss'] = (ctx, m) => financeTitleLossSheet(ctx, m.id);

@@ -37,7 +37,7 @@ export function managerialDre(store, start, end) {
   const revenue = new Map(); const costs = new Map(); const expenses = new Map(); const selling = new Map();
   const linkedSources = new Set();
   let salesRevenue = 0; let otherRevenue = 0; let directCosts = 0; let operatingExpenses = 0;
-  let salesDiscounts = 0; let salesReturns = 0; let salesTaxes = 0; let sellingExpenses = 0; let indirectCosts = 0; let clientLosses = 0;
+  let salesDiscounts = 0; let settlementDiscounts = 0; let salesReturns = 0; let salesTaxes = 0; let sellingExpenses = 0; let indirectCosts = 0; let clientLosses = 0;
   let missingMaterials = 0; let undeliveredSales = 0; let legacyCostEstimates = 0;
   let fixedExpenses = 0; let variableExpenses = 0; let excluded = 0; let unclassified = 0;
   let openReceivables = 0; let openPayables = 0; let overdueReceivables = 0;
@@ -81,11 +81,11 @@ export function managerialDre(store, start, end) {
     const order = title.sourceType === 'encomenda' ? store.get('encomendas', title.sourceId) : null;
     if (order && (order.desistenciaAt || !order.entregue)) { if (!order.desistenciaAt) undeliveredSales++; continue; }
     const state = titleState(store, title);
-    // A discount granted to a customer is contra-revenue, not a cash payment.
-    const settlementDiscount = title.direction === 'receber' ? Math.max(0, dreAmount(state.discounted)) : 0;
-    const amount = Math.max(0, dreAmount(title.amount) - settlementDiscount); const category = categoryOf(title.categoryId);
+    // The original sale belongs to its delivery period. A later settlement discount is
+    // recognized separately on the date it was granted, without moving cash.
+    const amount = Math.max(0, dreAmount(title.amount)); const category = categoryOf(title.categoryId);
     if (title.direction === 'receber' && (order || ['vendas', 'vendas-encomendas'].includes(category?.systemKey))) {
-      salesDiscounts += settlementDiscount + (order ? Math.max(0, orderGross(order) - dreAmount(title.amount)) : 0);
+      salesDiscounts += order ? Math.max(0, orderGross(order) - dreAmount(title.amount)) : 0;
     }
     const included = classify(title.direction, amount, category, title.description, title.sourceType);
     if (included) {
@@ -97,6 +97,12 @@ export function managerialDre(store, start, end) {
   }
 
   for (const settlement of store.state.financeSettlements) {
+    if (settlement.kind === 'discount' && !store.isReversed('financeSettlement', settlement.id)) {
+      const title = store.get('financeTitles', settlement.titleId);
+      const order = title?.sourceType === 'encomenda' ? store.get('encomendas', title.sourceId) : null;
+      const recognitionAt = order?.entregue && dreDay(settlement.at) < dreDay(order.deliveryDate) ? order.deliveryDate : settlement.at;
+      if (title?.direction === 'receber' && !title.cancelledAt && !order?.desistenciaAt && (!order || order.entregue) && dreInPeriod(recognitionAt, start, end)) settlementDiscounts += Math.max(0, dreAmount(settlement.amount));
+    }
     if (settlement.kind !== 'loss' || store.isReversed('financeSettlement', settlement.id) || !dreInPeriod(settlement.at, start, end)) continue;
     const title = store.get('financeTitles', settlement.titleId);
     if (title?.direction === 'receber' && !title.cancelledAt) classify('pagar', dreAmount(settlement.amount), store.state.categories.find((c) => c.systemKey === 'perdas-clientes'), `Perda com cliente · ${title.partyName || title.description}`, 'loss');
@@ -153,14 +159,14 @@ export function managerialDre(store, start, end) {
     else inventoryValue += row.current * Math.max(0, dreAmount(price));
   }
   directCosts += materialCosts + packagingCosts + depreciation.production;
-  const grossRevenue = salesRevenue + otherRevenue - salesReturns - salesTaxes;
+  const grossRevenue = salesRevenue + otherRevenue - settlementDiscounts - salesReturns - salesTaxes;
   const grossProfit = grossRevenue - directCosts;
   const netResult = grossProfit - operatingExpenses - sellingExpenses - depreciation.administration;
   const grossMarginPct = grossRevenue > 0 ? grossProfit / grossRevenue : null;
   const netMarginPct = grossRevenue > 0 ? netResult / grossRevenue : null;
   const diagnostics = [];
   const note = (tone, title, text) => diagnostics.push({ tone, title, text });
-  if (grossRevenue <= 0) note('warn', 'Sem receita no período', 'Não há vendas entregues ou outras receitas por competência. Confira as datas e categorias dos lançamentos.');
+  if (grossRevenue <= 0) note('warn', 'Sem receita líquida no período', 'Não houve receita líquida positiva neste período. Confira vendas entregues, descontos concedidos e outras receitas.');
   else {
     if (directCosts <= 0) note('warn', 'Custos de produção não informados', 'O resultado pode estar superestimado. Cadastre receitas, preços dos insumos e despesas de produção.');
     else if (directCosts / grossRevenue > 0.60) note('warn', 'Custos diretos elevados', `Os custos consomem ${Math.round((directCosts / grossRevenue) * 100)}% da receita. Revise compras, perdas, rendimento e preços.`);
@@ -182,7 +188,7 @@ export function managerialDre(store, start, end) {
 
   const rows = (map) => [...map.values()].sort((a, b) => b.amount - a.amount || a.name.localeCompare(b.name, 'pt-BR'));
   return {
-    start, end, salesRevenue, salesGross: salesRevenue + salesDiscounts, salesDiscounts, salesReturns, salesTaxes,
+    start, end, salesRevenue: salesRevenue - settlementDiscounts, salesGross: salesRevenue + salesDiscounts, salesDiscounts: salesDiscounts + settlementDiscounts, salesReturns, salesTaxes,
     otherRevenue, grossRevenue, directCosts, materialCosts, packagingCosts, productionDepreciation: depreciation.production,
     administrationDepreciation: depreciation.administration, inventoryValue, unpricedInventory, missingMaterials, legacyCostEstimates,
     grossProfit, sellingExpenses, indirectCosts, clientLosses,
@@ -191,4 +197,3 @@ export function managerialDre(store, start, end) {
     revenueRows: rows(revenue), costRows: rows(costs), sellingRows: rows(selling), expenseRows: rows(expenses),
   };
 }
-

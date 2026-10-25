@@ -53,3 +53,20 @@ test('a stock-only purchase does not enter Accounts Payable or the DRE', () => {
   assert.equal(dre.excluded, 130);
   assert.equal(store.state.financeTitles.length, 0);
 });
+
+test('a discount granted when settling an old customer invoice reduces revenue only in the grant period', () => {
+  const store = fixture();
+  const title = store.state.financeTitles.find((row) => row.sourceType === 'encomenda' && row.sourceId === 'order');
+  store.addFinanceSettlement({ id: 'discount-aug', at: '2026-08-03', titleId: title.id, amount: 10, kind: 'discount' });
+  store.addFinanceSettlement({ id: 'received-aug', at: '2026-08-03', titleId: title.id, amount: 90, kind: 'client-payment-allocation', paymentId: 'cash-aug' });
+  store.addCashAdjustment({ id: 'cash-aug', at: '2026-08-03', kind: 'client-payment', direction: 'entrada', clientId: 'client', amount: 90, creditAmount: 0 });
+  const july = managerialDre(store, '2026-07-01', '2026-07-31');
+  const august = managerialDre(store, '2026-08-01', '2026-08-31');
+  assert.equal(july.salesRevenue, 150);
+  assert.equal(july.salesDiscounts, 0);
+  assert.equal(august.salesGross, 0);
+  assert.equal(august.salesDiscounts, 10);
+  assert.equal(august.salesRevenue, -10);
+  assert.equal(august.grossRevenue, -10);
+  assert.equal(august.netResult, -10);
+});
