@@ -32,6 +32,10 @@ test('clearing test orders and expenses keeps the catalog and audit history, wit
   store.upsertEncomenda({ id: 'o', at: '2026-10-01T10:00:00.000Z', deliveryDate: '2026-10-02', total: 20, itens: [{ productId: 'p', qty: 1 }] });
   store.upsertFinanceTitle({ id: 'r', direction: 'receber', sourceType: 'encomenda', sourceId: 'o', amount: 20 });
   store.upsertFinanceTitle({ id: 'd', direction: 'pagar', sourceType: 'manual', amount: 10 });
+  store.upsertEncomenda({ id: 'old', at: '2026-09-01T10:00:00.000Z', deliveryDate: '2026-09-02', total: 9, itens: [] });
+  store.upsertFinanceTitle({ id: 'old-title', direction: 'receber', sourceType: 'encomenda', sourceId: 'old', amount: 9 });
+  store.addPayment({ id: 'old-pay', at: '2026-09-02T10:00:00.000Z', encomendaId: 'old', valor: 3 });
+  store.removeEncomenda('old', '2026-10-20T12:00:00.000Z');
   store.addPayment({ id: 'pay', at: '2026-10-02T10:00:00.000Z', encomendaId: 'o', valor: 5 });
   store.addDespesa({ id: 'exp', at: '2026-10-02T10:00:00.000Z', valor: 10 });
   const before = store.clone();
@@ -42,8 +46,10 @@ test('clearing test orders and expenses keeps the catalog and audit history, wit
   assert.equal(store.state.products.length, 1);
   assert.equal(store.activeTrash()[0].collection, 'encomendas');
   assert.equal(store.isReversed('payment', 'pay'), true);
+  assert.equal(store.isReversed('payment', 'old-pay'), true);
   assert.equal(store.isReversed('despesa', 'exp'), true);
   assert.ok(store.get('financeTitles', 'r').cancelledAt);
+  assert.ok(store.get('financeTitles', 'old-title').cancelledAt);
   assert.ok(store.get('financeTitles', 'd').cancelledAt);
   store.merge(before);
   assert.equal(store.state.encomendas.length, 0);

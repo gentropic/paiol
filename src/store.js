@@ -323,6 +323,7 @@ export class PaiolStore {
   clearOrdersAndExpenses(at = new Date().toISOString(), idFactory = () => crypto.randomUUID()) {
     const orders = this.state.encomendas.slice();
     const orderIds = new Set(orders.map((order) => order.id));
+    for (const item of this.state.trashItems) if (item.collection === 'encomendas' && item.status === 'deleted') orderIds.add(item.recordId);
     const cancelledTitles = this.state.financeTitles.filter((title) => title.direction === 'pagar'
       || (title.sourceType === 'encomenda' && orderIds.has(title.sourceId))
       || title.sourceType === 'sale');
