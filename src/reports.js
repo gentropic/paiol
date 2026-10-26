@@ -16,8 +16,16 @@ import { managerialDre } from './dre.js';
 import { bundleProductItems, isBundleProduct, orderItemGross, orderItemSaleLines, saleNet } from './bundles.js';
 import { titleState } from './finance.js';
 
-const ym = (iso) => String(iso || '').slice(0, 7); // 'YYYY-MM'
-const day = (iso) => String(iso || '').slice(0, 10);
+// User-entered dates are calendar dates; timestamped events use the user's local day.
+// Slicing a UTC timestamp makes sales after 21:00 in Brazil appear on the next day.
+const day = (iso) => {
+  const value = String(iso || '');
+  if (!value.includes('T')) return value.slice(0, 10);
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value.slice(0, 10);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+const ym = (iso) => day(iso).slice(0, 7); // 'YYYY-MM'
 const inPeriod = (iso, start, end) => (!start || day(iso) >= start) && (!end || day(iso) <= end);
 
 /**

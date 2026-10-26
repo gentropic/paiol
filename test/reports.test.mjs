@@ -165,3 +165,17 @@ test('salesPeriodSummary separates received, pending and desistências', () => {
   assert.equal(r.totalDesistencias, 30);
   assert.equal(r.cancellations[0].order.id, 'e2');
 });
+
+test('a late-night quick sale stays on the local calendar day in sales and cash reports', () => {
+  const s = fixture();
+  const at = new Date(2026, 9, 25, 22, 30).toISOString();
+  s.upsertEncomenda({
+    id: 'late-sale', at, deliveryDate: new Date(2026, 9, 27, 12).toISOString(),
+    quickSale: true, clienteId: 'c1', entregue: false,
+    itens: [{ productId: 'p1', qty: 1, unitPrice: 10 }], total: 10,
+  });
+  s.addPayment({ id: 'late-payment', at, encomendaId: 'late-sale', valor: 10 });
+  assert.ok(salesPeriodSummary(s, '2026-10-25', '2026-10-25').rows.some((row) => row.id === 'late-sale'));
+  assert.ok(!salesPeriodSummary(s, '2026-10-26', '2026-10-26').rows.some((row) => row.id === 'late-sale'));
+  assert.equal(monthSummary(s, '2026-10').recebidoPagamentos, 10);
+});

@@ -178,7 +178,13 @@ const productIsActive = (product) => !!product && product.active !== false;
 const todayInput = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const currentMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
 const monthLabel = (ym) => { const [y, m] = String(ym).split('-'); return `${m}/${(y || '').slice(2)}`; };
-const dateOnly = (iso) => String(iso || '').slice(0, 10);
+const dateOnly = (iso) => {
+  const value = String(iso || '');
+  if (!value.includes('T')) return value.slice(0, 10);
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value.slice(0, 10);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
 const inDateRange = (iso, start, end) => (!start || dateOnly(iso) >= start) && (!end || dateOnly(iso) <= end);
 
 function periodFields(start, end, onChange, prefix) {
@@ -4312,7 +4318,7 @@ function financeiroPanel(ctx) {
     if (st.kind === 'client-payment-allocation' || st.kind === 'credit') continue;
     const kind = store.get('categories', title.categoryId)?.nature;
     const discount = st.kind === 'discount'; const loss = st.kind === 'loss';
-    movements.push({ id: st.id, at: st.at, type: discount || loss ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: loss ? 'Perda com cliente' : discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.partyName || title.description, discount || loss ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount || loss });
+    movements.push({ id: st.id, at: st.at, type: discount || loss ? 'despesa' : title.direction === 'receber' ? 'receita' : kind === 'custo' ? 'custo' : 'despesa', label: loss ? 'Perda com cliente' : discount ? 'Desconto concedido na quitação' : (title.partyName || title.description), description: [title.description, discount || loss ? 'sem movimento de caixa' : st.method].filter(Boolean).join(' · '), amount: st.amount || 0, reversalKind: 'financeSettlement', reversed: store.isReversed('financeSettlement', st.id), noncash: discount || loss });
   }
   for (const title of store.state.financeTitles) {
     const state = titleState(store, title); if (title.cancelledAt || state.balance <= 0.005) continue;
@@ -4666,7 +4672,7 @@ function relatoriosPanel(ctx) {
   monthInput.addEventListener('change', () => ctx.actions.setReportMonth(monthInput.value || currentMonth()));
 
   const kv = (label, value, cls, bad) => el('tr', cls ? { class: cls } : {}, [el('td', { text: label }), el('td', { class: 'pa-num' + (bad ? ' pa-bad' : ''), text: value })]);
-  const empty = sum.recebido === 0 && sum.despesas === 0 && sum.faturado === 0;
+  const empty = sum.recebido === 0 && sum.despesas === 0 && sum.faturado === 0 && sum.perdas === 0;
 
   // The cash-basis result.
   const resultado = el('table', { class: 'pa-kv' }, [

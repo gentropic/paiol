@@ -45,6 +45,13 @@ test('loss is managerial and never creates a second cash movement', () => {
   assert.equal(cashMovements(s).some((m) => m.sourceId === 'loss'), false);
 });
 
+test('cash flow keeps a late-night movement on its local calendar day', () => {
+  const s = new PaiolStore();
+  s.addCashAdjustment({ id: 'late', at: new Date(2026, 9, 25, 22, 30).toISOString(), kind: 'adjustment', direction: 'entrada', amount: 17 });
+  assert.equal(cashFlow(s, '2026-10-25', '2026-10-25').totalIn, 17);
+  assert.equal(cashFlow(s, '2026-10-26', '2026-10-26').totalIn, 0);
+});
+
 test('financial reconciliation preserves essential order and comanda data', () => {
   const s = new PaiolStore();
   const order = { id: 'e1', at: '2026-07-01', deliveryDate: '2026-07-20', itens: [{ productId: 'p1', qty: 3, unitPrice: 10 }], total: 30, costSnapshot: 12, entregue: false };

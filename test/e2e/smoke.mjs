@@ -28,21 +28,21 @@ async function waitForServer(url, timeoutMs = 10_000) {
 // Navigate the bottom nav (+ segmented sub-nav) to a screen by its PT label.
 const SCREEN_SECTION = {
   Insumos: 'cadastro', Receitas: 'cadastro', Produtos: 'cadastro', Clientes: 'cadastro',
-  Comanda: 'producao', Vendas: 'pedidos', Encomendas: 'pedidos', Fiado: 'pedidos', Despesas: 'financeiro', Perdas: 'producao',
-  Preços: 'financeiro', Relatórios: 'financeiro', Simulador: 'financeiro',
+  Comanda: 'producao', Vendas: 'pedidos', Encomendas: 'pedidos', Fiado: 'financeiro', Despesas: 'financeiro', Perdas: 'producao',
+  Preços: 'financeiro', Relatórios: 'financeiro', Simulador: 'financeiro', Dashboard: 'financeiro', Plano: 'financeiro', Compras: 'financeiro', Pagar: 'financeiro',
   Ajustes: 'ajustes', Início: 'inicio',
 };
 const SCREEN_ID = {
   Insumos: 'insumos', Receitas: 'receitas', Produtos: 'produtos', Clientes: 'clientes', Comanda: 'comanda',
-  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fiado', Despesas: 'financeiro', Perdas: 'perdas',
-  Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Ajustes: 'ajustes', Início: 'inicio',
+  Vendas: 'vendas', Encomendas: 'encomendas', Fiado: 'fin-receber', Despesas: 'financeiro', Perdas: 'perdas',
+  Preços: 'precos', Relatórios: 'relatorios', Simulador: 'simulador', Dashboard: 'fin-dashboard', Plano: 'fin-plano', Compras: 'fin-compras', Pagar: 'fin-pagar', Ajustes: 'ajustes', Início: 'inicio',
 };
 async function goto(page, screen) {
   await page.locator(`.pa-navbtn[data-section="${SCREEN_SECTION[screen]}"]`).click();
   const seg = page.locator(`.pa-modulebtn[data-screen="${SCREEN_ID[screen]}"]`);
   if (await seg.count()) await seg.click();
   else {
-    const quickLabel = { 'Preços': 'Preços e custos', 'Relatórios': 'Relatório gerencial', 'Simulador': 'Simular preço' }[screen];
+    const quickLabel = { 'Preços': 'Preços e custos', 'Relatórios': 'Relatório gerencial', 'Simulador': 'Simular preço', 'Fiado': 'Contas a receber', 'Despesas': 'Lançamentos', 'Dashboard': 'Dashboard', 'Plano': 'Plano de Contas', 'Compras': 'Compras', 'Pagar': 'Contas a pagar' }[screen];
     if (quickLabel) {
       const quick = page.locator('.pa-fin-home-link').filter({ hasText: quickLabel });
       try { await quick.waitFor({ timeout: 5000 }); }
@@ -118,6 +118,28 @@ async function addVenda(page, { product, date, qty, price, canal } = {}) {
   if (canal) await page.fill('[data-testid="venda-canal"]', canal);
   await page.click('[data-testid="venda-add"]');
   await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+}
+
+async function downloadPdf(page, button) {
+  let alertMessage = '';
+  const onDialog = async (dialog) => { alertMessage = dialog.message(); await dialog.dismiss(); };
+  page.on('dialog', onDialog);
+  try {
+    const [download] = await Promise.all([page.waitForEvent('download'), page.click(button)]);
+    return download;
+  } catch (error) {
+    if (alertMessage) throw new Error(`PDF generation failed: ${alertMessage}`, { cause: error });
+    const state = await page.evaluate((selector) => ({
+      button: document.querySelector(selector)?.textContent,
+      disabled: document.querySelector(selector)?.disabled,
+      pdfLoaded: Boolean(window.PDFLib),
+      canShare: Boolean(navigator.canShare),
+      scripts: [...document.scripts].map((script) => script.src).filter((src) => src.includes('pdf')),
+    }), button).catch(() => ({}));
+    throw new Error(`PDF download did not start: ${JSON.stringify(state)}`, { cause: error });
+  } finally {
+    page.off('dialog', onDialog);
+  }
 }
 
 // Seed a fresh business (priced insumo → recipe with a component → product) for tests that need
@@ -712,31 +734,30 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Lote 1: log a venda with a chosen past date', async () => {
+  test('a venda rápida keeps its pickup date while reporting the sale today', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-05-15', qty: 1 });
-    await page.fill('[data-testid="venda-start"]', '2026-05-15');
-    await page.fill('[data-testid="venda-end"]', '2026-05-15');
     await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
-    // The chosen day appears on the row inside the filtered period report.
+    // This field now means pickup/delivery, not when the sale entered the register.
     assert.match(await page.locator('ul.pa-list.pa-rows .pa-row-item').first().textContent(), /15\/05\/2026/);
+    assert.match(await page.textContent('.pa-statgrid'), /Total vendidoR\$ [1-9]/);
     await page.close();
   });
 
-  test('Vendas gerencial: período narrows the report and totals', async () => {
+  test('Vendas gerencial: the period filters by sale date, independent of pickup', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { date: '2026-04-10', qty: 1 });
     await addVenda(page, { date: '2026-05-20', qty: 2 });
-    await page.fill('[data-testid="venda-start"]', '2026-04-01');
-    await page.fill('[data-testid="venda-end"]', '2026-05-31');
     await page.waitForFunction(() => document.querySelectorAll('ul.pa-list.pa-rows .pa-row-item').length === 2);
-    await page.fill('[data-testid="venda-start"]', '2026-05-01');
-    await page.waitForFunction(() => document.querySelectorAll('ul.pa-list.pa-rows .pa-row-item').length === 1);
     assert.match(await page.textContent('.pa-statgrid'), /Total vendido/);
+    await page.fill('[data-testid="venda-start"]', '2026-05-01');
+    await page.fill('[data-testid="venda-end"]', '2026-05-31');
+    await page.waitForFunction(() => document.querySelectorAll('ul.pa-list.pa-rows .pa-row-item').length === 0);
+    assert.match(await page.textContent('.pa-statgrid'), /R\$ 0,00/);
     await page.close();
   });
 
@@ -819,21 +840,19 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Rev 03: per-product margin override + insumo supplier & tags', async () => {
+  test('recipe margin and insumo supplier/tags persist', async () => {
     const page = await context.newPage();
     await seedBusiness(page); // product "Pãozinho" (priced via recipe Pão), insumo "Farinha"
 
-    // Give Pãozinho its own 50% margin + tags.
-    await goto(page, 'Produtos');
+    // Pricing inputs now live in the recipe; the catalog keeps the practiced sale price.
+    await goto(page, 'Receitas');
     await page.locator('.pa-row-item', { hasText: 'Pãozinho' }).click();
-    await page.waitForSelector('[data-testid="prod-save"]');
-    await page.fill('[data-testid="prod-margin"]', '50');
-    await page.fill('[data-testid="prod-tags"]', 'festa, top');
-    await page.click('[data-testid="prod-save"]');
+    await page.fill('[data-testid="rec-margin"]', '50');
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.click('[data-testid="rec-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-list'), /festa/); // tag chip on the row
 
-    // Preços reflects the per-product margin.
+    // Preços reflects the margin saved with the recipe.
     await goto(page, 'Preços');
     await page.waitForSelector('.pa-sub-card');
     assert.match(await page.textContent('.pa-card'), /margem 50% própria/);
@@ -844,6 +863,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('[data-testid="ins-save"]');
     await page.fill('[data-testid="ins-supplier"]', 'Atacadão');
     await page.fill('[data-testid="ins-tags"]', 'seco');
+    page.once('dialog', (dialog) => dialog.accept());
     await page.click('[data-testid="ins-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     assert.match(await page.textContent('.pa-list'), /Atacadão/);
@@ -879,17 +899,18 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
-  test('Lote 3: estorno preserves a sale in the desistências report', async () => {
+  test('desistência preserves a quick sale in the cancellation report', async () => {
     const page = await context.newPage();
     await seedBusiness(page);
     await goto(page, 'Vendas');
     await addVenda(page, { qty: 3 });
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
     const totalBefore = await page.textContent('.pa-statgrid');
-    await page.click('[data-testid="estornar"]');       // ↩ on the row
-    await page.click('[data-testid="confirm-yes"]');     // confirm sheet
+    await page.click('ul.pa-list.pa-rows .pa-row-item');
+    await page.click('[data-testid="enc-desistencia"]');
+    await page.click('[data-testid="confirm-yes"]');
     await page.click('[data-testid="venda-f-desistencias"]');
-    await page.waitForSelector('.pa-list-item');
+    await page.waitForSelector('ul.pa-list.pa-rows .pa-row-item');
     assert.match(await page.textContent('.pa-card'), /Total de desistências/);
     // Revenue total drops to zero in the regular report; cancellation remains auditable.
     await page.click('[data-testid="venda-f-todos"]');
@@ -913,29 +934,30 @@ describe('paiol UI smoke', () => {
     await page.click('[data-testid="cat-done"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
-    // Log a despesa under a seeded category.
-    await page.click('[data-testid="desp-new"]');
-    await page.waitForSelector('[data-testid="desp-add"]');
-    await page.selectOption('[data-testid="desp-cat"]', { label: 'Gás' });
-    await page.fill('[data-testid="desp-amount"]', '90');
-    await page.fill('[data-testid="desp-desc"]', 'botijão');
-    await page.click('[data-testid="desp-add"]');
+    // Lançamentos now creates a paid outgoing title rather than a legacy despesa event.
+    await page.click('[data-testid="fin-exit-new"]');
+    await page.waitForSelector('[data-testid="fin-title-save"]');
+    const categoryId = await page.locator('[data-testid="fin-title-category"] option').filter({ hasText: /Manutenção$/ }).last().getAttribute('value');
+    await page.selectOption('[data-testid="fin-title-category"]', categoryId);
+    await page.fill('[data-testid="fin-title-amount"]', '90');
+    await page.fill('[data-testid="fin-title-desc"]', 'Manutenção do forno');
+    await page.selectOption('[data-testid="fin-title-situation"]', 'quitado');
+    await page.click('[data-testid="fin-title-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-list'), /Gás/);
-    assert.match(await page.textContent('.pa-card'), /Total/);
+    assert.match(await page.textContent('.pa-list'), /Manutenção do forno/);
 
     // survives reload (persisted to IndexedDB)
     await page.waitForTimeout(1200);
     await page.reload({ waitUntil: 'networkidle' });
     await goto(page, 'Despesas');
-    assert.match(await page.textContent('.pa-list'), /Gás/, 'despesa did not persist');
+    assert.match(await page.textContent('.pa-list'), /Manutenção do forno/, 'despesa did not persist');
 
     // it flows into the cash-basis report (despesas por categoria + the variável total)
     await goto(page, 'Relatórios');
     await page.waitForSelector('.pa-kv');
     const rel = await page.textContent('.pa-card');
-    assert.match(rel, /Despesas variáveis/);
-    assert.match(rel, /Gás/);
+    assert.match(rel, /Despesas fixas/);
+    assert.match(rel, /Manutenção/);
     await page.close();
   });
 
@@ -1058,12 +1080,12 @@ describe('paiol UI smoke', () => {
     await page.click('[data-testid="enc-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
-    // Rev 07 #5: Fichas now open a PREVIEW first, then "Gerar PDF" downloads.
-    await goto(page, 'Fiado');
-    await page.waitForSelector('[data-testid="gerar-fichas"]');
-    await page.click('[data-testid="gerar-fichas"]');
+    // Pedidos lets us print selected clients for one delivery date.
+    await page.click('[data-testid="enc-fichas-dia"]');
+    await page.check('[data-testid="enc-fichas-all"]');
+    await page.click('[data-testid="enc-fichas-print"]');
     await page.waitForSelector('[data-testid="ficha-preview"]');
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="ficha-gerar"]')]);
+    const dl = await downloadPdf(page, '[data-testid="ficha-gerar"]');
     assert.match(dl.suggestedFilename(), /\.pdf$/);
     assert.equal((await readFile(await dl.path())).slice(0, 5).toString(), '%PDF-', 'not a valid PDF');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
@@ -1073,7 +1095,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('[data-testid="fichas-todas"]');
     await page.click('[data-testid="fichas-todas"]');
     await page.waitForSelector('[data-testid="ficha-preview"]');
-    const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="ficha-gerar"]')]);
+    const dl2 = await downloadPdf(page, '[data-testid="ficha-gerar"]');
     assert.match(dl2.suggestedFilename(), /^fichas-todas\.pdf$/);
     assert.equal((await readFile(await dl2.path())).slice(0, 5).toString(), '%PDF-', 'fichas-todas not a valid PDF');
     await page.close();
@@ -1112,7 +1134,7 @@ describe('paiol UI smoke', () => {
 
     await page.click('.pa-row-item');
     await page.waitForSelector('[data-testid="gerar-recibo"]');
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-recibo"]')]);
+    const dl = await downloadPdf(page, '[data-testid="gerar-recibo"]');
     assert.match(dl.suggestedFilename(), /^recibo-.*\.pdf$/);
     assert.equal((await readFile(await dl.path())).slice(0, 5).toString(), '%PDF-', 'recibo with logo not a valid PDF');
     await page.close();
@@ -1134,18 +1156,19 @@ describe('paiol UI smoke', () => {
     assert.match(await page.textContent('[data-testid="enc-total"]'), /20,00/);
     await page.click('[data-testid="enc-save"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
-    assert.match(await page.textContent('.pa-list'), /não pago/);
+    assert.match(await page.textContent('.pa-list'), /a pagar/);
 
-    // Fiado: R$20 to receive → register a R$8 partial.
+    // Contas a receber shows the full balance; the order accepts a partial payment.
     await goto(page, 'Fiado');
-    await page.waitForSelector('[data-testid="fiado-row"]');
     assert.match(await page.textContent('.pa-statgrid'), /20,00/);
-    await page.click('[data-testid="fiado-row"]');
-    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
+    await goto(page, 'Encomendas');
+    await page.click('.pa-row-item');
+    await page.click('[data-testid="enc-pagar"]');
     await page.waitForSelector('[data-testid="pag-add"]');
     await page.fill('[data-testid="pag-valor"]', '8');
     await page.click('[data-testid="pag-add"]');
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    await goto(page, 'Fiado');
     assert.match(await page.textContent('.pa-statgrid'), /12,00/, 'saldo not reduced by the payment');
 
     // The order's derived status is now "parcial".
@@ -1155,7 +1178,7 @@ describe('paiol UI smoke', () => {
     // A recibo (PDF) can be generated from the order once something is paid.
     await page.click('.pa-row-item');
     await page.waitForSelector('[data-testid="gerar-recibo"]');
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid="gerar-recibo"]')]);
+    const dl = await downloadPdf(page, '[data-testid="gerar-recibo"]');
     assert.match(dl.suggestedFilename(), /^recibo-.*\.pdf$/);
     const buf = await readFile(await dl.path());
     assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'recibo is not a valid PDF');
@@ -1175,11 +1198,17 @@ describe('paiol UI smoke', () => {
     await page.fill('[data-testid="enc-prodsearch"]', 'pão'); await page.click('[data-testid="enc-prodresult"]');
     await page.click('[data-testid="enc-save"]'); await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
-    // A Receber → tap the row → the payment sheet shows the client in destaque.
+    // A Receber → tap the client → the dedicated financial statement opens.
     await goto(page, 'Fiado');
-    await page.waitForSelector('[data-testid="fiado-search"]');     // #5 A-receber filter present
-    await page.click('[data-testid="fiado-row"]');
-    await page.getByRole('button', { name: 'Registrar pagamento' }).click();
+    await page.waitForSelector('[data-testid="fin-receber-client-balance"]');
+    await page.click('[data-testid="fin-receber-client-balance"]');
+    await page.waitForSelector('[data-testid="fin-client-statement-panel"]');
+    assert.match(await page.textContent('[data-testid="fin-client-statement-panel"]'), /Dona Márcia/);
+
+    // A partial payment is entered against this order.
+    await goto(page, 'Encomendas');
+    await page.click('.pa-row-item');
+    await page.click('[data-testid="enc-pagar"]');
     await page.waitForSelector('[data-testid="pag-cliente"]');
     assert.match(await page.textContent('[data-testid="pag-cliente"]'), /Dona Márcia/);
     await page.fill('[data-testid="pag-valor"]', '5');
@@ -1289,20 +1318,17 @@ describe('paiol UI smoke', () => {
     await goto(page, 'Insumos');
     await addInsumo(page, 'Açúcar para compra', 'kg');
 
-    await page.click('.pa-navbtn[data-section="financeiro"]');
-    await page.click('.pa-modulebtn[data-screen="fin-dashboard"]');
+    await goto(page, 'Dashboard');
     assert.equal(await page.locator('[data-testid="dashboard-profit-chart"]').count(), 1);
     assert.equal(await page.locator('[data-testid="dashboard-volume-chart"]').count(), 1);
-    await page.getByRole('button', { name: 'Plano de Contas', exact: true }).click();
+    await goto(page, 'Plano');
     await page.getByRole('button', { name: 'Fornecedores', exact: true }).click();
     await page.fill('[data-testid="supplier-name"]', 'Mercado Teste');
     await page.click('[data-testid="supplier-add"]');
     await page.locator('.pa-backdrop').click({ position: { x: 4, y: 4 } });
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
 
-    await page.click('.pa-navbtn[data-section="financeiro"]');
-    await page.click('.pa-modulebtn[data-screen="fin-dashboard"]');
-    await page.getByRole('button', { name: 'Compras', exact: true }).click();
+    await goto(page, 'Compras');
     await page.click('[data-testid="purchase-new"]');
     await page.selectOption('[data-testid="purchase-finance"]', 'nao');
     await page.fill('[data-testid="purchase-qty-0"]', '2');
@@ -1311,8 +1337,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('.pa-backdrop', { state: 'detached' });
     assert.match(await page.textContent('.pa-list'), /Somente estoque/);
 
-    await page.click('.pa-navbtn[data-section="financeiro"]');
-    await page.click('.pa-modulebtn[data-screen="fin-pagar"]');
+    await goto(page, 'Pagar');
     assert.match(await page.textContent('main'), /Nenhum título com este filtro/);
     await goto(page, 'Insumos');
     assert.match(await page.textContent('.pa-list'), /Estoque: 2 kg/);

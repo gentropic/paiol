@@ -3,7 +3,13 @@
 
 import { saleNet } from './bundles.js';
 
-const financeDay = (iso) => String(iso || '').slice(0, 10);
+const financeDay = (iso) => {
+  const value = String(iso || '');
+  if (!value.includes('T')) return value.slice(0, 10);
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value.slice(0, 10);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
 const localFinanceDay = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const financeNorm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const inRange = (iso, start, end) => (!start || financeDay(iso) >= start) && (!end || financeDay(iso) <= end);

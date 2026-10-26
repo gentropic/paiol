@@ -537,12 +537,14 @@ export async function generateDrePdf(dre) {
   return doc.save();
 }
 
-/** Save/share a generated PDF: native share on iOS where available, else a download. */
+/** Save/share a generated PDF: native share on mobile where available, else a download. */
 export async function savePdf(bytes, filename) {
   const blob = new Blob([bytes], { type: 'application/pdf' });
   try {
     const file = new File([blob], filename, { type: 'application/pdf' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+    const mobile = /Android|iP(hone|ad|od)/i.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (mobile && navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
   } catch { /* share cancelled/unsupported → fall through to download */ }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

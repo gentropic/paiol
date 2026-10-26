@@ -7,7 +7,13 @@ import { estimateLens, productBreakdown } from './cost-engine.js';
 import { inventorySummary } from './inventory.js';
 import { depreciationSummary } from './assets.js';
 
-const dreDay = (iso) => String(iso || '').slice(0, 10);
+const dreDay = (iso) => {
+  const value = String(iso || '');
+  if (!value.includes('T')) return value.slice(0, 10);
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value.slice(0, 10);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
 const dreInPeriod = (iso, start, end) => (!start || dreDay(iso) >= start) && (!end || dreDay(iso) <= end);
 const dreAmount = (value) => Number(value) || 0;
 
