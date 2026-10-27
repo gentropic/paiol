@@ -404,6 +404,9 @@ function clientLabel(client) {
   return client?.code ? `${client.code} · ${client.name}` : (client?.name || 'Cliente');
 }
 
+const comparePtNames = (a, b) => String(a || '').localeCompare(String(b || ''), 'pt-BR', { sensitivity: 'base' });
+const compareNamed = (a, b) => comparePtNames(a?.name, b?.name) || comparePtNames(a?.code, b?.code) || comparePtNames(a?.id, b?.id);
+
 function clientSearchText(client) {
   return [client?.name, client?.code, client?.phone, ...(client?.tags || [])].filter(Boolean).join(' ');
 }
@@ -645,7 +648,7 @@ function inicioPanel(ctx) {
 function insumosPanel(ctx) {
   const { store } = ctx;
   const semPreco = store.state.ingredients.filter((i) => store.currentPrice(i.id) == null).length;
-  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((ing) => insumoRow(ctx, ing)));
+  const list = el('ul', { class: 'pa-list pa-rows' }, store.state.ingredients.slice().sort(compareNamed).map((ing) => insumoRow(ctx, ing)));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
       el('h2', { class: 'pa-grow', text: 'Insumos' }),
@@ -827,7 +830,7 @@ function receitaSheet(ctx, recipe) {
   salesTax.placeholder = '0 = sem imposto percentual';
   // Component editor (insumos + other recipes, never itself).
   const options = [
-    ...store.state.ingredients.slice().sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
+    ...store.state.ingredients.slice().sort(compareNamed).map((i) => ({ kind: 'ingredient', id: i.id, label: `Insumo: ${i.name}`, unit: i.stockUnit })),
     ...store.state.recipes.filter((r) => !recipe || r.id !== recipe.id).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' })).map((r) => ({ kind: 'recipe', id: r.id, label: `Receita: ${r.name}`, unit: r.yieldUnit })),
   ];
   const refSel = el('select', { class: 'pa-input', 'data-testid': 'rec-compref' }, options.map((o, i) => el('option', { value: String(i), text: o.label })));
@@ -1075,7 +1078,7 @@ function produtoSheet(ctx, product) {
   const packagingItems = product ? (product.components || []).filter((c) => c.kind === 'ingredient').map((c) => ({ id: c.id, qty: Number(c.qty) || 0 })) : [];
   const packagingBox = el('div', { class: 'pa-detail-card' });
   const packagingList = el('ul', { class: 'pa-list pa-tight' });
-  const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
+  const packagingIngredient = el('select', { class: 'pa-input', 'data-testid': 'prod-bundle-insumo' }, store.state.ingredients.slice().sort(compareNamed).map((i) => el('option', { value: i.id, text: `${i.name} (${i.stockUnit})` })));
   const packagingQty = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'prod-bundle-insumo-qty', type: 'text', inputmode: 'decimal', placeholder: 'Qtd.' });
   const renderPackaging = () => packagingList.replaceChildren(...(packagingItems.length ? packagingItems.map((item, index) => {
     const ingredient = store.get('ingredients', item.id);
@@ -1152,7 +1155,7 @@ function unpricedInProduct(store, productId, seenP = new Set()) {
 function clientesPanel(ctx) {
   const { store } = ctx;
   const list = el('ul', { class: 'pa-list pa-rows' }, store.state.clients
-    .slice().sort((a, b) => norm(clientLabel(a)).localeCompare(norm(clientLabel(b))))
+    .slice().sort(compareNamed)
     .map((c) => clienteRow(ctx, c)));
   return el('section', { class: 'pa-card' }, [
     el('div', { class: 'pa-cardhead' }, [
@@ -2059,7 +2062,7 @@ function vendasPanel(ctx) {
     const update = () => {
       const query = norm(clientSearch.value);
       const showAll = !query || query === 'todos' || query === 'todas' || query.startsWith('todos os clientes');
-      const matches = showAll ? [] : store.state.clients.filter((c) => norm(clientLabel(c)).includes(query)).slice(0, 8);
+      const matches = showAll ? [] : store.state.clients.filter((c) => norm(clientSearchText(c)).includes(query)).sort(compareNamed).slice(0, 8);
       suggestions.replaceChildren(...(showAll ? [option('Todos os clientes', '')] : []), ...((!query || norm('Sem cliente / venda rápida').includes(query)) ? [option('Sem cliente / venda rápida', '__sem__')] : []), ...matches.map((c) => option(clientLabel(c), c.id)));
       suggestions.style.display = suggestions.childElementCount ? '' : 'none';
     };
@@ -2267,7 +2270,7 @@ function clientePicker(store, initialId, onChange = () => {}) {
     search.addEventListener('input', () => {
       const q = norm(search.value);
       if (!q) { results.style.display = 'none'; results.replaceChildren(); return; }
-      const matches = store.state.clients.filter((c) => !c.inactive && norm(clientSearchText(c)).includes(q)).slice(0, 6);
+      const matches = store.state.clients.filter((c) => !c.inactive && norm(clientSearchText(c)).includes(q)).sort(compareNamed).slice(0, 6);
       results.style.display = matches.length ? '' : 'none';
       results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'enc-cliente-result', onclick: () => { selected = c.id; render(); onChange(); } }, [el('div', { class: 'pa-grow' }, [el('strong', { text: clientLabel(c) }), tagChips(c.tags)].filter(Boolean)), el('span', { class: 'pa-add', text: '+' })])));
     });
@@ -2323,7 +2326,7 @@ function encomendasPanel(ctx) {
   const period = periodFields(start, end, ({ start: s, end: e }) => ctx.actions.setEncPeriod({ encStart: s, encEnd: e }), 'enc');
   const clientFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-client-filter' }, [
     el('option', { value: '', text: 'Todos os clientes', ...(!clientId ? { selected: 'selected' } : {}) }),
-    ...store.state.clients.slice().sort((a, b) => norm(clientLabel(a)).localeCompare(norm(clientLabel(b)))).map((c) => el('option', { value: c.id, text: clientLabel(c), ...(clientId === c.id ? { selected: 'selected' } : {}) })),
+    ...store.state.clients.slice().sort(compareNamed).map((c) => el('option', { value: c.id, text: clientLabel(c), ...(clientId === c.id ? { selected: 'selected' } : {}) })),
   ]);
   const productFilter = el('select', { class: 'pa-input', 'data-testid': 'enc-product-filter' }, [
     el('option', { value: '', text: 'Todos os produtos', ...(!productId ? { selected: 'selected' } : {}) }),
@@ -2408,7 +2411,7 @@ function encomendasFichasDiaSheet(ctx, modal) {
       ])]);
       check.addEventListener('change', () => { if (check.checked) selected.add(id); else selected.delete(id); updateSelection(); });
       return { client, check, label };
-    }).sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
+    }).sort((a, b) => compareNamed(a.client, b.client));
     list.replaceChildren(...(choices.length ? choices.map(({ label }) => label) : [el('p', { class: 'pa-empty', text: status.value === 'areceber' ? 'Nenhuma encomenda a receber nesta data.' : 'Nenhuma encomenda de cliente cadastrado nesta data.' })]));
     updateSearch();
     updateSelection();
@@ -2425,7 +2428,7 @@ function encomendasFichasDiaSheet(ctx, modal) {
   print.addEventListener('click', () => {
     if (!selected.size) return;
     const fichas = buildFichas(store, dayOrders.filter((order) => selected.has(order.clienteId)))
-      .sort((a, b) => norm(clientLabel(a.client)).localeCompare(norm(clientLabel(b.client)), 'pt-BR'));
+      .sort((a, b) => compareNamed(a.client, b.client));
     ctx.actions.openModal({ kind: 'ficha-preview', fichas, filename: `fichas-encomendas-${date.value}.pdf` });
   });
   renderClients();
@@ -3073,13 +3076,13 @@ function financeTitlePanel(ctx, direction) {
   const end = selectedPeriod === 'all' ? '' : direction === 'receber' ? ctx.view.finReceiveEnd || '' : ctx.view.finPayEnd || '';
   const receivedMethod = direction === 'receber' ? ctx.view.finMethod || '' : '';
   const parties = direction === 'receber' ? store.state.clients : store.state.suppliers;
-  const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name }]));
+  const partyMap = new Map(parties.map((p) => [p.id, { key: p.id, name: direction === 'receber' ? clientLabel(p) : p.name, sortName: p.name }]));
   for (const title of store.state.financeTitles.filter((t) => t.direction === direction && t.partyName)) {
     const origin = direction === 'receber' && title.partyType === 'origem';
     const key = origin ? `origin:${norm(title.partyName)}` : title.partyId || `name:${norm(title.partyName)}`;
-    if (!partyMap.has(key)) partyMap.set(key, { key, name: origin ? `Origem: ${title.partyName}` : title.partyName });
+    if (!partyMap.has(key)) partyMap.set(key, { key, name: origin ? `Origem: ${title.partyName}` : title.partyName, sortName: title.partyName });
   }
-  const partyChoices = [...partyMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  const partyChoices = [...partyMap.values()].sort((a, b) => comparePtNames(a.sortName, b.sortName));
   const personKey = (title) => title.partyType === 'origem' ? `origin:${norm(title.partyName || 'Sem origem')}` : `name:${norm(store.get('clients', title.partyId)?.name || title.partyName || 'Sem cliente')}`;
   const financeCategoryMap = new Map();
   if (direction === 'pagar') for (const title of store.state.financeTitles.filter((t) => t.direction === 'pagar' && !t.cancelledAt)) {
@@ -3248,7 +3251,7 @@ function commercialDocumentSheet(ctx, modal = {}) {
   const order = modal.orderId ? store.get('encomendas', modal.orderId) : null;
   const initialType = modal.type === 'recibo' ? 'recibo' : 'orcamento';
   const initialClientId = modal.clientId || order?.clienteId || '';
-  const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
+  const clients = store.state.clients.slice().sort(compareNamed);
   const type = el('select', { class: 'pa-input', 'data-testid': 'commercial-type' }, [
     el('option', { value: 'orcamento', text: 'Orçamento', ...(initialType === 'orcamento' ? { selected: 'selected' } : {}) }),
     el('option', { value: 'recibo', text: 'Recibo não fiscal', ...(initialType === 'recibo' ? { selected: 'selected' } : {}) }),
@@ -3474,7 +3477,7 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
     el('div', { class: 'pa-cardhead' }, [el('div', { class: 'pa-grow' }, [el('span', { class: 'pa-eyebrow', text: 'Clientes e receitas' }), el('h2', { text: clientId.startsWith('origin:') ? 'Ficha da origem' : 'Ficha do cliente' })]), el('button', { class: 'pa-btn pa-sm', onclick: () => ctx.actions.setTab('fin-receber') }, '← Contas a receber')]),
     ...rows,
   ]) : sheet({ title: clientId.startsWith('origin:') ? 'Ficha financeira da origem' : 'Ficha financeira do cliente', rows });
-  const clients = store.state.clients.slice().sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
+  const clients = store.state.clients.slice().sort(compareNamed);
   const namedParties = [...new Map(store.state.financeTitles.filter((t) => t.direction === 'receber' && t.partyType !== 'origem' && t.partyName && !t.cancelledAt && (!t.partyId || !store.get('clients', t.partyId))).map((t) => [`name:${norm(t.partyName)}`, t.partyName])).entries()]
     .filter(([key]) => !clients.some((c) => `name:${norm(c.name)}` === key))
     .map(([id, name]) => ({ id, name }));
@@ -3552,7 +3555,7 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
     const results = el('ul', { class: 'pa-list pa-tight pa-suggest', style: 'display:none' });
     search.addEventListener('input', () => {
       const query = norm(search.value);
-      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query)), ...originParties.filter((p) => norm(p.name).includes(query))].slice(0, 8) : [];
+      const matches = query ? [...clients.filter((c) => norm(clientSearchText(c)).includes(query)), ...namedParties.filter((p) => norm(p.name).includes(query)), ...originParties.filter((p) => norm(p.name).includes(query))].sort(compareNamed).slice(0, 8) : [];
       results.style.display = matches.length ? '' : 'none';
       results.replaceChildren(...matches.map((c) => el('li', { class: 'pa-row-item', 'data-testid': 'client-statement-suggestion', onclick: () => { if (inline) ctx.actions.setFinanceView({ finStatementClientId: c.id }); else { clientId = c.id; renderClientPicker(); renderStatement(); } } }, c.id.startsWith('origin:') ? `Origem: ${c.name}` : clientLabel(c))));
     });
@@ -3578,7 +3581,7 @@ function clientStatementSheet(ctx, modal = {}, inline = false) {
 
 function financeClientPicker(store, initialId = '', testid = 'fin-title-client') {
   const clients = store.state.clients.filter((client) => !client.inactive || client.id === initialId)
-    .sort((a, b) => clientLabel(a).localeCompare(clientLabel(b), 'pt-BR'));
+    .sort(compareNamed);
   let clientId = clients.some((client) => client.id === initialId) ? initialId : '';
   const picker = el('div', { class: 'pa-cli-picker', 'data-testid': testid });
   const render = () => {
@@ -3934,7 +3937,7 @@ function financePurchasesPanel(ctx) {
 
 MODALS['purchase-add'] = (ctx) => purchaseAddSheet(ctx);
 function purchaseAddSheet(ctx) {
-  const { store } = ctx; const suppliers = store.state.suppliers.filter((s) => !s.archived); const ingredients = store.state.ingredients;
+  const { store } = ctx; const suppliers = store.state.suppliers.filter((s) => !s.archived); const ingredients = store.state.ingredients.slice().sort(compareNamed);
   if (!suppliers.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre pelo menos um fornecedor antes da primeira compra.' }), el('button', { class: 'pa-btn pa-primary', onclick: () => ctx.actions.openModal({ kind: 'finance-suppliers' }) }, 'Cadastrar fornecedor')] });
   if (!ingredients.length) return sheet({ title: 'Nova compra', rows: [el('p', { class: 'pa-callout', text: 'Cadastre os insumos antes de registrar uma compra.' })] });
   const supplier = el('select', { class: 'pa-input', 'data-testid': 'purchase-supplier' }, suppliers.map((s) => el('option', { value: s.id, text: s.name })));
@@ -4615,7 +4618,7 @@ function perdaSheet(ctx) {
   };
   function fillRefs() {
     const k = kind.value;
-    const opts = k === 'insumo' ? store.state.ingredients : k === 'produto' ? store.state.products : [];
+    const opts = (k === 'insumo' ? store.state.ingredients : k === 'produto' ? store.state.products : []).slice().sort(compareNamed);
     refSel.replaceChildren(...opts.map((o) => el('option', { value: o.id, text: o.name })));
     const refable = k === 'insumo' || k === 'produto';
     refRow.style.display = refable ? '' : 'none';

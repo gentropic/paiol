@@ -237,6 +237,27 @@ describe('paiol UI smoke', () => {
     await page.close();
   });
 
+  test('insumos and clients are listed by name, regardless of client code or accents', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE);
+    await page.evaluate(() => new Promise((r) => { const q = indexedDB.deleteDatabase('paiol'); q.onsuccess = q.onerror = q.onblocked = () => r(); }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    for (const name of ['Zebra', 'Banana', 'Água']) await addInsumo(page, name, 'kg');
+    assert.deepEqual(await page.locator('.pa-list .pa-row-item strong').allTextContents(), ['Água', 'Banana', 'Zebra']);
+
+    await goto(page, 'Clientes');
+    for (const [name, code] of [['Zilda', '001'], ['Bruna', '002'], ['Ana', '999']]) {
+      await page.click('[data-testid="cli-new"]');
+      await page.fill('[data-testid="cli-name"]', name);
+      await page.fill('[data-testid="cli-code"]', code);
+      await page.click('[data-testid="cli-save"]');
+      await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+    }
+    assert.deepEqual(await page.locator('.pa-list .pa-row-item strong').allTextContents(), ['Ana', 'Bruna', 'Zilda']);
+    await page.close();
+  });
+
   test('a change is flushed to IndexedDB on page-hide (survives reload before the 800ms debounce)', async () => {
     const page = await context.newPage();
     await page.goto(BASE);
