@@ -7315,7 +7315,7 @@ class DropboxAuthError extends Error {
 // Dropbox App Console; we pick by origin.
 
 const DROPBOX_APP_KEY = 'co3pz3u3sqx84m2';
-const APP_VERSION = '0.3.42';
+const APP_VERSION = '0.3.43';
 
 // Where Dropbox stores everything (App-folder app → relative to /Apps/Paiol/).
 const REMOTE_BUSINESS_PATH = '/business.yaml';
@@ -14553,7 +14553,7 @@ function simuladorBody(ctx, recipe, config) {
   const production = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-production', type: 'text', inputmode: 'numeric', value: String(recipe.productionMinutes ?? ((Number(recipe.activeMinutes) || 0) + (Number(recipe.ovenMinutes) || 0))) });
   const active = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-active', type: 'text', inputmode: 'numeric', value: String(recipe.activeMinutes) });
   const oven = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-oven', type: 'text', inputmode: 'numeric', value: String(recipe.ovenMinutes) });
-  const packaging = moneyField(registeredExtras, 'sim-packaging');
+  const hasLegacyPackaging = (Number(product ? product.packagingCost : recipe.packagingCost) || 0) > 0;
   const initialMargin = product?.targetMarginPct ?? recipe.targetMarginPct ?? config.targetMarginPct;
   const targetMargin = el('input', { class: 'pa-input pa-narrow', 'data-testid': 'sim-margin', type: 'text', inputmode: 'decimal', value: String(pct(initialMargin)).replace('.', ',') });
   const initialPrice = product && product.salePrice != null && product.salePrice !== ''
@@ -14571,26 +14571,27 @@ function simuladorBody(ctx, recipe, config) {
     const a = parseNum(active.value) || 0;
     const o = parseNum(oven.value) || 0;
     const p = parseNum(price.input.value) || 0;
-    const extras = Math.max(0, parseNum(packaging.input.value) || 0);
     const target = Math.max(0, (parseNum(targetMargin.value) || 0) / 100);
     let simBreak;
     try { simBreak = simulateRecipeBreakdown(store, recipe.id, f, t, a, o, config); }
     catch (e) { results.replaceChildren(el('p', { class: 'pa-status', text: friendlyError(e) })); return; }
-    const simRecipeCost = breakdownTotal(simBreak);
     const baseYield = Number(recipe.yieldNominal) || 0;
     const simYield = baseYield * f;
     const baseProductUnits = recipeQty > 0 ? baseYield / recipeQty : 0;
     const simProductUnits = recipeQty > 0 ? simYield / recipeQty : 0;
-    const baseRecipeTotal = baseRecipeCost * baseYield;
-    const simRecipeTotal = simRecipeCost * simYield;
+    const baseRecipeTotal = (baseBreak.ingredients + baseBreak.gas + baseBreak.fixed) * baseYield;
+    const simRecipeTotal = (simBreak.ingredients + simBreak.gas + simBreak.fixed) * simYield;
+    const basePackagingTotal = (baseBreak.packaging || 0) * baseYield;
+    const simPackagingTotal = (simBreak.packaging || 0) * simYield;
     const baseIngredientsTotal = baseBreak.ingredients * baseYield;
     const simIngredientsTotal = simBreak.ingredients * simYield;
     const baseLaborIndicator = baseBreak.labor * baseYield;
     const simLaborIndicator = simBreak.labor * simYield;
-    // The recipe roll-up includes ingredients, gas, and proportional fixed costs. Add each
-    // sellable product's packaging/complements so the displayed batch total is fully loaded.
-    const baseTotalCost = baseRecipeTotal + registeredExtras * baseProductUnits;
-    const simTotalCost = simRecipeTotal + extras * simProductUnits;
+    // Keep stock-linked packaging separate from product extras and legacy monetary packaging.
+    const baseExtrasTotal = registeredExtras * baseProductUnits;
+    const simExtrasTotal = registeredExtras * simProductUnits;
+    const baseTotalCost = baseRecipeTotal + basePackagingTotal + baseExtrasTotal;
+    const simTotalCost = simRecipeTotal + simPackagingTotal + simExtrasTotal;
     const baseRevenue = basePrice * baseProductUnits;
     const simRevenue = p * simProductUnits;
     const totalProfit = (revenue, cost) => revenue - cost - revenue * salesRate;
@@ -14616,8 +14617,9 @@ function simuladorBody(ctx, recipe, config) {
       el('tr', {}, [el('td', { text: 'Unidades vendáveis deste lote' }), ...col(baseProductUnits, simProductUnits, (v) => fmtNum(v))]),
       el('tr', {}, [el('td', { text: 'Custo total dos ingredientes' }), ...col(baseIngredientsTotal, simIngredientsTotal, brl)]),
       el('tr', {}, [el('td', { text: 'Custo da receita (ingredientes, gás e fixos)' }), ...col(baseRecipeTotal, simRecipeTotal, brl)]),
-      el('tr', {}, [el('td', { text: 'Embalagem e complementos do lote' }), ...col(registeredExtras * baseProductUnits, extras * simProductUnits, brl)]),
-      el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Custo total da receita com embalagem' }), ...col(baseTotalCost, simTotalCost, brl)]),
+      el('tr', {}, [el('td', { text: 'Embalagens da receita (insumos vinculados)' }), ...col(basePackagingTotal, simPackagingTotal, brl)]),
+      baseExtrasTotal > 0.005 && el('tr', {}, [el('td', { text: 'Outros componentes do produto e custo antigo de embalagem' }), ...col(baseExtrasTotal, simExtrasTotal, brl)]),
+      el('tr', { class: 'pa-kv-total' }, [el('td', { text: 'Custo total do lote' }), ...col(baseTotalCost, simTotalCost, brl)]),
       el('tr', {}, [el('td', { text: 'Custo por produto (unidade vendida)' }), ...col(baseCostPerProduct, simCostPerProduct, brl)]),
       el('tr', {}, [explained('Mão de obra direta', 'minutos ativos × valor da hora; apenas indicador'), ...col(baseLaborIndicator, simLaborIndicator, brl)]),
       el('tr', {}, [el('td', { text: 'Preço de venda por produto' }), ...col(basePrice, p, brl)]),
@@ -14628,9 +14630,9 @@ function simuladorBody(ctx, recipe, config) {
       el('tr', {}, [el('td', { text: 'Lucro por produto' }), ...col(baseProfitPerProduct, simProfitPerProduct, brl)]),
       el('tr', {}, [el('td', { text: 'Lucro por hora de produção' }), ...col(profitHour(baseProfit, baseProductionMinutes), profitHour(simProfit, t), fmtHora)]),
       el('tr', { class: 'pa-kv-total' }, [explained('Preço para margem desejada', 'valor por produto para alcançar a meta acima'), el('td', { class: 'pa-num', text: baseTargetPrice == null ? 'Margem inválida' : brl(baseTargetPrice) }), el('td', { class: 'pa-num', text: targetPrice == null ? 'Margem inválida' : brl(targetPrice) })]),
-    ]), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simulação alcança a margem desejada com o preço informado.' : `A margem ficou abaixo da meta. Considere preço próximo de ${targetPrice == null ? '—' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
+    ].filter(Boolean)), el('p', { class: reachedTarget ? 'pa-status' : 'pa-callout', text: reachedTarget ? 'A simulação alcança a margem desejada com o preço informado.' : `A margem ficou abaixo da meta. Considere preço próximo de ${targetPrice == null ? '—' : brl(targetPrice)} ou reveja embalagem, rendimento e tempo.` }));
   }
-  [factor, production, active, oven, packaging.input, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
+  [factor, production, active, oven, targetMargin, price.input].forEach((i) => i.addEventListener('input', recompute));
   recompute();
 
   return el('div', {}, [
@@ -14640,9 +14642,11 @@ function simuladorBody(ctx, recipe, config) {
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Tempo total de produção do lote simulado (min)' }), production]),
     el('div', { class: 'pa-row pa-form' }, [el('span', { class: 'pa-lab', text: 'Minutos ativos do lote simulado' }), active, el('span', { class: 'pa-lab', text: 'Minutos de forno do lote simulado' }), oven]),
     el('p', { class: 'pa-hint', text: 'A escala aumenta ingredientes e rendimento, mas mantém os tempos cadastrados até você alterá-los acima. Se o lote maior exigir mais tempo, informe: tempo total para ratear custos fixos e calcular lucro por hora; minutos ativos de trabalho direto, inclusive embalar, para o indicador de mão de obra; minutos de forno para o gás. A mão de obra não é somada novamente ao custo, pois salários já entram nos custos fixos.' }),
-    el('div', { class: 'pa-filtergrid' }, [field('Embalagem e complementos por produto', packaging), field('Margem desejada no cenário (meta de lucro sobre a venda, em %)', targetMargin), field('Preço de venda para testar', price)]),
+    el('div', { class: 'pa-filtergrid' }, [field('Margem desejada no cenário (meta de lucro sobre a venda, em %)', targetMargin), field('Preço de venda para testar', price)]),
     el('p', { class: 'pa-hint', text: 'A coluna Atual usa os valores cadastrados e permanece fixa. A margem desejada altera o preço recomendado; o lucro do cenário depende do preço de venda informado. Lucro ou margem negativos indicam que este preço não cobre o custo e os percentuais de venda.' }),
-    el('p', { class: 'pa-hint', text: product ? 'Embalagem e complementos começam com a diferença entre o custo total do produto e a parte da receita. Você pode alterar livremente para comparar cenários.' : 'Esta receita ainda não está vinculada a um produto. Informe manualmente embalagem e preço para fazer a simulação.' }),
+    el('p', { class: 'pa-hint', text: 'O custo da embalagem vem dos insumos vinculados à receita e acompanha a quantidade simulada. Para testar outra embalagem, ajuste a receita; não é preciso digitar um valor separado aqui.' }),
+    hasLegacyPackaging && el('p', { class: 'pa-callout', text: 'Há um valor antigo de embalagem sem insumo vinculado. Ele continua no custo para não alterar o preço registrado. Para controlar o estoque, cadastre a embalagem em Insumos, adicione-a na Receita marcando “É embalagem” e salve; o valor antigo será zerado.' }),
+    !product && el('p', { class: 'pa-hint', text: 'Esta receita ainda não está vinculada a um produto. Informe o preço de venda para comparar o cenário.' }),
     el('p', { class: 'pa-hint', text: `Taxa de pagamento + comissão + imposto variável considerados nos dois cenários: ${pctStr(salesRate)}.` }),
     results,
   ]);

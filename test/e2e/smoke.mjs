@@ -577,7 +577,7 @@ describe('paiol UI smoke', () => {
     await page.waitForSelector('[data-testid="sim-production"]');
     assert.equal(await page.inputValue('[data-testid="sim-production"]'), '90');
     const results = await page.textContent('[data-testid="sim-results"]');
-    assert.match(results, /Custo total da receita/);
+    assert.match(results, /Custo total do lote/);
     assert.match(results, /Lucro total da receita/);
     assert.match(results, /Lucro por hora de produção/);
     await goto(page, 'Ajustes');
@@ -917,6 +917,40 @@ describe('paiol UI smoke', () => {
     const hora = grid.find((r) => /Lucro por hora/.test(r[0]));
     assert.ok(hora && hora[1] && hora[2], 'lucro/hora row present with both values');
     assert.ok(money(hora[2]) > money(hora[1]), `lucro/hora should rise (${hora[1]} → ${hora[2]})`);
+    await page.close();
+  });
+
+  test('simulator calculates packaging from stock-linked insumos without a manual packaging field', async () => {
+    const page = await context.newPage();
+    await page.goto(BASE);
+    await page.evaluate(() => new Promise((r) => { const q = indexedDB.deleteDatabase('paiol'); q.onsuccess = q.onerror = q.onblocked = () => r(); }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await goto(page, 'Insumos');
+    await addInsumo(page, 'Caixa', 'un', '2');
+    await goto(page, 'Receitas');
+    await page.click('[data-testid="rec-new"]');
+    await page.fill('[data-testid="rec-name"]', 'Doce na caixa');
+    await page.fill('[data-testid="rec-yield"]', '10');
+    await page.selectOption('[data-testid="rec-compref"]', { label: 'Insumo: Caixa' });
+    await page.fill('[data-testid="rec-compqty"]', '10');
+    await page.check('[data-testid="rec-comp-packaging"]');
+    await page.click('[data-testid="rec-compadd"]');
+    await page.locator('details').filter({ hasText: 'Custo antigo de embalagem sem insumo' }).locator('summary').click();
+    await page.fill('[data-testid="rec-pkg"]', '1,70');
+    await page.click('[data-testid="rec-save"]');
+    await page.waitForSelector('.pa-backdrop', { state: 'detached' });
+
+    await goto(page, 'Simulador');
+    await page.fill('[data-testid="sim-factor"]', '2');
+    assert.equal(await page.locator('[data-testid="sim-packaging"]').count(), 0);
+    const rows = await page.$$eval('[data-testid="sim-results"] tr', (items) => items.map((item) => [...item.querySelectorAll('td')].map((cell) => cell.textContent.trim())));
+    const money = (value) => Number(value.replace(/[^\d,]/g, '').replace(',', '.'));
+    const packaging = rows.find((row) => row[0] === 'Embalagens da receita (insumos vinculados)');
+    const recipeCost = rows.find((row) => row[0] === 'Custo da receita (ingredientes, gás e fixos)');
+    const total = rows.find((row) => row[0] === 'Custo total do lote');
+    assert.deepEqual(packaging.slice(1).map(money), [20, 40]);
+    assert.equal(rows.some((row) => row[0].startsWith('Outros componentes do produto')), false, 'legacy packaging was counted twice');
+    for (const column of [1, 2]) assert.ok(Math.abs(money(total[column]) - money(recipeCost[column]) - money(packaging[column])) < 0.011);
     await page.close();
   });
 
